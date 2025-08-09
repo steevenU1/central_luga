@@ -28,7 +28,7 @@ $stmt->close();
     <!-- LOGO -->
     <a class="navbar-brand d-flex align-items-center" href="panel.php">
       <img src="https://i.ibb.co/DDw7yjYV/43f8e23a-8877-4928-9407-32d18fb70f79.png" alt="Logo" width="35" height="35" class="me-2" style="object-fit: contain;">
-      <span>Central</span>
+      <span>Central2.0</span>
     </a>
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarMain">
