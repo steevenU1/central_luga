@@ -7,7 +7,7 @@ if (!isset($_SESSION['id_usuario'])) {
 
 include 'db.php';
 
-$idUsuario = $_SESSION['id_usuario'];
+$idUsuario  = $_SESSION['id_usuario'];
 $idSucursal = $_SESSION['id_sucursal'];
 $mensaje = '';
 
@@ -15,7 +15,6 @@ $mensaje = '';
    FUNCIONES AUXILIARES
 ========================= */
 
-// Obtener esquema vigente según fecha
 function obtenerEsquemaVigente($conn, $fechaVenta) {
     $sql = "SELECT * FROM esquemas_comisiones
             WHERE fecha_inicio <= ?
@@ -29,9 +28,7 @@ function obtenerEsquemaVigente($conn, $fechaVenta) {
     return $stmt->get_result()->fetch_assoc();
 }
 
-// Verificar cumplimiento de cuota semanal de sucursal
 function cumpleCuotaSucursal($conn, $idSucursal, $fechaVenta) {
-    // Buscar cuota vigente de la sucursal
     $sql = "SELECT cuota_monto
             FROM cuotas_sucursales
             WHERE id_sucursal=? AND fecha_inicio <= ?
@@ -42,22 +39,21 @@ function cumpleCuotaSucursal($conn, $idSucursal, $fechaVenta) {
     $row = $stmt->get_result()->fetch_assoc();
     $cuota = $row['cuota_monto'] ?? 0;
 
-    // Calcular total vendido de la semana
-    $inicioSemana = new DateTime($fechaVenta);
-    $diaSemana = $inicioSemana->format('N');
-    $dif = $diaSemana - 2; // martes=2
+    // Semana martes-lunes
+    $ini = new DateTime($fechaVenta);
+    $dif = $ini->format('N') - 2;
     if ($dif < 0) $dif += 7;
-    $inicioSemana->modify("-$dif days")->setTime(0,0,0);
-    $finSemana = clone $inicioSemana;
-    $finSemana->modify("+6 days")->setTime(23,59,59);
+    $ini->modify("-$dif days")->setTime(0,0,0);
+    $fin = clone $ini;
+    $fin->modify("+6 days")->setTime(23,59,59);
 
-    $sql2 = "SELECT SUM(precio_total) AS monto
-             FROM ventas_sims
-             WHERE id_sucursal=? AND fecha_venta BETWEEN ? AND ?";
-    $stmt2 = $conn->prepare($sql2);
-    $inicio = $inicioSemana->format('Y-m-d H:i:s');
-    $fin = $finSemana->format('Y-m-d H:i:s');
-    $stmt2->bind_param("iss", $idSucursal, $inicio, $fin);
+    $q = "SELECT SUM(precio_total) AS monto
+          FROM ventas_sims
+          WHERE id_sucursal=? AND fecha_venta BETWEEN ? AND ?";
+    $stmt2 = $conn->prepare($q);
+    $inicio = $ini->format('Y-m-d H:i:s');
+    $final  = $fin->format('Y-m-d H:i:s');
+    $stmt2->bind_param("iss", $idSucursal, $inicio, $final);
     $stmt2->execute();
     $row2 = $stmt2->get_result()->fetch_assoc();
     $monto = $row2['monto'] ?? 0;
@@ -65,39 +61,37 @@ function cumpleCuotaSucursal($conn, $idSucursal, $fechaVenta) {
     return $monto >= $cuota;
 }
 
-// Calcular comisión según tipo de SIM y esquema vigente
 function calcularComisionesSIM($esquema, $tipoSim, $tipoVenta, $cumpleCuota) {
-    $tipoSim = strtolower($tipoSim);
+    $tipoSim   = strtolower($tipoSim);
     $tipoVenta = strtolower($tipoVenta);
-
-    $columna = null;
+    $col = null;
 
     if ($tipoSim == 'bait') {
-        $columna = ($tipoVenta == 'portabilidad') 
+        $col = ($tipoVenta == 'portabilidad')
             ? ($cumpleCuota ? 'comision_sim_bait_port_con' : 'comision_sim_bait_port_sin')
             : ($cumpleCuota ? 'comision_sim_bait_nueva_con' : 'comision_sim_bait_nueva_sin');
     } elseif ($tipoSim == 'att') {
-        $columna = ($tipoVenta == 'portabilidad') 
+        $col = ($tipoVenta == 'portabilidad')
             ? ($cumpleCuota ? 'comision_sim_att_port_con' : 'comision_sim_att_port_sin')
             : ($cumpleCuota ? 'comision_sim_att_nueva_con' : 'comision_sim_att_nueva_sin');
     }
 
-    return (float)($esquema[$columna] ?? 0);
+    return (float)($esquema[$col] ?? 0);
 }
 
 /* =========================
    PROCESAR VENTA SIM
 ========================= */
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $idSim = (int)$_POST['id_sim'];
-    $tipoVenta = $_POST['tipo_venta'];
-    $tipoSim = $_POST['tipo_sim']; // Nuevo campo
-    $precio = (float)$_POST['precio'];
-    $comentarios = trim($_POST['comentarios']);
+    $idSim      = (int)$_POST['id_sim'];
+    $tipoVenta  = $_POST['tipo_venta'];
+    $precio     = (float)$_POST['precio'];
+    $comentarios= trim($_POST['comentarios']);
     $fechaVenta = date('Y-m-d');
 
-    // 1️⃣ Verificar que la SIM está disponible
-    $sql = "SELECT id, iccid FROM inventario_sims 
+    // 1) Verificar SIM y OBTENER operador DESDE INVENTARIO (ignorar POST)
+    $sql = "SELECT id, iccid, operador
+            FROM inventario_sims
             WHERE id=? AND estatus='Disponible' AND id_sucursal=?";
     $stmt = $conn->prepare($sql);
     $stmt->bind_param("ii", $idSim, $idSucursal);
@@ -108,18 +102,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!$sim) {
         $mensaje = '<div class="alert alert-danger">La SIM seleccionada no está disponible.</div>';
     } else {
-        // 2️⃣ Obtener esquema vigente y calcular comisiones
-        $esquema = obtenerEsquemaVigente($conn, $fechaVenta);
+        // Normalizar operador -> tipoSim que usa el esquema
+        $tipoSim = (strtoupper($sim['operador']) === 'ATT') ? 'ATT' : 'Bait';
+
+        // 2) Comisiones
+        $esquema     = obtenerEsquemaVigente($conn, $fechaVenta);
         $cumpleCuota = cumpleCuotaSucursal($conn, $idSucursal, $fechaVenta);
 
         $comisionEjecutivo = calcularComisionesSIM($esquema, $tipoSim, $tipoVenta, $cumpleCuota);
-        $comisionGerente = $comisionEjecutivo > 0 
+        $comisionGerente   = $comisionEjecutivo > 0
             ? ($cumpleCuota ? $esquema['comision_gerente_sim_con'] : $esquema['comision_gerente_sim_sin'])
             : 0;
 
-        // 3️⃣ Insertar en ventas_sims
-        $sqlVenta = "INSERT INTO ventas_sims 
-            (tipo_venta, tipo_sim, comentarios, precio_total, comision_ejecutivo, comision_gerente, id_usuario, id_sucursal, fecha_venta) 
+        // 3) Insertar venta
+        $sqlVenta = "INSERT INTO ventas_sims
+            (tipo_venta, tipo_sim, comentarios, precio_total, comision_ejecutivo, comision_gerente, id_usuario, id_sucursal, fecha_venta)
             VALUES (?,?,?,?,?,?,?,?,NOW())";
         $stmt = $conn->prepare($sqlVenta);
         $stmt->bind_param("sssddiii", $tipoVenta, $tipoSim, $comentarios, $precio, $comisionEjecutivo, $comisionGerente, $idUsuario, $idSucursal);
@@ -127,16 +124,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $idVenta = $stmt->insert_id;
         $stmt->close();
 
-        // 4️⃣ Insertar en detalle_venta_sims
+        // 4) Detalle
         $sqlDetalle = "INSERT INTO detalle_venta_sims (id_venta, id_sim, precio_unitario) VALUES (?,?,?)";
         $stmt = $conn->prepare($sqlDetalle);
         $stmt->bind_param("iid", $idVenta, $idSim, $precio);
         $stmt->execute();
         $stmt->close();
 
-        // 5️⃣ Actualizar inventario_sims
-        $sqlUpdate = "UPDATE inventario_sims 
-                      SET estatus='Vendida', id_usuario_venta=?, fecha_venta=NOW() 
+        // 5) Actualizar inventario
+        $sqlUpdate = "UPDATE inventario_sims
+                      SET estatus='Vendida', id_usuario_venta=?, fecha_venta=NOW()
                       WHERE id=?";
         $stmt = $conn->prepare($sqlUpdate);
         $stmt->bind_param("ii", $idUsuario, $idSim);
@@ -147,10 +144,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-// 🔹 Listar SIMs disponibles de la sucursal
-$sql = "SELECT id, iccid, caja_id, fecha_ingreso 
-        FROM inventario_sims 
-        WHERE estatus='Disponible' AND id_sucursal=? 
+// Listar SIMs disponibles (incluye operador)
+$sql = "SELECT id, iccid, caja_id, fecha_ingreso, operador
+        FROM inventario_sims
+        WHERE estatus='Disponible' AND id_sucursal=?
         ORDER BY fecha_ingreso ASC";
 $stmt = $conn->prepare($sql);
 $stmt->bind_param("i", $idSucursal);
@@ -173,26 +170,32 @@ $stmt->close();
     <h2>📱 Venta de SIM Prepago</h2>
     <?= $mensaje ?>
 
-    <form method="POST" class="card shadow p-3 mb-4">
+    <form method="POST" class="card shadow p-3 mb-4" id="formVentaSim">
         <div class="row mb-3">
-            <div class="col-md-3">
+            <!-- SIM -->
+            <div class="col-md-5">
                 <label class="form-label">SIM disponible</label>
-                <select name="id_sim" class="form-select" required>
+                <select name="id_sim" id="selectSim" class="form-select" required>
                     <option value="">-- Selecciona SIM --</option>
                     <?php while($row = $disponibles->fetch_assoc()): ?>
-                        <option value="<?= $row['id'] ?>">
-                            <?= $row['iccid'] ?> | Caja: <?= $row['caja_id'] ?> | Ingreso: <?= $row['fecha_ingreso'] ?>
+                        <option
+                            value="<?= $row['id'] ?>"
+                            data-operador="<?= htmlspecialchars($row['operador']) ?>"
+                        >
+                            <?= $row['iccid'] ?> | <?= $row['operador'] ?> | Caja: <?= $row['caja_id'] ?> | Ingreso: <?= $row['fecha_ingreso'] ?>
                         </option>
                     <?php endwhile; ?>
                 </select>
             </div>
-            <div class="col-md-2">
+
+            <!-- Tipo de SIM: SOLO LECTURA -->
+            <div class="col-md-3">
                 <label class="form-label">Tipo de SIM</label>
-                <select name="tipo_sim" class="form-select" required>
-                    <option value="Bait">Bait</option>
-                    <option value="ATT">AT&T</option>
-                </select>
+                <input type="text" id="tipoSimView" class="form-control" value="" readonly>
+                <!-- No hay campo editable; el backend no usa POST para esto -->
             </div>
+
+            <!-- Tipo de venta -->
             <div class="col-md-2">
                 <label class="form-label">Tipo de venta</label>
                 <select name="tipo_venta" class="form-select" required>
@@ -201,18 +204,41 @@ $stmt->close();
                     <option value="Regalo">Regalo (costo 0)</option>
                 </select>
             </div>
+
+            <!-- Precio -->
             <div class="col-md-2">
                 <label class="form-label">Precio venta</label>
                 <input type="number" step="0.01" name="precio" class="form-control" value="0" required>
             </div>
-            <div class="col-md-3">
+        </div>
+
+        <div class="row mb-3">
+            <div class="col-md-12">
                 <label class="form-label">Comentarios</label>
                 <input type="text" name="comentarios" class="form-control">
             </div>
         </div>
+
         <button type="submit" class="btn btn-success">Registrar Venta</button>
     </form>
 </div>
+
+<script>
+// Mostrar el operador del SIM elegido en el campo de solo lectura
+(function(){
+    const selectSim   = document.getElementById('selectSim');
+    const tipoSimView = document.getElementById('tipoSimView');
+
+    function showOperador(){
+        const op = selectSim.options[selectSim.selectedIndex];
+        const operador = (op && op.dataset.operador) ? op.dataset.operador.trim() : '';
+        tipoSimView.value = operador || '';
+    }
+
+    showOperador();
+    selectSim.addEventListener('change', showOperador);
+})();
+</script>
 
 </body>
 </html>

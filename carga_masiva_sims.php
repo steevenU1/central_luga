@@ -11,51 +11,79 @@ include 'db.php';
 $idEulalia = 0;
 $resEulalia = $conn->query("SELECT id FROM sucursales WHERE nombre='Eulalia' LIMIT 1");
 if ($resEulalia && $rowE = $resEulalia->fetch_assoc()) {
-    $idEulalia = $rowE['id'];
+    $idEulalia = (int)$rowE['id'];
 }
 
 $msg = '';
 $previewData = [];
 
+/**
+ * Normaliza el operador del CSV a uno de los permitidos: 'Bait' o 'AT&T'.
+ * Acepta variantes como 'att', 'AT T', 'AT&T ' (con espacios).
+ * Devuelve [operadorNormalizado, esValido(bool)]
+ */
+function normalizarOperador(string $opRaw): array {
+    $op = strtoupper(trim($opRaw));
+    // quitar espacios internos para validar 'AT T'
+    $opNoSpaces = str_replace(' ', '', $op);
+
+    if ($op === '' || $op === 'BAIT') {
+        return ['Bait', true];
+    }
+    if ($op === 'AT&T' || $opNoSpaces === 'ATT') {
+        return ['AT&T', true];
+    }
+    return [$opRaw, false];
+}
+
 // =====================================================
 // 🔹 Paso 1: Subida de CSV para Preview
 // =====================================================
-if ($_SERVER['REQUEST_METHOD'] == 'POST' && $_POST['action'] == 'preview' && isset($_FILES['archivo_csv'])) {
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && ($_POST['action'] ?? '') === 'preview' && isset($_FILES['archivo_csv'])) {
     $archivoTmp = $_FILES['archivo_csv']['tmp_name'];
     $handle = fopen($archivoTmp, 'r');
 
     if ($handle) {
         $fila = 0;
-        while (($data = fgetcsv($handle, 1000, ",")) !== FALSE) {
+        while (($data = fgetcsv($handle, 2000, ",")) !== false) {
             $fila++;
-            if ($fila == 1) continue; // Saltar encabezado
+            if ($fila === 1) continue; // Saltar encabezado
 
-            $iccid = trim($data[0] ?? '');
-            $dn = trim($data[1] ?? '');
-            $caja = trim($data[2] ?? '');
+            // CSV: iccid, dn, caja_id, sucursal, operador
+            $iccid           = trim($data[0] ?? '');
+            $dn              = trim($data[1] ?? '');
+            $caja            = trim($data[2] ?? '');
             $nombre_sucursal = trim($data[3] ?? '');
+            $operadorRaw     = trim($data[4] ?? '');
 
             // Sucursal por defecto: Eulalia
-            if ($nombre_sucursal == '') {
-                $id_sucursal = $idEulalia;
+            if ($nombre_sucursal === '') {
+                $id_sucursal     = $idEulalia;
                 $nombre_sucursal = 'Eulalia (por defecto)';
             } else {
                 $stmtSucursal = $conn->prepare("SELECT id FROM sucursales WHERE nombre=? LIMIT 1");
                 $stmtSucursal->bind_param("s", $nombre_sucursal);
                 $stmtSucursal->execute();
-                $id_sucursal = $stmtSucursal->get_result()->fetch_assoc()['id'] ?? 0;
+                $id_sucursal = (int)($stmtSucursal->get_result()->fetch_assoc()['id'] ?? 0);
+                $stmtSucursal->close();
             }
+
+            // Normalizar operador (por defecto Bait)
+            [$operador, $opValido] = normalizarOperador($operadorRaw);
 
             // Validación inicial
             $estatus = 'OK';
-            $motivo = 'Listo para insertar';
+            $motivo  = 'Listo para insertar';
 
-            if (!$iccid) {
+            if ($iccid === '') {
                 $estatus = 'Ignorada';
-                $motivo = 'ICCID vacío';
-            } elseif ($id_sucursal == 0) {
+                $motivo  = 'ICCID vacío';
+            } elseif ($id_sucursal === 0) {
                 $estatus = 'Ignorada';
-                $motivo = 'Sucursal no encontrada';
+                $motivo  = 'Sucursal no encontrada';
+            } elseif (!$opValido) {
+                $estatus = 'Ignorada';
+                $motivo  = 'Operador inválido (usa Bait o AT&T)';
             } else {
                 // Validar duplicado en base
                 $stmtDup = $conn->prepare("SELECT id FROM inventario_sims WHERE iccid=?");
@@ -64,19 +92,21 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && $_POST['action'] == 'preview' && iss
                 $stmtDup->store_result();
                 if ($stmtDup->num_rows > 0) {
                     $estatus = 'Ignorada';
-                    $motivo = 'Duplicado en base';
+                    $motivo  = 'Duplicado en base';
                 }
+                $stmtDup->close();
             }
 
             // Guardar fila en preview
             $previewData[] = [
-                'iccid' => $iccid,
-                'dn' => $dn,
-                'caja' => $caja,
-                'sucursal' => $nombre_sucursal,
+                'iccid'       => $iccid,
+                'dn'          => $dn,
+                'caja'        => $caja,
+                'sucursal'    => $nombre_sucursal,
                 'id_sucursal' => $id_sucursal,
-                'estatus' => $estatus,
-                'motivo' => $motivo
+                'operador'    => $operador,
+                'estatus'     => $estatus,
+                'motivo'      => $motivo
             ];
         }
         fclose($handle);
@@ -88,8 +118,8 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && $_POST['action'] == 'preview' && iss
 // =====================================================
 // 🔹 Paso 2: Confirmar e insertar + generar CSV resumen
 // =====================================================
-if ($_SERVER['REQUEST_METHOD'] == 'POST' && $_POST['action'] == 'insertar' && isset($_POST['data'])) {
-    $data = json_decode($_POST['data'], true);
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && ($_POST['action'] ?? '') === 'insertar' && isset($_POST['data'])) {
+    $data = json_decode($_POST['data'], true) ?: [];
 
     // Crear CSV resumen
     header('Content-Type: text/csv; charset=utf-8');
@@ -97,44 +127,46 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && $_POST['action'] == 'insertar' && is
     $output = fopen('php://output', 'w');
 
     // Encabezado del CSV
-    fputcsv($output, ['iccid', 'dn', 'caja', 'sucursal', 'estatus_final', 'motivo']);
+    fputcsv($output, ['iccid', 'dn', 'caja', 'sucursal', 'operador', 'estatus_final', 'motivo']);
 
     $insertadas = 0;
     foreach ($data as $sim) {
-        $estatusFinal = $sim['estatus'];
-        $motivo = $sim['motivo'];
+        $estatusFinal = $sim['estatus'] ?? 'Ignorada';
+        $motivo       = $sim['motivo']  ?? 'N/A';
 
-        // Insertar solo las que estén OK
-        if ($sim['estatus'] == 'OK') {
-            $iccid = $sim['iccid'];
-            $dn = $sim['dn'];
-            $caja = $sim['caja'];
-            $id_sucursal = $sim['id_sucursal'];
-            $estatus = 'Disponible';
+        if (($sim['estatus'] ?? '') === 'OK') {
+            $iccid       = $sim['iccid'];
+            $dn          = $sim['dn'];
+            $caja        = $sim['caja'];
+            $id_sucursal = (int)$sim['id_sucursal'];
+            $operador    = $sim['operador']; // ya normalizado en preview
+            $estatus     = 'Disponible';
 
             $sqlInsert = "INSERT INTO inventario_sims 
-                          (iccid, dn, caja_id, id_sucursal, estatus, fecha_ingreso) 
-                          VALUES (?, ?, ?, ?, ?, NOW())";
+                          (iccid, dn, caja_id, id_sucursal, operador, estatus, fecha_ingreso) 
+                          VALUES (?, ?, ?, ?, ?, ?, NOW())";
 
             $stmtInsert = $conn->prepare($sqlInsert);
-            $stmtInsert->bind_param("sssis", $iccid, $dn, $caja, $id_sucursal, $estatus);
+            $stmtInsert->bind_param("sssiss", $iccid, $dn, $caja, $id_sucursal, $operador, $estatus);
 
             if ($stmtInsert->execute()) {
                 $insertadas++;
                 $estatusFinal = 'Insertada';
-                $motivo = 'OK';
+                $motivo       = 'OK';
             } else {
                 $estatusFinal = 'Ignorada';
-                $motivo = 'Error en inserción';
+                $motivo       = 'Error en inserción';
             }
+            $stmtInsert->close();
         }
 
         // Escribir fila en el CSV
         fputcsv($output, [
-            $sim['iccid'],
-            $sim['dn'],
-            $sim['caja'],
-            $sim['sucursal'],
+            $sim['iccid']       ?? '',
+            $sim['dn']          ?? '',
+            $sim['caja']        ?? '',
+            $sim['sucursal']    ?? '',
+            $sim['operador']    ?? '',
             $estatusFinal,
             $motivo
         ]);
@@ -162,12 +194,16 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && $_POST['action'] == 'insertar' && is
         <div class="alert alert-info"><?= htmlspecialchars($msg) ?></div>
     <?php endif; ?>
 
-    <?php if (empty($previewData) && (!isset($_POST['action']) || $_POST['action'] != 'insertar')): ?>
+    <?php if (empty($previewData) && (($_POST['action'] ?? '') !== 'insertar')): ?>
         <!-- Paso 1: Subir CSV -->
         <div class="card p-4 shadow-sm bg-white">
             <h5>Subir Archivo CSV</h5>
-            <p>Columnas requeridas: <b>iccid, dn, caja_id, sucursal</b>  
-            <br>Si <b>sucursal</b> está vacía, se asigna automáticamente a <b>Eulalia</b>.</p>
+            <p>
+                Columnas requeridas (en este orden): 
+                <b>iccid, dn, caja_id, sucursal, operador</b><br>
+                • Si <b>sucursal</b> está vacía, se asigna automáticamente a <b>Eulalia</b>.<br>
+                • Si <b>operador</b> está vacío, se asigna <b>Bait</b> (permitidos: <b>Bait</b>, <b>AT&amp;T</b>).
+            </p>
 
             <form method="POST" enctype="multipart/form-data">
                 <input type="hidden" name="action" value="preview">
@@ -178,7 +214,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && $_POST['action'] == 'insertar' && is
             </form>
         </div>
 
-    <?php elseif (!empty($previewData) && $_POST['action'] == 'preview'): ?>
+    <?php elseif (!empty($previewData) && (($_POST['action'] ?? '') === 'preview')): ?>
         <!-- Paso 2: Vista previa -->
         <div class="card p-4 shadow-sm bg-white">
             <h5>Vista Previa de Carga</h5>
@@ -192,19 +228,21 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && $_POST['action'] == 'insertar' && is
                             <th>DN</th>
                             <th>Caja</th>
                             <th>Sucursal</th>
+                            <th>Operador</th>
                             <th>Estatus</th>
                             <th>Motivo</th>
                         </tr>
                     </thead>
                     <tbody>
                         <?php foreach($previewData as $sim): ?>
-                        <tr class="<?= $sim['estatus']=='OK'?'':'table-warning' ?>">
+                        <tr class="<?= ($sim['estatus'] === 'OK') ? '' : 'table-warning' ?>">
                             <td><?= htmlspecialchars($sim['iccid']) ?></td>
                             <td><?= htmlspecialchars($sim['dn']) ?></td>
                             <td><?= htmlspecialchars($sim['caja']) ?></td>
                             <td><?= htmlspecialchars($sim['sucursal']) ?></td>
-                            <td><?= $sim['estatus'] ?></td>
-                            <td><?= $sim['motivo'] ?></td>
+                            <td><?= htmlspecialchars($sim['operador']) ?></td>
+                            <td><?= htmlspecialchars($sim['estatus']) ?></td>
+                            <td><?= htmlspecialchars($sim['motivo']) ?></td>
                         </tr>
                         <?php endforeach; ?>
                     </tbody>

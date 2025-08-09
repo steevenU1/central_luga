@@ -35,9 +35,21 @@ $inicioSemana = $inicioSemanaObj->format('Y-m-d');
 $finSemana = $finSemanaObj->format('Y-m-d');
 
 $msg = $_GET['msg'] ?? '';
-$id_sucursal = $_SESSION['id_sucursal'];
+$id_sucursal = $_SESSION['id_sucursal'] ?? 0;
 
-// 🔹 Obtener usuarios para filtro
+// 🔹 Subtipo de la sucursal (para reglas de visibilidad)
+$subtipoSucursal = '';
+if ($id_sucursal) {
+    $stmtSubtipo = $conn->prepare("SELECT subtipo FROM sucursales WHERE id = ? LIMIT 1");
+    $stmtSubtipo->bind_param("i", $id_sucursal);
+    $stmtSubtipo->execute();
+    $rowSub = $stmtSubtipo->get_result()->fetch_assoc();
+    $subtipoSucursal = $rowSub['subtipo'] ?? '';
+    $stmtSubtipo->close();
+}
+$esSubdistribuidor = ($subtipoSucursal === 'Subdistribuidor');
+
+// 🔹 Obtener usuarios para filtro (de la misma sucursal)
 $sqlUsuarios = "SELECT id, nombre FROM usuarios WHERE id_sucursal=?";
 $stmtUsuarios = $conn->prepare($sqlUsuarios);
 $stmtUsuarios->bind_param("i", $id_sucursal);
@@ -58,7 +70,7 @@ if ($_SESSION['rol'] == 'Ejecutivo') {
     $where .= " AND v.id_sucursal=?";
     $params[] = $_SESSION['id_sucursal'];
     $types .= "i";
-} 
+}
 // Admin ve todas
 
 // 🔹 Filtros GET
@@ -73,7 +85,7 @@ if (!empty($_GET['usuario'])) {
     $types .= "i";
 }
 if (!empty($_GET['buscar'])) {
-    $where .= " AND (v.nombre_cliente LIKE ? OR v.telefono_cliente LIKE ? OR v.tag LIKE ? 
+    $where .= " AND (v.nombre_cliente LIKE ? OR v.telefono_cliente LIKE ? OR v.tag LIKE ?
                      OR EXISTS(SELECT 1 FROM detalle_venta dv WHERE dv.id_venta=v.id AND dv.imei1 LIKE ?))";
     $busqueda = "%".$_GET['buscar']."%";
     array_push($params, $busqueda, $busqueda, $busqueda, $busqueda);
@@ -183,8 +195,12 @@ while ($row = $detalleResult->fetch_assoc()) {
             <div class="card text-center shadow-sm h-100 w-100">
                 <div class="card-body">
                     <h5 class="card-title">Total Comisiones</h5>
-                    <p class="display-6">$<?= number_format($totalComisiones, 2) ?></p>
-                    <small class="text-muted">* Aproximado, sujeto a recálculo semanal</small>
+                    <?php if ($esSubdistribuidor): ?>
+                        <p class="display-6">No disponible</p>
+                    <?php else: ?>
+                        <p class="display-6">$<?= number_format($totalComisiones, 2) ?></p>
+                        <small class="text-muted">* Aproximado, sujeto a recálculo semanal</small>
+                    <?php endif; ?>
                 </div>
             </div>
         </div>
@@ -285,9 +301,11 @@ while ($row = $detalleResult->fetch_assoc()) {
                             <th>Color</th>
                             <th>IMEI</th>
                             <th>Precio Lista</th>
-                            <th>Comisión Regular</th>
-                            <th>Comisión Especial</th>
-                            <th>Total Comisión</th>
+                            <?php if (!$esSubdistribuidor): ?>
+                                <th>Comisión Regular</th>
+                                <th>Comisión Especial</th>
+                                <th>Total Comisión</th>
+                            <?php endif; ?>
                         </tr>
                     </thead>
                     <tbody>
@@ -308,16 +326,20 @@ while ($row = $detalleResult->fetch_assoc()) {
                                             -
                                         <?php endif; ?>
                                     </td>
-                                    <td>$<?= number_format($equipo['comision_regular'], 2) ?></td>
-                                    <td>$<?= number_format($equipo['comision_especial'], 2) ?></td>
-                                    <td>$<?= number_format($equipo['comision'], 2) ?></td>
+                                    <?php if (!$esSubdistribuidor): ?>
+                                        <td>$<?= number_format($equipo['comision_regular'], 2) ?></td>
+                                        <td>$<?= number_format($equipo['comision_especial'], 2) ?></td>
+                                        <td>$<?= number_format($equipo['comision'], 2) ?></td>
+                                    <?php endif; ?>
                                 </tr>
                             <?php 
                                 $esPrincipal = false;
                                 endforeach; 
                             ?>
                         <?php else: ?>
-                            <tr><td colspan="8" class="text-center">Sin equipos registrados</td></tr>
+                            <tr>
+                                <td colspan="<?= $esSubdistribuidor ? 5 : 8; ?>" class="text-center">Sin equipos registrados</td>
+                            </tr>
                         <?php endif; ?>
                     </tbody>
                 </table>
