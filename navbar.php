@@ -18,7 +18,7 @@ $stmt->fetch();
 $stmt->close();
 ?>
 
-<!-- Bootstrap CSS y JS con Popper incluido -->
+<!-- Bootstrap CSS y JS -->
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 
@@ -77,23 +77,17 @@ $stmt->close();
           <li class="nav-item dropdown">
             <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">Traspasos</a>
             <ul class="dropdown-menu dropdown-menu-dark">
-
               <?php if ($rolUsuario === 'Admin'): ?>
                 <li><a class="dropdown-item" href="generar_traspaso.php">Generar traspaso desde Eulalia</a></li>
               <?php endif; ?>
-
               <?php if (in_array($rolUsuario, ['Gerente', 'Admin'])): ?>
                 <li><a class="dropdown-item" href="generar_traspaso_sims.php">Generar traspaso SIMs</a></li>
               <?php endif; ?>
-
               <?php if ($rolUsuario === 'Gerente'): ?>
                 <li><a class="dropdown-item" href="traspaso_nuevo.php">Generar traspaso entre sucursales</a></li>
               <?php endif; ?>
-
-              <!-- Acceso para todos excepto ejecutivos -->
               <li><a class="dropdown-item" href="traspasos_pendientes.php">Historial traspasos entrantes</a></li>
               <li><a class="dropdown-item" href="traspasos_salientes.php">Historial traspasos salientes</a></li>
-
             </ul>
           </li>
         <?php endif; ?>
@@ -117,6 +111,12 @@ $stmt->close();
           <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">Operación</a>
           <ul class="dropdown-menu dropdown-menu-dark">
             <li><a class="dropdown-item" href="lista_precios.php">Lista de precios</a></li>
+            <?php if ($rolUsuario === 'Gerente'): ?>
+              <li><a class="dropdown-item" href="insumos_pedido.php">Pedido de insumos</a></li>
+            <?php endif; ?>
+            <?php if ($rolUsuario === 'Admin'): ?>
+              <li><a class="dropdown-item" href="insumos_admin.php">Administrar insumos</a></li>
+            <?php endif; ?>
           </ul>
         </li>
 
@@ -130,13 +130,12 @@ $stmt->close();
               <li><a class="dropdown-item" href="recoleccion_comisiones.php">Recolección comisiones</a></li>
             </ul>
           </li>
-        <?php endif; ?>
 
-        <!-- OPERATIVOS -->
-        <?php if ($rolUsuario === 'Admin'): ?>
+          <!-- OPERATIVOS -->
           <li class="nav-item dropdown">
             <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">Operativos</a>
             <ul class="dropdown-menu dropdown-menu-dark">
+              <li><a class="dropdown-item" href="insumos_catalogo.php">Catálogo de insumos</a></li>
               <li><a class="dropdown-item" href="actualizar_precios_modelo.php">Actualizar precios</a></li>
               <li><a class="dropdown-item" href="cuotas_mensuales.php">Cuotas mensuales</a></li>
               <li><a class="dropdown-item" href="cuotas_mensuales_ejecutivos.php">Cuotas ejecutivos</a></li>

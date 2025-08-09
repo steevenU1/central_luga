@@ -30,7 +30,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['nombre'] = $row['nombre'];
             $_SESSION['id_sucursal'] = $row['id_sucursal'];
             $_SESSION['rol'] = $row['rol'];
-            header("Location: panel.php");
+            header("Location: dashboard_unificado.php");
             exit();
         } else {
             $mensaje = "❌ Contraseña incorrecta";
