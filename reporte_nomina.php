@@ -19,7 +19,6 @@ function obtenerSemanaPorIndice($offset = 0) {
 
     $inicio = new DateTime();
     $inicio->modify("-$dif days")->setTime(0,0,0);
-
     if ($offset > 0) $inicio->modify("-" . (7*$offset) . " days");
 
     $fin = clone $inicio;
@@ -31,30 +30,42 @@ function obtenerSemanaPorIndice($offset = 0) {
 $semanaSeleccionada = isset($_GET['semana']) ? (int)$_GET['semana'] : 0;
 list($inicioSemanaObj, $finSemanaObj) = obtenerSemanaPorIndice($semanaSeleccionada);
 $inicioSemana = $inicioSemanaObj->format('Y-m-d 00:00:00');
-$finSemana = $finSemanaObj->format('Y-m-d 23:59:59');
+$finSemana    = $finSemanaObj->format('Y-m-d 23:59:59');
 
 /* ========================
    CONSULTA DE USUARIOS
-   (Excluye sucursales tipo Almacén)
+   (Excluye almacenes y, si existe la columna, subdistribuidores)
 ======================== */
+// Detecta si existe una columna de subtipo; prueba varios nombres comunes.
+$subdistCol = null;
+foreach (['subtipo_sucursal','subtipo','sub_tipo','tipo_subsucursal'] as $c) {
+    $rs = $conn->query("SHOW COLUMNS FROM sucursales LIKE '$c'");
+    if ($rs && $rs->num_rows > 0) { $subdistCol = $c; break; }
+}
+
+$where = "s.tipo_sucursal <> 'Almacen'";
+if ($subdistCol) {
+    $where .= " AND (s.`$subdistCol` IS NULL OR s.`$subdistCol` <> 'Subdistribuidor')";
+}
+
 $sqlUsuarios = "
     SELECT u.id, u.nombre, u.rol, u.sueldo, s.nombre AS sucursal, u.id_sucursal
     FROM usuarios u
     INNER JOIN sucursales s ON s.id=u.id_sucursal
-    WHERE s.tipo_sucursal <> 'Almacen'
-    ORDER BY s.nombre, u.rol DESC, u.nombre
+    WHERE $where
+    ORDER BY s.nombre, FIELD(u.rol,'Gerente','Ejecutivo'), u.nombre
 ";
 $resUsuarios = $conn->query($sqlUsuarios);
 
 $nomina = [];
 
 while ($u = $resUsuarios->fetch_assoc()) {
-    $id_usuario = $u['id'];
-    $id_sucursal = $u['id_sucursal'];
+    $id_usuario  = (int)$u['id'];
+    $id_sucursal = (int)$u['id_sucursal'];
 
     /* ========================
-       1️⃣ Comisiones de equipos
-       ✅ Ahora suma directo desde ventas.comision
+       1) Comisiones de EQUIPOS (ejecutivo)
+       Suma lo ya recalculado en ventas.comision
     ======================== */
     $sqlEquipos = "
         SELECT IFNULL(SUM(v.comision),0) AS total_comision
@@ -65,86 +76,99 @@ while ($u = $resUsuarios->fetch_assoc()) {
     $stmtEquip = $conn->prepare($sqlEquipos);
     $stmtEquip->bind_param("iss", $id_usuario, $inicioSemana, $finSemana);
     $stmtEquip->execute();
-    $com_equipos = (float)$stmtEquip->get_result()->fetch_assoc()['total_comision'] ?? 0;
+    $com_equipos = (float)($stmtEquip->get_result()->fetch_assoc()['total_comision'] ?? 0);
 
     /* ========================
-       2️⃣ Comisiones de SIMs
+       2) Comisiones de SIMs PREPAGO (ejecutivo)
+       Suma ventas_sims.comision_ejecutivo (Nueva/Portabilidad)
     ======================== */
-    $com_sims = 0;
+    $com_sims = 0.0;
     if ($u['rol'] != 'Gerente') {
         $sqlSims = "
-            SELECT SUM(dvs.precio_unitario * 0.20) AS com_sims
-            FROM detalle_venta_sims dvs
-            INNER JOIN ventas_sims vs ON dvs.id_venta=vs.id
-            WHERE vs.id_usuario=? 
+            SELECT IFNULL(SUM(vs.comision_ejecutivo),0) AS com_sims
+            FROM ventas_sims vs
+            WHERE vs.id_usuario=?
               AND vs.fecha_venta BETWEEN ? AND ?
-              AND vs.tipo_venta IN ('Nueva','Portabilidad','Regalo')
+              AND vs.tipo_venta IN ('Nueva','Portabilidad')
         ";
         $stmtSims = $conn->prepare($sqlSims);
         $stmtSims->bind_param("iss", $id_usuario, $inicioSemana, $finSemana);
         $stmtSims->execute();
-        $com_sims = (float)$stmtSims->get_result()->fetch_assoc()['com_sims'] ?? 0;
+        $com_sims = (float)($stmtSims->get_result()->fetch_assoc()['com_sims'] ?? 0);
     }
 
     /* ========================
-       3️⃣ Comisiones de pospago
+       3) Comisiones de POSPAGO (ejecutivo)
+       Suma ventas_sims.comision_ejecutivo (Pospago)
     ======================== */
-    $com_pospago = 0;
+    $com_pospago = 0.0;
     if ($u['rol'] != 'Gerente') {
         $sqlPos = "
-            SELECT SUM(dvs.precio_unitario * 0.20) AS com_pos
-            FROM detalle_venta_sims dvs
-            INNER JOIN ventas_sims vs ON dvs.id_venta=vs.id
-            WHERE vs.id_usuario=? 
+            SELECT IFNULL(SUM(vs.comision_ejecutivo),0) AS com_pos
+            FROM ventas_sims vs
+            WHERE vs.id_usuario=?
               AND vs.fecha_venta BETWEEN ? AND ?
               AND vs.tipo_venta='Pospago'
         ";
         $stmtPos = $conn->prepare($sqlPos);
         $stmtPos->bind_param("iss", $id_usuario, $inicioSemana, $finSemana);
         $stmtPos->execute();
-        $com_pospago = (float)$stmtPos->get_result()->fetch_assoc()['com_pos'] ?? 0;
+        $com_pospago = (float)($stmtPos->get_result()->fetch_assoc()['com_pos'] ?? 0);
     }
 
     /* ========================
-       4️⃣ Comisión de Gerente
-       ✅ Se deja como estaba, porque viene del recalculo
+       4) Comisión de GERENTE (por sucursal)
+       Suma ventas.comision_gerente + ventas_sims.comision_gerente
     ======================== */
-    $com_ger = 0;
+    $com_ger = 0.0;
     if ($u['rol'] == 'Gerente') {
-        $sqlComGer = "
-            SELECT IFNULL(SUM(v.comision_gerente),0) AS com_ger
+        // Ventas (equipos / mifi-modem) con comision_gerente
+        $sqlComGerV = "
+            SELECT IFNULL(SUM(v.comision_gerente),0) AS com_ger_vtas
             FROM ventas v
             WHERE v.id_sucursal=? 
               AND v.fecha_venta BETWEEN ? AND ?
         ";
-        $stmtGer = $conn->prepare($sqlComGer);
-        $stmtGer->bind_param("iss", $id_sucursal, $inicioSemana, $finSemana);
-        $stmtGer->execute();
-        $com_ger = (float)$stmtGer->get_result()->fetch_assoc()['com_ger'] ?? 0;
+        $stmtGerV = $conn->prepare($sqlComGerV);
+        $stmtGerV->bind_param("iss", $id_sucursal, $inicioSemana, $finSemana);
+        $stmtGerV->execute();
+        $com_ger_vtas = (float)($stmtGerV->get_result()->fetch_assoc()['com_ger_vtas'] ?? 0);
+
+        // SIMs (prepago y pospago) con comision_gerente
+        $sqlComGerS = "
+            SELECT IFNULL(SUM(vs.comision_gerente),0) AS com_ger_sims
+            FROM ventas_sims vs
+            WHERE vs.id_sucursal=? 
+              AND vs.fecha_venta BETWEEN ? AND ?
+        ";
+        $stmtGerS = $conn->prepare($sqlComGerS);
+        $stmtGerS->bind_param("iss", $id_sucursal, $inicioSemana, $finSemana);
+        $stmtGerS->execute();
+        $com_ger_sims = (float)($stmtGerS->get_result()->fetch_assoc()['com_ger_sims'] ?? 0);
+
+        $com_ger = $com_ger_vtas + $com_ger_sims;
     }
 
     /* ========================
-       5️⃣ Total ejecutivo
+       5) Totales
     ======================== */
-    $total_ejecutivo = $u['sueldo'] + $com_equipos + $com_sims + $com_pospago;
-    $total = $total_ejecutivo + $com_ger;
+    $total_ejecutivo = (float)$u['sueldo'] + $com_equipos + $com_sims + $com_pospago;
+    $total           = $total_ejecutivo + $com_ger;
 
     $nomina[] = [
-        'nombre' => $u['nombre'],
-        'rol' => $u['rol'],
-        'sucursal' => $u['sucursal'],
-        'sueldo' => $u['sueldo'],
-        'com_equipos' => $com_equipos,
-        'com_sims' => $com_sims,
-        'com_pospago' => $com_pospago,
-        'com_ger' => $com_ger,
-        'total' => $total
+        'id_usuario'   => $id_usuario,    // para link de auditoría de ejecutivo
+        'id_sucursal'  => $id_sucursal,   // para link de auditoría de gerente
+        'nombre'       => $u['nombre'],
+        'rol'          => $u['rol'],
+        'sucursal'     => $u['sucursal'],
+        'sueldo'       => (float)$u['sueldo'],
+        'com_equipos'  => $com_equipos,
+        'com_sims'     => $com_sims,
+        'com_pospago'  => $com_pospago,
+        'com_ger'      => $com_ger,
+        'total'        => $total
     ];
 }
-
-/* ========================
-   VISTA HTML
-======================== */
 ?>
 <!DOCTYPE html>
 <html lang="es">
@@ -202,9 +226,18 @@ while ($u = $resUsuarios->fetch_assoc()) {
                 $totalGlobal += $n['total'];
             ?>
             <tr>
-                <td><?= $n['nombre'] ?></td>
-                <td><?= $n['rol'] ?></td>
-                <td><?= $n['sucursal'] ?></td>
+                <td>
+                    <?= htmlspecialchars($n['nombre']) ?>
+                    <?php if ($n['rol'] === 'Gerente'): ?>
+                        <br>
+                        <a class="small" href="auditar_comisiones_gerente.php?semana=<?= $semanaSeleccionada ?>&id_sucursal=<?= (int)$n['id_sucursal'] ?>">🔍 Detalle</a>
+                    <?php else: ?>
+                        <br>
+                        <a class="small" href="auditar_comisiones_ejecutivo.php?semana=<?= $semanaSeleccionada ?>&id_usuario=<?= (int)$n['id_usuario'] ?>">🔍 Detalle</a>
+                    <?php endif; ?>
+                </td>
+                <td><?= htmlspecialchars($n['rol']) ?></td>
+                <td><?= htmlspecialchars($n['sucursal']) ?></td>
                 <td>$<?= number_format($n['sueldo'],2) ?></td>
                 <td>$<?= number_format($n['com_equipos'],2) ?></td>
                 <td>$<?= number_format($n['com_sims'],2) ?></td>

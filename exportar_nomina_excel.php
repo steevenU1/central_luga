@@ -29,7 +29,7 @@ function obtenerSemanaPorIndice($offset = 0) {
 $semanaSeleccionada = isset($_GET['semana']) ? (int)$_GET['semana'] : 0;
 list($inicioSemanaObj, $finSemanaObj) = obtenerSemanaPorIndice($semanaSeleccionada);
 $inicioSemana = $inicioSemanaObj->format('Y-m-d 00:00:00');
-$finSemana = $finSemanaObj->format('Y-m-d 23:59:59');
+$finSemana    = $finSemanaObj->format('Y-m-d 23:59:59');
 
 /* ========================
    Configuración CSV
@@ -40,7 +40,7 @@ header('Content-Disposition: attachment; filename="'.$filename.'"');
 $output = fopen('php://output', 'w');
 
 /* ========================
-   Encabezado sección RESUMEN
+   ENCABEZADO RESUMEN
 ======================== */
 fputcsv($output, ['REPORTE DE NÓMINA SEMANAL']);
 fputcsv($output, ['Semana', $inicioSemanaObj->format('d/m/Y') . ' - ' . $finSemanaObj->format('d/m/Y')]);
@@ -51,13 +51,13 @@ fputcsv($output, [
     'Empleado', 'Rol', 'Sucursal',
     'Sueldo Base',
     '# Equipos', 'Com. Equipos',
-    '# SIMs', 'Com. SIMs',
-    '# Pospago', 'Com. Pospago',
+    '# SIMs',   'Com. SIMs',
+    '# Pospago','Com. Pospago',
     'Com. Gerente',
     'Total a Pagar'
 ]);
 
-$totalGlobal = 0;
+$totalGlobal = 0.0;
 
 /* ========================
    Consulta de usuarios (excluye almacén)
@@ -71,8 +71,8 @@ $sqlUsuarios = "
 ";
 $resUsuarios = $conn->query($sqlUsuarios);
 
-/* Acumulador para luego escribir el detalle de cada persona */
-$detalleFilas = []; // array de arrays: cada elemento es una fila para el “Detalle por venta”
+/* Guardaremos el detalle para escribirlo al final */
+$detalleFilas = []; // cada elemento es una fila detalla por venta/rubro
 
 while ($u = $resUsuarios->fetch_assoc()) {
     $id_usuario   = (int)$u['id'];
@@ -80,15 +80,15 @@ while ($u = $resUsuarios->fetch_assoc()) {
     $rol          = $u['rol'];
 
     /* ========================
-       1) Equipos - sumas y conteos
-    ======================== */
+       1) EQUIPOS (ejecutivo)
+       Conteo por líneas y suma de comisiones de detalle_venta
+======================== */
     $sqlEquiposTot = "
         SELECT 
             COUNT(dv.id) AS cnt,
-            SUM(dv.comision_regular) AS com_reg,
-            SUM(dv.comision_especial) AS com_esp
+            SUM(dv.comision_regular + dv.comision_especial) AS com_tot
         FROM detalle_venta dv
-        INNER JOIN ventas v   ON dv.id_venta=v.id
+        INNER JOIN ventas v  ON dv.id_venta=v.id
         INNER JOIN productos p ON dv.id_producto=p.id
         WHERE v.id_usuario=?
           AND v.fecha_venta BETWEEN ? AND ?
@@ -98,26 +98,26 @@ while ($u = $resUsuarios->fetch_assoc()) {
     $stmtE1->bind_param("iss", $id_usuario, $inicioSemana, $finSemana);
     $stmtE1->execute();
     $rowE1 = $stmtE1->get_result()->fetch_assoc() ?: [];
-    $equipos_cnt   = (int)($rowE1['cnt'] ?? 0);
-    $equipos_com   = (float)($rowE1['com_reg'] ?? 0) + (float)($rowE1['com_esp'] ?? 0);
+    $equipos_cnt = (int)($rowE1['cnt'] ?? 0);
+    $equipos_com = (float)($rowE1['com_tot'] ?? 0);
 
-    // Detalle equipos por venta (una fila por renglón de detalle_venta)
+    // Detalle por línea de equipo
     $sqlEquiposDet = "
         SELECT 
             v.id AS venta_id,
             v.fecha_venta,
-            p.marca, p.modelo, p.color, p.imei1,
+            p.marca, p.modelo, p.color, p.imei1, p.tipo_producto,
             dv.precio_unitario,
             dv.comision_regular,
             dv.comision_especial,
-            v.comision_gerente
+            (dv.comision_regular + dv.comision_especial) AS com_total_linea
         FROM detalle_venta dv
         INNER JOIN ventas v     ON dv.id_venta=v.id
         INNER JOIN productos p  ON dv.id_producto=p.id
         WHERE v.id_usuario=?
           AND v.fecha_venta BETWEEN ? AND ?
           AND LOWER(p.tipo_producto) NOT IN ('sim','chip','pospago')
-        ORDER BY v.fecha_venta, v.id
+        ORDER BY v.fecha_venta, v.id, dv.id
     ";
     $stmtE2 = $conn->prepare($sqlEquiposDet);
     $stmtE2->bind_param("iss", $id_usuario, $inicioSemana, $finSemana);
@@ -136,28 +136,25 @@ while ($u = $resUsuarios->fetch_assoc()) {
             number_format((float)$d['precio_unitario'], 2, '.', ''),
             number_format((float)$d['comision_regular'], 2, '.', ''),
             number_format((float)$d['comision_especial'], 2, '.', ''),
-            number_format(((float)$d['comision_regular'] + (float)$d['comision_especial']), 2, '.', ''),
-            // Para el ejecutivo no sumamos aquí com_ger; el gerente lo verá en su bloque
-            ''
+            number_format((float)$d['com_total_linea'], 2, '.', ''),
+            '' // Comisión Gerente (venta) — esta columna se usa sólo en filas de gerente
         ];
     }
 
     /* ========================
-       2) SIMs - sumas y conteos (Nueva/Portabilidad/Regalo)
-    ======================== */
+       2) SIMs PREPAGO (ejecutivo) — usa ventas_sims.comision_ejecutivo
+======================== */
     $sims_cnt = 0; $sims_com = 0.0;
-    $pos_cnt = 0;  $pos_com  = 0.0;
 
     if ($rol != 'Gerente') {
         $sqlSimsTot = "
             SELECT 
-                COUNT(dvs.id) AS cnt,
-                SUM(dvs.precio_unitario * 0.20) AS com_sims
-            FROM detalle_venta_sims dvs
-            INNER JOIN ventas_sims vs ON dvs.id_venta=vs.id
+                COUNT(vs.id) AS cnt,
+                SUM(vs.comision_ejecutivo) AS com_sims
+            FROM ventas_sims vs
             WHERE vs.id_usuario=?
               AND vs.fecha_venta BETWEEN ? AND ?
-              AND vs.tipo_venta IN ('Nueva','Portabilidad','Regalo')
+              AND vs.tipo_venta IN ('Nueva','Portabilidad')
         ";
         $stmtS1 = $conn->prepare($sqlSimsTot);
         $stmtS1->bind_param("iss", $id_usuario, $inicioSemana, $finSemana);
@@ -166,18 +163,19 @@ while ($u = $resUsuarios->fetch_assoc()) {
         $sims_cnt = (int)($rowS1['cnt'] ?? 0);
         $sims_com = (float)($rowS1['com_sims'] ?? 0);
 
-        // Detalle SIMs
+        // Detalle SIMs prepago (una fila por venta_sims)
         $sqlSimsDet = "
             SELECT 
                 vs.id AS venta_id,
                 vs.fecha_venta,
+                vs.tipo_sim,
                 vs.tipo_venta,
-                dvs.precio_unitario
-            FROM detalle_venta_sims dvs
-            INNER JOIN ventas_sims vs ON dvs.id_venta=vs.id
+                vs.precio_total,
+                vs.comision_ejecutivo
+            FROM ventas_sims vs
             WHERE vs.id_usuario=?
               AND vs.fecha_venta BETWEEN ? AND ?
-              AND vs.tipo_venta IN ('Nueva','Portabilidad','Regalo')
+              AND vs.tipo_venta IN ('Nueva','Portabilidad')
             ORDER BY vs.fecha_venta, vs.id
         ";
         $stmtS2 = $conn->prepare($sqlSimsDet);
@@ -185,7 +183,6 @@ while ($u = $resUsuarios->fetch_assoc()) {
         $stmtS2->execute();
         $resS2 = $stmtS2->get_result();
         while ($d = $resS2->fetch_assoc()) {
-            $com = (float)$d['precio_unitario'] * 0.20;
             $detalleFilas[] = [
                 $u['nombre'],
                 $rol,
@@ -193,25 +190,28 @@ while ($u = $resUsuarios->fetch_assoc()) {
                 'SIM (' . $d['tipo_venta'] . ')',
                 $d['venta_id'],
                 (new DateTime($d['fecha_venta']))->format('Y-m-d H:i:s'),
-                'SIM ' . $d['tipo_venta'],
+                'SIM ' . $d['tipo_sim'],
                 '', // IMEI no aplica
-                number_format((float)$d['precio_unitario'], 2, '.', ''),
+                number_format((float)$d['precio_total'], 2, '.', ''),
                 number_format(0, 2, '.', ''), // com_regular no aplica
                 number_format(0, 2, '.', ''), // com_especial no aplica
-                number_format($com, 2, '.', ''), // total comisión SIM
-                ''
+                number_format((float)$d['comision_ejecutivo'], 2, '.', ''), // comisión total rubro
+                '' // com gerente (venta) no aplica
             ];
         }
+    }
 
-        /* ========================
-           3) Pospago - sumas y conteos
-        ======================== */
+    /* ========================
+       3) POSPAGO (ejecutivo) — usa ventas_sims.comision_ejecutivo
+======================== */
+    $pos_cnt = 0; $pos_com = 0.0;
+
+    if ($rol != 'Gerente') {
         $sqlPosTot = "
             SELECT 
-                COUNT(dvs.id) AS cnt,
-                SUM(dvs.precio_unitario * 0.20) AS com_pos
-            FROM detalle_venta_sims dvs
-            INNER JOIN ventas_sims vs ON dvs.id_venta=vs.id
+                COUNT(vs.id) AS cnt,
+                SUM(vs.comision_ejecutivo) AS com_pos
+            FROM ventas_sims vs
             WHERE vs.id_usuario=?
               AND vs.fecha_venta BETWEEN ? AND ?
               AND vs.tipo_venta='Pospago'
@@ -223,14 +223,15 @@ while ($u = $resUsuarios->fetch_assoc()) {
         $pos_cnt = (int)($rowP1['cnt'] ?? 0);
         $pos_com = (float)($rowP1['com_pos'] ?? 0);
 
-        // Detalle Pospago
+        // Detalle pospago (una fila por venta_sims)
         $sqlPosDet = "
             SELECT 
                 vs.id AS venta_id,
                 vs.fecha_venta,
-                dvs.precio_unitario
-            FROM detalle_venta_sims dvs
-            INNER JOIN ventas_sims vs ON dvs.id_venta=vs.id
+                vs.modalidad,
+                vs.precio_total,
+                vs.comision_ejecutivo
+            FROM ventas_sims vs
             WHERE vs.id_usuario=?
               AND vs.fecha_venta BETWEEN ? AND ?
               AND vs.tipo_venta='Pospago'
@@ -241,7 +242,6 @@ while ($u = $resUsuarios->fetch_assoc()) {
         $stmtP2->execute();
         $resP2 = $stmtP2->get_result();
         while ($d = $resP2->fetch_assoc()) {
-            $com = (float)$d['precio_unitario'] * 0.20;
             $detalleFilas[] = [
                 $u['nombre'],
                 $rol,
@@ -249,47 +249,44 @@ while ($u = $resUsuarios->fetch_assoc()) {
                 'Pospago',
                 $d['venta_id'],
                 (new DateTime($d['fecha_venta']))->format('Y-m-d H:i:s'),
-                'Pospago',
-                '',
-                number_format((float)$d['precio_unitario'], 2, '.', ''),
+                'Pospago ' . $d['modalidad'],
+                '', // IMEI no aplica
+                number_format((float)$d['precio_total'], 2, '.', ''),
                 number_format(0, 2, '.', ''),
                 number_format(0, 2, '.', ''),
-                number_format($com, 2, '.', ''),
+                number_format((float)$d['comision_ejecutivo'], 2, '.', ''),
                 ''
             ];
         }
     }
 
     /* ========================
-       4) Comisión de Gerente (sumada desde ventas.comision_gerente)
-          y detalle por venta (para el gerente)
-    ======================== */
+       4) GERENTE (por sucursal): ventas + ventas_sims
+======================== */
     $com_ger = 0.0;
     if ($rol == 'Gerente') {
-        $sqlGerTot = "
-            SELECT IFNULL(SUM(v.comision_gerente),0) AS com_ger
+        // Ventas con comision_gerente
+        $sqlGerTotV = "
+            SELECT IFNULL(SUM(v.comision_gerente),0) AS com_ger_vtas
             FROM ventas v
             WHERE v.id_sucursal=? 
               AND v.fecha_venta BETWEEN ? AND ?
         ";
-        $stmtG1 = $conn->prepare($sqlGerTot);
+        $stmtG1 = $conn->prepare($sqlGerTotV);
         $stmtG1->bind_param("iss", $id_sucursal, $inicioSemana, $finSemana);
         $stmtG1->execute();
-        $com_ger = (float)($stmtG1->get_result()->fetch_assoc()['com_ger'] ?? 0);
+        $com_ger_vtas = (float)($stmtG1->get_result()->fetch_assoc()['com_ger_vtas'] ?? 0);
 
-        // Detalle de gerente: una fila por venta con comision_gerente > 0
-        $sqlGerDet = "
-            SELECT 
-                v.id AS venta_id,
-                v.fecha_venta,
-                v.comision_gerente
+        // Detalle por venta (ventas)
+        $sqlGerDetV = "
+            SELECT v.id AS venta_id, v.fecha_venta, v.comision_gerente
             FROM ventas v
             WHERE v.id_sucursal=?
               AND v.fecha_venta BETWEEN ? AND ?
               AND v.comision_gerente > 0
             ORDER BY v.fecha_venta, v.id
         ";
-        $stmtG2 = $conn->prepare($sqlGerDet);
+        $stmtG2 = $conn->prepare($sqlGerDetV);
         $stmtG2->bind_param("iss", $id_sucursal, $inicioSemana, $finSemana);
         $stmtG2->execute();
         $resG2 = $stmtG2->get_result();
@@ -298,23 +295,68 @@ while ($u = $resUsuarios->fetch_assoc()) {
                 $u['nombre'],
                 $rol,
                 $u['sucursal'],
-                'Gerente (venta sucursal)',
+                'Gerente (venta sucursal - Equipos/MiFi/Modem)',
                 $d['venta_id'],
                 (new DateTime($d['fecha_venta']))->format('Y-m-d H:i:s'),
-                'Comisión gerente por venta',
+                'Comisión gerente por venta (ventas)',
                 '',
-                number_format(0, 2, '.', ''), // precio unitario no aplica
-                number_format(0, 2, '.', ''), // com_regular no aplica
-                number_format(0, 2, '.', ''), // com_especial no aplica
-                number_format(0, 2, '.', ''), // total comisión de renglón no aplica
-                number_format((float)$d['comision_gerente'], 2, '.', '') // columna exclusiva gerente
+                number_format(0, 2, '.', ''), // no aplica
+                number_format(0, 2, '.', ''), // no aplica
+                number_format(0, 2, '.', ''), // no aplica
+                number_format(0, 2, '.', ''), // total rubro no aplica
+                number_format((float)$d['comision_gerente'], 2, '.', '')
             ];
         }
+
+        // SIMs (prepago y pospago) con comision_gerente
+        $sqlGerTotS = "
+            SELECT IFNULL(SUM(vs.comision_gerente),0) AS com_ger_sims
+            FROM ventas_sims vs
+            WHERE vs.id_sucursal=? 
+              AND vs.fecha_venta BETWEEN ? AND ?
+        ";
+        $stmtG3 = $conn->prepare($sqlGerTotS);
+        $stmtG3->bind_param("iss", $id_sucursal, $inicioSemana, $finSemana);
+        $stmtG3->execute();
+        $com_ger_sims = (float)($stmtG3->get_result()->fetch_assoc()['com_ger_sims'] ?? 0);
+
+        // Detalle por venta_sims
+        $sqlGerDetS = "
+            SELECT vs.id AS venta_id, vs.fecha_venta, vs.tipo_venta, vs.comision_gerente
+            FROM ventas_sims vs
+            WHERE vs.id_sucursal=?
+              AND vs.fecha_venta BETWEEN ? AND ?
+              AND vs.comision_gerente > 0
+            ORDER BY vs.fecha_venta, vs.id
+        ";
+        $stmtG4 = $conn->prepare($sqlGerDetS);
+        $stmtG4->bind_param("iss", $id_sucursal, $inicioSemana, $finSemana);
+        $stmtG4->execute();
+        $resG4 = $stmtG4->get_result();
+        while ($d = $resG4->fetch_assoc()) {
+            $detalleFilas[] = [
+                $u['nombre'],
+                $rol,
+                $u['sucursal'],
+                'Gerente (venta sucursal - ' . $d['tipo_venta'] . ')',
+                $d['venta_id'],
+                (new DateTime($d['fecha_venta']))->format('Y-m-d H:i:s'),
+                'Comisión gerente por venta (ventas_sims)',
+                '',
+                number_format(0, 2, '.', ''), // no aplica
+                number_format(0, 2, '.', ''), // no aplica
+                number_format(0, 2, '.', ''), // no aplica
+                number_format(0, 2, '.', ''), // total rubro no aplica
+                number_format((float)$d['comision_gerente'], 2, '.', '')
+            ];
+        }
+
+        $com_ger = $com_ger_vtas + $com_ger_sims;
     }
 
     /* ========================
-       5) Total empleado y fila RESUMEN
-    ======================== */
+       5) TOTAL empleado y fila RESUMEN
+======================== */
     $total = (float)$u['sueldo'] + $equipos_com + $sims_com + $pos_com + $com_ger;
     $totalGlobal += $total;
 
@@ -337,7 +379,8 @@ while ($u = $resUsuarios->fetch_assoc()) {
 /* ========================
    Fila de total global
 ======================== */
-fputcsv($output, ['', '', '', '', '', '', '', '', '', 'Total Global', number_format($totalGlobal,2,'.','')]);
+fputcsv($output, []);
+fputcsv($output, ['TOTAL GLOBAL', '', '', '', '', '', '', '', '', '', '', number_format($totalGlobal,2,'.','')]);
 
 /* ========================
    Sección DETALLE POR VENTA
@@ -350,8 +393,8 @@ fputcsv($output, [
     'Producto/Concepto', 'IMEI',
     'Precio Unitario',
     'Com. Regular', 'Com. Especial',
-    'Comisión Total (rubro)', // Equipos o SIM/Pospago
-    'Comisión Gerente (venta)' // solo llenamos cuando es gerente y aplica
+    'Comisión Total (rubro)',     // Equipos / SIM / Pospago
+    'Comisión Gerente (venta)'    // cuando aplica
 ]);
 
 foreach ($detalleFilas as $fila) {
