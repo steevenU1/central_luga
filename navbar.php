@@ -4,18 +4,20 @@ if (session_status() === PHP_SESSION_NONE) {
 }
 include 'db.php';
 
-$rolUsuario = $_SESSION['rol'] ?? 'Ejecutivo';
+$rolUsuario    = $_SESSION['rol'] ?? 'Ejecutivo';
 $nombreUsuario = $_SESSION['nombre'] ?? 'Usuario';
-$idSucursal = $_SESSION['id_sucursal'] ?? 0;
+$idSucursal    = (int)($_SESSION['id_sucursal'] ?? 0);
 
 // Obtener nombre de la sucursal
 $sucursalNombre = '';
-$stmt = $conn->prepare("SELECT nombre FROM sucursales WHERE id=?");
-$stmt->bind_param("i", $idSucursal);
-$stmt->execute();
-$stmt->bind_result($sucursalNombre);
-$stmt->fetch();
-$stmt->close();
+if ($idSucursal > 0) {
+  $stmt = $conn->prepare("SELECT nombre FROM sucursales WHERE id=?");
+  $stmt->bind_param("i", $idSucursal);
+  $stmt->execute();
+  $stmt->bind_result($sucursalNombre);
+  $stmt->fetch();
+  $stmt->close();
+}
 ?>
 
 <!-- Bootstrap CSS y JS -->
@@ -36,6 +38,7 @@ $stmt->close();
     </button>
 
     <div class="collapse navbar-collapse" id="navbarMain">
+      <!-- IZQUIERDA -->
       <ul class="navbar-nav me-auto mb-2 mb-lg-0">
 
         <!-- DASHBOARD -->
@@ -103,6 +106,12 @@ $stmt->close();
             <?php if ($rolUsuario === 'Admin'): ?>
               <li><a class="dropdown-item" href="depositos.php">Validar depósitos</a></li>
             <?php endif; ?>
+
+            <?php if ($rolUsuario === 'GerenteZona'): ?>
+              <li><hr class="dropdown-divider"></li>
+              <li class="dropdown-header">Comisiones</li>
+              <li><a class="dropdown-item" href="recoleccion_comisiones.php">Recolección comisiones</a></li>
+            <?php endif; ?>
           </ul>
         </li>
 
@@ -121,13 +130,17 @@ $stmt->close();
         </li>
 
         <?php if ($rolUsuario === 'Admin'): ?>
-          <!-- NÓMINA -->
+          <!-- RH (antes Nómina) -->
           <li class="nav-item dropdown">
-            <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">Nómina</a>
+            <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">RH</a>
             <ul class="dropdown-menu dropdown-menu-dark">
+              <!-- Reportes de nómina -->
               <li><a class="dropdown-item" href="reporte_nomina.php">Reporte semanal</a></li>
               <li><a class="dropdown-item" href="reporte_nomina_gerentes_zona.php">Gerentes zona</a></li>
-              <li><a class="dropdown-item" href="recoleccion_comisiones.php">Recolección comisiones</a></li>
+
+              <li><hr class="dropdown-divider"></li>
+              <li class="dropdown-header">Expedientes</li>
+              <li><a class="dropdown-item" href="admin_expedientes.php">Panel de expedientes</a></li>
             </ul>
           </li>
 
@@ -153,9 +166,26 @@ $stmt->close();
         <?php endif; ?>
       </ul>
 
-      <!-- PERFIL -->
-      <span class="navbar-text text-white me-3">👤 <?= htmlspecialchars($nombreUsuario) ?> | <?= $sucursalNombre ?></span>
-      <a href="logout.php" class="btn btn-outline-light btn-sm">Salir</a>
+      <!-- DERECHA: Perfil -->
+      <ul class="navbar-nav ms-auto">
+        <li class="nav-item dropdown">
+          <a class="nav-link dropdown-toggle d-flex align-items-center" href="#" role="button" data-bs-toggle="dropdown">
+            <span class="me-1">👤 <?= htmlspecialchars($nombreUsuario) ?></span>
+            <?php if ($sucursalNombre): ?>
+              <small class="text-secondary d-none d-lg-inline">| <?= htmlspecialchars($sucursalNombre) ?></small>
+            <?php endif; ?>
+          </a>
+          <ul class="dropdown-menu dropdown-menu-end dropdown-menu-dark">
+            <?php if ($sucursalNombre): ?>
+              <li class="dropdown-header"><?= htmlspecialchars($sucursalNombre) ?></li>
+            <?php endif; ?>
+            <li><a class="dropdown-item" href="expediente_usuario.php">Mi expediente</a></li>
+            <li><a class="dropdown-item" href="documentos_historial.php">Mis documentos</a></li>
+            <li><hr class="dropdown-divider"></li>
+            <li><a class="dropdown-item" href="logout.php">Salir</a></li>
+          </ul>
+        </li>
+      </ul>
     </div>
   </div>
 </nav>
