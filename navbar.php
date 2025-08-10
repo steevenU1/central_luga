@@ -66,18 +66,31 @@ if ($idSucursal > 0) {
         <li class="nav-item dropdown">
           <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">Inventario</a>
           <ul class="dropdown-menu dropdown-menu-dark">
-            <li><a class="dropdown-item" href="panel.php">Inventario sucursal</a></li>
-            <?php if ($rolUsuario === 'Admin'): ?>
-              <li><a class="dropdown-item" href="inventario_global.php">Inventario global</a></li>
-              <li><a class="dropdown-item" href="inventario_resumen.php">Resumen Global</a></li> <!-- NUEVO -->
-              <li><a class="dropdown-item" href="inventario_eulalia.php">Inventario Eulalia</a></li>
+            <?php if (in_array($rolUsuario, ['Ejecutivo','Gerente'])): ?>
+              <!-- SOLO Ejecutivo / Gerente -->
+              <li><a class="dropdown-item" href="panel.php">Inventario sucursal</a></li>
+            <?php endif; ?>
+
+            <?php if (in_array($rolUsuario, ['Admin','Subdistribuidor'])): ?>
+              <!-- Admin y Subdistribuidor -->
               <li><a class="dropdown-item" href="inventario_subdistribuidor.php">Inventario subdistribuidor</a></li>
+            <?php endif; ?>
+
+            <?php if (in_array($rolUsuario, ['Admin','GerenteZona'])): ?>
+              <!-- Admin y GerenteZona -->
+              <li><a class="dropdown-item" href="inventario_global.php">Inventario global</a></li>
+            <?php endif; ?>
+
+            <?php if ($rolUsuario === 'Admin'): ?>
+              <!-- SOLO Admin -->
+              <li><a class="dropdown-item" href="inventario_resumen.php">Resumen Global</a></li>
+              <li><a class="dropdown-item" href="inventario_eulalia.php">Inventario Eulalia</a></li>
             <?php endif; ?>
           </ul>
         </li>
 
-        <?php if ($rolUsuario !== 'Ejecutivo'): ?>
-          <!-- TRASPASOS -->
+        <?php if (in_array($rolUsuario, ['Gerente','Admin'])): ?>
+          <!-- TRASPASOS (solo Gerente/Admin) -->
           <li class="nav-item dropdown">
             <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">Traspasos</a>
             <ul class="dropdown-menu dropdown-menu-dark">
@@ -85,13 +98,11 @@ if ($idSucursal > 0) {
                 <li><a class="dropdown-item" href="generar_traspaso.php">Generar traspaso desde Eulalia</a></li>
               <?php endif; ?>
 
-              <?php if (in_array($rolUsuario, ['Gerente', 'Admin'])): ?>
-                <li><a class="dropdown-item" href="generar_traspaso_sims.php">Generar traspaso SIMs</a></li>
-                <li><hr class="dropdown-divider"></li>
-                <li class="dropdown-header">SIMs</li>
-                <li><a class="dropdown-item" href="traspasos_sims_pendientes.php">SIMs pendientes</a></li> <!-- NUEVO -->
-                <li><a class="dropdown-item" href="traspasos_sims_salientes.php">SIMs salientes</a></li>  <!-- NUEVO -->
-              <?php endif; ?>
+              <li><a class="dropdown-item" href="generar_traspaso_sims.php">Generar traspaso SIMs</a></li>
+              <li><hr class="dropdown-divider"></li>
+              <li class="dropdown-header">SIMs</li>
+              <li><a class="dropdown-item" href="traspasos_sims_pendientes.php">SIMs pendientes</a></li>
+              <li><a class="dropdown-item" href="traspasos_sims_salientes.php">SIMs salientes</a></li>
 
               <?php if ($rolUsuario === 'Gerente'): ?>
                 <li><hr class="dropdown-divider"></li>
@@ -142,14 +153,12 @@ if ($idSucursal > 0) {
         </li>
 
         <?php if ($rolUsuario === 'Admin'): ?>
-          <!-- RH (antes Nómina) -->
+          <!-- RH -->
           <li class="nav-item dropdown">
             <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">RH</a>
             <ul class="dropdown-menu dropdown-menu-dark">
-              <!-- Reportes de nómina -->
               <li><a class="dropdown-item" href="reporte_nomina.php">Reporte semanal</a></li>
               <li><a class="dropdown-item" href="reporte_nomina_gerentes_zona.php">Gerentes zona</a></li>
-
               <li><hr class="dropdown-divider"></li>
               <li class="dropdown-header">Expedientes</li>
               <li><a class="dropdown-item" href="admin_expedientes.php">Panel de expedientes</a></li>
