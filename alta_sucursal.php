@@ -9,25 +9,41 @@ include 'db.php';
 $mensaje = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $nombre = trim($_POST['nombre']);
-    $zona = $_POST['zona'];
-    $tipo_sucursal = $_POST['tipo_sucursal'];
-    $cuota_semanal = (float)$_POST['cuota_semanal'];
+    $nombre        = trim($_POST['nombre'] ?? '');
+    $zona          = $_POST['zona'] ?? '';
+    $tipo_sucursal = $_POST['tipo_sucursal'] ?? '';
+    $subtipo       = $_POST['subtipo'] ?? '';
+    $cuota_semanal = isset($_POST['cuota_semanal']) ? (float)$_POST['cuota_semanal'] : 0;
 
     if ($nombre && $zona && $tipo_sucursal) {
-        // Si es almacén, la cuota semanal será 0
-        if ($tipo_sucursal == 'Almacen') {
+
+        // Normalizar reglas:
+        // - Almacén: cuota = 0 y subtipo = Propia
+        if ($tipo_sucursal === 'Almacen') {
             $cuota_semanal = 0;
+            $subtipo = 'Propia';
         }
 
-        $stmt = $conn->prepare("INSERT INTO sucursales (nombre, zona, cuota_semanal, tipo_sucursal) VALUES (?,?,?,?)");
-        $stmt->bind_param("ssds", $nombre, $zona, $cuota_semanal, $tipo_sucursal);
-        $stmt->execute();
-        $stmt->close();
+        // Si es Tienda y no se envió subtipo, por defecto Propia
+        if ($tipo_sucursal === 'Tienda' && !$subtipo) {
+            $subtipo = 'Propia';
+        }
 
-        $mensaje = "<div class='alert alert-success'>✅ Sucursal <b>$nombre</b> registrada correctamente.</div>";
+        // Insertar
+        $stmt = $conn->prepare("
+            INSERT INTO sucursales (nombre, zona, cuota_semanal, tipo_sucursal, subtipo)
+            VALUES (?,?,?,?,?)
+        ");
+        // tipos: s (nombre) s (zona) d (cuota) s (tipo) s (subtipo)
+        $stmt->bind_param("ssdss", $nombre, $zona, $cuota_semanal, $tipo_sucursal, $subtipo);
+        if ($stmt->execute()) {
+            $mensaje = "<div class='alert alert-success'>✅ Sucursal <b>".htmlspecialchars($nombre)."</b> registrada correctamente.</div>";
+        } else {
+            $mensaje = "<div class='alert alert-danger'>❌ Error al guardar: ".htmlspecialchars($stmt->error)."</div>";
+        }
+        $stmt->close();
     } else {
-        $mensaje = "<div class='alert alert-danger'>❌ Debes completar todos los campos.</div>";
+        $mensaje = "<div class='alert alert-danger'>❌ Debes completar todos los campos obligatorios.</div>";
     }
 }
 ?>
@@ -64,7 +80,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         <div class="mb-3">
             <label class="form-label">Tipo de Sucursal</label>
-            <select name="tipo_sucursal" class="form-select" required>
+            <select name="tipo_sucursal" id="tipo_sucursal" class="form-select" required>
                 <option value="">-- Selecciona Tipo --</option>
                 <option value="Tienda">Tienda</option>
                 <option value="Almacen">Almacén</option>
@@ -72,14 +88,51 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         </div>
 
         <div class="mb-3">
+            <label class="form-label">Subtipo</label>
+            <select name="subtipo" id="subtipo" class="form-select">
+                <option value="Propia">Propia</option>
+                <option value="Subdistribuidor">Subdistribuidor</option>
+                <option value="Master Admin">Master Admin</option>
+            </select>
+            <small class="text-muted">Para almacenes, el subtipo se fija en Propia automáticamente.</small>
+        </div>
+
+        <div class="mb-3">
             <label class="form-label">Cuota Semanal ($)</label>
-            <input type="number" name="cuota_semanal" class="form-control" value="0" min="0" step="0.01">
-            <small class="text-muted">Para almacenes, dejar en 0.</small>
+            <input type="number" name="cuota_semanal" id="cuota_semanal" class="form-control" value="0" min="0" step="0.01">
+            <small class="text-muted">Para almacenes, se asigna 0 automáticamente.</small>
         </div>
 
         <button type="submit" class="btn btn-primary">Registrar Sucursal</button>
     </form>
 </div>
+
+<script>
+  const tipo = document.getElementById('tipo_sucursal');
+  const subtipo = document.getElementById('subtipo');
+  const cuota = document.getElementById('cuota_semanal');
+
+  function aplicarReglas() {
+    if (tipo.value === 'Almacen') {
+      // Almacén: subtipo Propia y bloqueado; cuota 0 y bloqueada
+      subtipo.value = 'Propia';
+      subtipo.setAttribute('disabled', 'disabled');
+      cuota.value = 0;
+      cuota.setAttribute('readonly', 'readonly');
+    } else if (tipo.value === 'Tienda') {
+      subtipo.removeAttribute('disabled');
+      cuota.removeAttribute('readonly');
+    } else {
+      // Estado inicial
+      subtipo.removeAttribute('disabled');
+      cuota.removeAttribute('readonly');
+    }
+  }
+
+  tipo.addEventListener('change', aplicarReglas);
+  // Ejecutar al cargar por si el navegador mantiene valores previos
+  aplicarReglas();
+</script>
 
 </body>
 </html>

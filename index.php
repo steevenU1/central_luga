@@ -11,7 +11,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   $usuario  = $_POST['usuario'] ?? '';
   $password = $_POST['password'] ?? '';
 
-  $sql  = "SELECT * FROM usuarios WHERE usuario = ?";
+  // Traemos solo lo necesario e incluimos must_change_password
+  $sql  = "SELECT id, nombre, id_sucursal, rol, password, activo, must_change_password 
+           FROM usuarios 
+           WHERE usuario = ? 
+           LIMIT 1";
   $stmt = $conn->prepare($sql);
   $stmt->bind_param("s", $usuario);
   $stmt->execute();
@@ -19,15 +23,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
   if ($row = $result->fetch_assoc()) {
     if ((int)$row['activo'] !== 1) {
+      // Usuario inactivo
       $mensaje = "⚠️ Tu cuenta ha sido dada de baja.";
-    } elseif ($password === $row['password']) { // (mejorar con password_hash en otra iteración)
-      $_SESSION['id_usuario']  = $row['id'];
-      $_SESSION['nombre']      = $row['nombre'];
-      $_SESSION['id_sucursal'] = $row['id_sucursal'];
-      $_SESSION['rol']         = $row['rol'];
-      header("Location: dashboard_unificado.php"); exit();
     } else {
-      $mensaje = "❌ Contraseña incorrecta";
+      // Soporte mixto: hash (password_verify) y fallback a texto plano si aún no migran
+      $hashInfo = password_get_info($row['password']);
+      $ok = false;
+
+      if (!empty($hashInfo['algo'])) {
+        // Parece hash (bcrypt/argon)
+        $ok = password_verify($password, $row['password']);
+      } else {
+        // Fallback temporal a comparación directa (para usuarios aún no migrados)
+        $ok = hash_equals($row['password'], $password);
+      }
+
+      if ($ok) {
+        // Login correcto
+        session_regenerate_id(true);
+        $_SESSION['id_usuario']  = (int)$row['id'];
+        $_SESSION['nombre']      = $row['nombre'];
+        $_SESSION['id_sucursal'] = (int)$row['id_sucursal'];
+        $_SESSION['rol']         = $row['rol'];
+        $_SESSION['must_change_password'] = (int)$row['must_change_password'] === 1;
+
+        if (!empty($_SESSION['must_change_password'])) {
+          header("Location: cambiar_password.php?force=1"); 
+          exit();
+        } else {
+          header("Location: dashboard_unificado.php"); 
+          exit();
+        }
+      } else {
+        $mensaje = "❌ Contraseña incorrecta";
+      }
     }
   } else {
     $mensaje = "❌ Usuario no encontrado";
