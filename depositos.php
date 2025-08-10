@@ -10,13 +10,12 @@ include 'navbar.php';
 
 $msg = '';
 
-// 🔹 1️⃣ Validar un depósito
+// 1) Validar un depósito
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['id_deposito'], $_POST['accion'])) {
     $idDeposito = intval($_POST['id_deposito']);
     $accion = $_POST['accion'];
 
     if ($accion === 'Validar') {
-        // Marcar depósito como validado
         $stmt = $conn->prepare("
             UPDATE depositos_sucursal
             SET estado='Validado', id_admin_valida=?, actualizado_en=NOW()
@@ -25,7 +24,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['id_deposito'], $_POST
         $stmt->bind_param("ii", $_SESSION['id_usuario'], $idDeposito);
         $stmt->execute();
 
-        // 🔹 Verificar si ya se completó el corte para cerrarlo
+        // Cierra corte si ya se cubrió
         $sqlCorte = "
             SELECT ds.id_corte, cc.total_efectivo,
                    IFNULL(SUM(ds2.monto_depositado),0) AS suma_depositos
@@ -41,7 +40,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['id_deposito'], $_POST
         $corteData = $stmtCorte->get_result()->fetch_assoc();
 
         if ($corteData && $corteData['suma_depositos'] >= $corteData['total_efectivo']) {
-            // Cerrar corte automáticamente
             $stmtClose = $conn->prepare("
                 UPDATE cortes_caja
                 SET estado='Cerrado', depositado=1, monto_depositado=?, fecha_deposito=NOW()
@@ -55,7 +53,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['id_deposito'], $_POST
     }
 }
 
-// 🔹 2️⃣ Depósitos pendientes (agrupados por corte)
+// 2) Depósitos pendientes (agrupados por corte)
 $sqlPendientes = "
     SELECT ds.id AS id_deposito,
            s.nombre AS sucursal,
@@ -65,7 +63,8 @@ $sqlPendientes = "
            ds.monto_depositado,
            ds.banco,
            ds.referencia,
-           ds.estado
+           ds.estado,
+           ds.comprobante_archivo
     FROM depositos_sucursal ds
     INNER JOIN cortes_caja cc ON cc.id = ds.id_corte
     INNER JOIN sucursales s ON s.id = ds.id_sucursal
@@ -74,7 +73,25 @@ $sqlPendientes = "
 ";
 $pendientes = $conn->query($sqlPendientes)->fetch_all(MYSQLI_ASSOC);
 
-// 🔹 3️⃣ Historial de depósitos
+// 3) Filtros para Historial
+$sucursales = $conn->query("SELECT id, nombre FROM sucursales ORDER BY nombre")->fetch_all(MYSQLI_ASSOC);
+
+$sucursal_id = isset($_GET['sucursal_id']) ? (int)$_GET['sucursal_id'] : 0;
+$desde       = trim($_GET['desde'] ?? '');
+$hasta       = trim($_GET['hasta'] ?? '');
+$semana      = trim($_GET['semana'] ?? ''); // formato YYYY-Www (input type=week)
+
+// Si viene semana, calculamos lunes-domingo y anulamos desde/hasta
+if ($semana && preg_match('/^(\d{4})-W(\d{2})$/', $semana, $m)) {
+    $yr = (int)$m[1]; $wk = (int)$m[2];
+    $dt = new DateTime();
+    $dt->setISODate($yr, $wk); // lunes
+    $desde = $dt->format('Y-m-d');
+    $dt->modify('+6 days');    // domingo
+    $hasta = $dt->format('Y-m-d');
+}
+
+// 3b) Construir consulta del historial con filtros
 $sqlHistorial = "
     SELECT ds.id AS id_deposito,
            s.nombre AS sucursal,
@@ -84,31 +101,46 @@ $sqlHistorial = "
            ds.monto_depositado,
            ds.banco,
            ds.referencia,
-           ds.estado
+           ds.estado,
+           ds.comprobante_archivo
     FROM depositos_sucursal ds
     INNER JOIN cortes_caja cc ON cc.id = ds.id_corte
     INNER JOIN sucursales s ON s.id = ds.id_sucursal
-    ORDER BY ds.fecha_deposito DESC
+    WHERE 1=1
 ";
-$historial = $conn->query($sqlHistorial)->fetch_all(MYSQLI_ASSOC);
+$types = '';
+$params = [];
 
-// 🔹 4️⃣ Saldos por sucursal (corregido)
+if ($sucursal_id > 0) {
+    $sqlHistorial .= " AND s.id = ? ";
+    $types .= 'i'; $params[] = $sucursal_id;
+}
+if ($desde !== '') {
+    $sqlHistorial .= " AND DATE(ds.fecha_deposito) >= ? ";
+    $types .= 's'; $params[] = $desde;
+}
+if ($hasta !== '') {
+    $sqlHistorial .= " AND DATE(ds.fecha_deposito) <= ? ";
+    $types .= 's'; $params[] = $hasta;
+}
+
+$sqlHistorial .= " ORDER BY ds.fecha_deposito DESC, ds.id DESC";
+
+$stmtH = $conn->prepare($sqlHistorial);
+if ($types) { $stmtH->bind_param($types, ...$params); }
+$stmtH->execute();
+$historial = $stmtH->get_result()->fetch_all(MYSQLI_ASSOC);
+$stmtH->close();
+
+// 4) Saldos por sucursal
 $sqlSaldos = "
     SELECT 
         s.id,
         s.nombre AS sucursal,
         IFNULL(SUM(c.monto_efectivo),0) AS total_efectivo,
-        IFNULL((
-            SELECT SUM(d.monto_depositado) 
-            FROM depositos_sucursal d 
-            WHERE d.id_sucursal = s.id AND d.estado='Validado'
-        ),0) AS total_depositado,
+        IFNULL((SELECT SUM(d.monto_depositado) FROM depositos_sucursal d WHERE d.id_sucursal = s.id AND d.estado='Validado'),0) AS total_depositado,
         GREATEST(
-            IFNULL(SUM(c.monto_efectivo),0) - IFNULL((
-                SELECT SUM(d.monto_depositado) 
-                FROM depositos_sucursal d 
-                WHERE d.id_sucursal = s.id AND d.estado='Validado'
-            ),0), 
+            IFNULL(SUM(c.monto_efectivo),0) - IFNULL((SELECT SUM(d.monto_depositado) FROM depositos_sucursal d WHERE d.id_sucursal = s.id AND d.estado='Validado'),0),
         0) AS saldo_pendiente
     FROM sucursales s
     LEFT JOIN cobros c 
@@ -119,125 +151,242 @@ $sqlSaldos = "
 ";
 $saldos = $conn->query($sqlSaldos)->fetch_all(MYSQLI_ASSOC);
 ?>
-
 <!DOCTYPE html>
 <html lang="es">
 <head>
-    <meta charset="UTF-8">
-    <title>Validación de Depósitos</title>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+  <meta charset="UTF-8">
+  <title>Validación de Depósitos</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+  <style>
+    .modal-xl { max-width: 1000px; }
+    #visorFrame { width: 100%; height: 80vh; border: 0; }
+  </style>
 </head>
 <body class="bg-light">
 
 <div class="container mt-4">
-    <h2>🏦 Validación de Depósitos - Admin</h2>
-    <?= $msg ?>
+  <h2>🏦 Validación de Depósitos - Admin</h2>
+  <?= $msg ?>
 
-    <h4 class="mt-4">Depósitos Pendientes de Validación</h4>
-    <?php if (count($pendientes) === 0): ?>
-        <div class="alert alert-info">No hay depósitos pendientes.</div>
-    <?php else: ?>
-        <table class="table table-bordered table-sm">
-            <thead class="table-dark">
-                <tr>
-                    <th>ID Depósito</th>
-                    <th>Sucursal</th>
-                    <th>ID Corte</th>
-                    <th>Fecha Corte</th>
-                    <th>Monto Depósito</th>
-                    <th>Banco</th>
-                    <th>Referencia</th>
-                    <th>Acciones</th>
-                </tr>
-            </thead>
-            <tbody>
-                <?php 
-                $lastCorte = null;
-                foreach ($pendientes as $p): 
-                    if ($lastCorte !== $p['id_corte']): ?>
-                        <tr class="table-secondary">
-                            <td colspan="8">
-                                Corte #<?= $p['id_corte'] ?> - <?= $p['sucursal'] ?> 
-                                (Fecha: <?= $p['fecha_corte'] ?> | Total Efectivo: $<?= number_format($p['total_efectivo'],2) ?>)
-                            </td>
-                        </tr>
-                    <?php endif; ?>
-                <tr>
-                    <td><?= $p['id_deposito'] ?></td>
-                    <td><?= $p['sucursal'] ?></td>
-                    <td><?= $p['id_corte'] ?></td>
-                    <td><?= $p['fecha_corte'] ?></td>
-                    <td>$<?= number_format($p['monto_depositado'],2) ?></td>
-                    <td><?= $p['banco'] ?></td>
-                    <td><?= $p['referencia'] ?></td>
-                    <td>
-                        <form method="POST">
-                            <input type="hidden" name="id_deposito" value="<?= $p['id_deposito'] ?>">
-                            <button name="accion" value="Validar" class="btn btn-success btn-sm">✅ Validar</button>
-                        </form>
-                    </td>
-                </tr>
-                <?php 
-                    $lastCorte = $p['id_corte'];
-                endforeach; ?>
-            </tbody>
-        </table>
-    <?php endif; ?>
-
-    <h4 class="mt-4">Historial de Depósitos</h4>
-    <table class="table table-bordered table-sm">
-        <thead class="table-dark">
-            <tr>
-                <th>ID</th>
-                <th>Sucursal</th>
-                <th>ID Corte</th>
-                <th>Fecha Corte</th>
-                <th>Fecha Depósito</th>
-                <th>Monto</th>
-                <th>Banco</th>
-                <th>Referencia</th>
-                <th>Estado</th>
-            </tr>
-        </thead>
-        <tbody>
-            <?php foreach ($historial as $h): ?>
-            <tr class="<?= $h['estado']=='Validado'?'table-success':'table-warning' ?>">
-                <td><?= $h['id_deposito'] ?></td>
-                <td><?= $h['sucursal'] ?></td>
-                <td><?= $h['id_corte'] ?></td>
-                <td><?= $h['fecha_corte'] ?></td>
-                <td><?= $h['fecha_deposito'] ?></td>
-                <td>$<?= number_format($h['monto_depositado'],2) ?></td>
-                <td><?= $h['banco'] ?></td>
-                <td><?= $h['referencia'] ?></td>
-                <td><?= $h['estado'] ?></td>
-            </tr>
-            <?php endforeach; ?>
-        </tbody>
+  <h4 class="mt-4">Depósitos Pendientes de Validación</h4>
+  <?php if (count($pendientes) === 0): ?>
+    <div class="alert alert-info">No hay depósitos pendientes.</div>
+  <?php else: ?>
+    <table class="table table-bordered table-sm align-middle">
+      <thead class="table-dark">
+        <tr>
+          <th>ID Depósito</th>
+          <th>Sucursal</th>
+          <th>ID Corte</th>
+          <th>Fecha Corte</th>
+          <th>Monto</th>
+          <th>Banco</th>
+          <th>Referencia</th>
+          <th>Comprobante</th>
+          <th>Acciones</th>
+        </tr>
+      </thead>
+      <tbody>
+      <?php 
+      $lastCorte = null;
+      foreach ($pendientes as $p): 
+        if ($lastCorte !== $p['id_corte']): ?>
+          <tr class="table-secondary">
+            <td colspan="9">
+              Corte #<?= (int)$p['id_corte'] ?> - <?= htmlspecialchars($p['sucursal']) ?>
+              (Fecha: <?= htmlspecialchars($p['fecha_corte']) ?> | Total Efectivo: $<?= number_format($p['total_efectivo'],2) ?>)
+            </td>
+          </tr>
+        <?php endif; ?>
+        <tr>
+          <td><?= (int)$p['id_deposito'] ?></td>
+          <td><?= htmlspecialchars($p['sucursal']) ?></td>
+          <td><?= (int)$p['id_corte'] ?></td>
+          <td><?= htmlspecialchars($p['fecha_corte']) ?></td>
+          <td>$<?= number_format($p['monto_depositado'],2) ?></td>
+          <td><?= htmlspecialchars($p['banco']) ?></td>
+          <td><?= htmlspecialchars($p['referencia']) ?></td>
+          <td>
+            <?php if (!empty($p['comprobante_archivo'])): ?>
+              <button 
+                class="btn btn-primary btn-sm js-ver" 
+                data-src="deposito_comprobante.php?id=<?= (int)$p['id_deposito'] ?>" 
+                data-bs-toggle="modal" data-bs-target="#visorModal">
+                Ver
+              </button>
+            <?php else: ?>
+              <span class="text-muted">—</span>
+            <?php endif; ?>
+          </td>
+          <td>
+            <form method="POST" class="d-inline">
+              <input type="hidden" name="id_deposito" value="<?= (int)$p['id_deposito'] ?>">
+              <button name="accion" value="Validar" class="btn btn-success btn-sm">✅ Validar</button>
+            </form>
+          </td>
+        </tr>
+      <?php 
+        $lastCorte = $p['id_corte'];
+      endforeach; ?>
+      </tbody>
     </table>
+  <?php endif; ?>
 
-    <h4 class="mt-5">📊 Saldos por Sucursal</h4>
-    <table class="table table-bordered table-sm mt-3">
-        <thead class="table-dark">
-            <tr>
-                <th>Sucursal</th>
-                <th>Total Efectivo Cobrado</th>
-                <th>Total Depositado</th>
-                <th>Saldo Pendiente</th>
-            </tr>
-        </thead>
-        <tbody>
-            <?php foreach($saldos as $s): ?>
-            <tr class="<?= $s['saldo_pendiente']>0?'table-warning':'table-success' ?>">
-                <td><?= $s['sucursal'] ?></td>
-                <td>$<?= number_format($s['total_efectivo'],2) ?></td>
-                <td>$<?= number_format($s['total_depositado'],2) ?></td>
-                <td>$<?= number_format($s['saldo_pendiente'],2) ?></td>
-            </tr>
-            <?php endforeach; ?>
-        </tbody>
-    </table>
+  <div class="d-flex align-items-center mt-4">
+    <h4 class="mb-0">Historial de Depósitos</h4>
+    <small class="text-muted ms-2">(usa los filtros para acotar resultados)</small>
+  </div>
+
+  <!-- Filtros -->
+  <form class="row g-2 mt-2 mb-3" method="get">
+    <div class="col-md-4 col-lg-3">
+      <label class="form-label mb-0">Sucursal</label>
+      <select name="sucursal_id" class="form-select form-select-sm">
+        <option value="0">Todas</option>
+        <?php foreach ($sucursales as $s): ?>
+          <option value="<?= (int)$s['id'] ?>" <?= $sucursal_id===(int)$s['id']?'selected':'' ?>>
+            <?= htmlspecialchars($s['nombre']) ?>
+          </option>
+        <?php endforeach; ?>
+      </select>
+    </div>
+    <div class="col-md-4 col-lg-3">
+      <label class="form-label mb-0">Desde</label>
+      <input type="date" name="desde" class="form-control form-control-sm" value="<?= htmlspecialchars($desde) ?>" <?= $semana ? 'disabled' : '' ?>>
+    </div>
+    <div class="col-md-4 col-lg-3">
+      <label class="form-label mb-0">Hasta</label>
+      <input type="date" name="hasta" class="form-control form-control-sm" value="<?= htmlspecialchars($hasta) ?>" <?= $semana ? 'disabled' : '' ?>>
+    </div>
+    <div class="col-md-4 col-lg-3">
+      <label class="form-label mb-0">Semana (ISO)</label>
+      <input type="week" name="semana" class="form-control form-control-sm" value="<?= htmlspecialchars($semana) ?>">
+      <small class="text-muted">Si eliges semana, ignora las fechas.</small>
+    </div>
+    <div class="col-12 d-flex gap-2">
+      <button class="btn btn-primary btn-sm">Aplicar filtros</button>
+      <a class="btn btn-outline-secondary btn-sm" href="admin_depositos.php">Limpiar</a>
+    </div>
+  </form>
+
+  <table class="table table-bordered table-sm align-middle">
+    <thead class="table-dark">
+      <tr>
+        <th>ID</th>
+        <th>Sucursal</th>
+        <th>ID Corte</th>
+        <th>Fecha Corte</th>
+        <th>Fecha Depósito</th>
+        <th>Monto</th>
+        <th>Banco</th>
+        <th>Referencia</th>
+        <th>Comprobante</th>
+        <th>Estado</th>
+      </tr>
+    </thead>
+    <tbody>
+      <?php if (!$historial): ?>
+        <tr><td colspan="10" class="text-muted">Sin resultados con los filtros actuales.</td></tr>
+      <?php endif; ?>
+      <?php foreach ($historial as $h): ?>
+        <tr class="<?= $h['estado']=='Validado'?'table-success':'table-warning' ?>">
+          <td><?= (int)$h['id_deposito'] ?></td>
+          <td><?= htmlspecialchars($h['sucursal']) ?></td>
+          <td><?= (int)$h['id_corte'] ?></td>
+          <td><?= htmlspecialchars($h['fecha_corte']) ?></td>
+          <td><?= htmlspecialchars($h['fecha_deposito']) ?></td>
+          <td>$<?= number_format($h['monto_depositado'],2) ?></td>
+          <td><?= htmlspecialchars($h['banco']) ?></td>
+          <td><?= htmlspecialchars($h['referencia']) ?></td>
+          <td>
+            <?php if (!empty($h['comprobante_archivo'])): ?>
+              <button 
+                class="btn btn-outline-primary btn-sm js-ver" 
+                data-src="deposito_comprobante.php?id=<?= (int)$h['id_deposito'] ?>" 
+                data-bs-toggle="modal" data-bs-target="#visorModal">
+                Ver
+              </button>
+            <?php else: ?>
+              <span class="text-muted">—</span>
+            <?php endif; ?>
+          </td>
+          <td><?= htmlspecialchars($h['estado']) ?></td>
+        </tr>
+      <?php endforeach; ?>
+    </tbody>
+  </table>
+
+  <h4 class="mt-5">📊 Saldos por Sucursal</h4>
+  <table class="table table-bordered table-sm mt-3">
+    <thead class="table-dark">
+      <tr>
+        <th>Sucursal</th>
+        <th>Total Efectivo Cobrado</th>
+        <th>Total Depositado</th>
+        <th>Saldo Pendiente</th>
+      </tr>
+    </thead>
+    <tbody>
+      <?php foreach($saldos as $s): ?>
+      <tr class="<?= $s['saldo_pendiente']>0?'table-warning':'table-success' ?>">
+        <td><?= htmlspecialchars($s['sucursal']) ?></td>
+        <td>$<?= number_format($s['total_efectivo'],2) ?></td>
+        <td>$<?= number_format($s['total_depositado'],2) ?></td>
+        <td>$<?= number_format($s['saldo_pendiente'],2) ?></td>
+      </tr>
+      <?php endforeach; ?>
+    </tbody>
+  </table>
 </div>
 
+<!-- Modal visor -->
+<div class="modal fade" id="visorModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Comprobante de depósito</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+      </div>
+      <div class="modal-body p-0">
+        <iframe id="visorFrame" src=""></iframe>
+      </div>
+      <div class="modal-footer">
+        <a id="btnAbrirNueva" href="#" target="_blank" class="btn btn-outline-secondary">Abrir en nueva pestaña</a>
+        <button type="button" class="btn btn-primary" data-bs-dismiss="modal">Listo</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  // Toggle inputs cuando seleccionas semana
+  const semanaInput = document.querySelector('input[name="semana"]');
+  const desdeInput  = document.querySelector('input[name="desde"]');
+  const hastaInput  = document.querySelector('input[name="hasta"]');
+  if (semanaInput) {
+    semanaInput.addEventListener('input', () => {
+      const usingWeek = semanaInput.value.trim() !== '';
+      desdeInput.disabled = usingWeek;
+      hastaInput.disabled = usingWeek;
+      if (usingWeek) { desdeInput.value=''; hastaInput.value=''; }
+    });
+  }
+
+  // Visor modal
+  const visorModal  = document.getElementById('visorModal');
+  const visorFrame  = document.getElementById('visorFrame');
+  const btnAbrir    = document.getElementById('btnAbrirNueva');
+  document.querySelectorAll('.js-ver').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const src = btn.getAttribute('data-src');
+      visorFrame.src = src;
+      btnAbrir.href  = src;
+    });
+  });
+  visorModal.addEventListener('hidden.bs.modal', () => {
+    visorFrame.src = '';
+    btnAbrir.href  = '#';
+  });
+</script>
 </body>
 </html>
