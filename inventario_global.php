@@ -1,21 +1,31 @@
 <?php
 session_start();
-if (!isset($_SESSION['id_usuario']) || $_SESSION['rol'] != 'Admin') {
+if (!isset($_SESSION['id_usuario'])) {
     header("Location: 403.php");
     exit();
 }
+
+$ROL = $_SESSION['rol'] ?? '';
+$ALLOWED = ['Admin','GerenteZona']; // Acceso permitido
+if (!in_array($ROL, $ALLOWED, true)) {
+    header("Location: 403.php");
+    exit();
+}
+
+// Forzamos que NO se pueda editar precio desde esta vista
+$canEditPrice = false;
 
 include 'db.php';
 include 'navbar.php';
 include 'verificar_sesion.php';
 
-// Filtros
-$filtroImei = $_GET['imei'] ?? '';
-$filtroSucursal = $_GET['sucursal'] ?? '';
-$filtroEstatus = $_GET['estatus'] ?? '';
-$filtroAntiguedad = $_GET['antiguedad'] ?? '';
-$filtroPrecioMin = $_GET['precio_min'] ?? '';
-$filtroPrecioMax = $_GET['precio_max'] ?? '';
+// ===== Filtros =====
+$filtroImei       = $_GET['imei']        ?? '';
+$filtroSucursal   = $_GET['sucursal']    ?? '';
+$filtroEstatus    = $_GET['estatus']     ?? '';
+$filtroAntiguedad = $_GET['antiguedad']  ?? '';
+$filtroPrecioMin  = $_GET['precio_min']  ?? '';
+$filtroPrecioMax  = $_GET['precio_max']  ?? '';
 
 $sql = "
     SELECT i.id AS id_inventario,
@@ -33,11 +43,11 @@ $sql = "
 ";
 
 $params = [];
-$types = "";
+$types  = "";
 
 if ($filtroSucursal !== '') {
     $sql .= " AND s.id = ?";
-    $params[] = $filtroSucursal;
+    $params[] = (int)$filtroSucursal;
     $types .= "i";
 }
 if ($filtroImei !== '') {
@@ -61,12 +71,12 @@ if ($filtroAntiguedad == '<30') {
 }
 if ($filtroPrecioMin !== '') {
     $sql .= " AND p.precio_lista >= ?";
-    $params[] = $filtroPrecioMin;
+    $params[] = (float)$filtroPrecioMin;
     $types .= "d";
 }
 if ($filtroPrecioMax !== '') {
     $sql .= " AND p.precio_lista <= ?";
-    $params[] = $filtroPrecioMax;
+    $params[] = (float)$filtroPrecioMax;
     $types .= "d";
 }
 
@@ -81,11 +91,12 @@ $result = $stmt->get_result();
 
 $sucursales = $conn->query("SELECT id, nombre FROM sucursales ORDER BY nombre");
 
+// Datos para gráfica
 $rangos = ['<30' => 0, '30-90' => 0, '>90' => 0];
 $inventario = [];
 while ($row = $result->fetch_assoc()) {
     $inventario[] = $row;
-    $dias = $row['antiguedad_dias'];
+    $dias = (int)$row['antiguedad_dias'];
     if ($dias < 30) $rangos['<30']++;
     elseif ($dias <= 90) $rangos['30-90']++;
     else $rangos['>90']++;
@@ -96,16 +107,16 @@ while ($row = $result->fetch_assoc()) {
 <head>
     <meta charset="UTF-8">
     <title>Inventario Global</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="icon" href="/img/favicon.ico?v=7" sizes="any">
+
+    <!-- CSS -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
     <link rel="stylesheet" href="https://cdn.datatables.net/1.13.4/css/dataTables.bootstrap5.min.css">
-    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
-    <script src="https://cdn.datatables.net/1.13.4/js/jquery.dataTables.min.js"></script>
-    <script src="https://cdn.datatables.net/1.13.4/js/dataTables.bootstrap5.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body class="bg-light">
 <div class="container mt-4">
-    <h2>🌎 Inventario Global - Administradores</h2>
+    <h2>🌎 Inventario Global — <?= ($ROL==='Admin'?'Admin':'Gerente Zona') ?></h2>
     <p>Total de equipos visibles: <b><?= count($inventario) ?></b></p>
 
     <!-- Filtros -->
@@ -115,8 +126,8 @@ while ($row = $result->fetch_assoc()) {
                 <select name="sucursal" class="form-select">
                     <option value="">Todas las Sucursales</option>
                     <?php while ($s = $sucursales->fetch_assoc()): ?>
-                        <option value="<?= $s['id'] ?>" <?= $filtroSucursal==$s['id']?'selected':'' ?>>
-                            <?= $s['nombre'] ?>
+                        <option value="<?= (int)$s['id'] ?>" <?= $filtroSucursal==$s['id']?'selected':'' ?>>
+                            <?= htmlspecialchars($s['nombre'], ENT_QUOTES) ?>
                         </option>
                     <?php endwhile; ?>
                 </select>
@@ -134,9 +145,9 @@ while ($row = $result->fetch_assoc()) {
             <div class="col-md-2">
                 <select name="antiguedad" class="form-select">
                     <option value="">Todas las Antigüedades</option>
-                    <option value="<30" <?= $filtroAntiguedad=='<30'?'selected':'' ?>>< 30 días</option>
+                    <option value="<30"   <?= $filtroAntiguedad=='<30'?'selected':'' ?>>< 30 días</option>
                     <option value="30-90" <?= $filtroAntiguedad=='30-90'?'selected':'' ?>>30-90 días</option>
-                    <option value=">90" <?= $filtroAntiguedad=='>90'?'selected':'' ?>>> 90 días</option>
+                    <option value=">90"   <?= $filtroAntiguedad=='>90'?'selected':'' ?>>> 90 días</option>
                 </select>
             </div>
             <div class="col-md-2">
@@ -192,12 +203,12 @@ while ($row = $result->fetch_assoc()) {
             </tr>
         </thead>
         <tbody>
-            <?php foreach ($inventario as $row): 
-                $dias = $row['antiguedad_dias'];
+            <?php foreach ($inventario as $row):
+                $dias  = (int)$row['antiguedad_dias'];
                 $clase = $dias < 30 ? 'table-success' : ($dias <= 90 ? 'table-warning' : 'table-danger');
             ?>
             <tr class="<?= $clase ?>">
-                <td><?= $row['id_inventario'] ?></td>
+                <td><?= (int)$row['id_inventario'] ?></td>
                 <td><?= htmlspecialchars($row['sucursal'], ENT_QUOTES) ?></td>
                 <td><?= htmlspecialchars($row['marca'], ENT_QUOTES) ?></td>
                 <td><?= htmlspecialchars($row['modelo'], ENT_QUOTES) ?></td>
@@ -205,46 +216,35 @@ while ($row = $result->fetch_assoc()) {
                 <td><?= htmlspecialchars($row['capacidad'] ?? '-', ENT_QUOTES) ?></td>
                 <td><?= htmlspecialchars($row['imei1'] ?? '-', ENT_QUOTES) ?></td>
                 <td><?= htmlspecialchars($row['imei2'] ?? '-', ENT_QUOTES) ?></td>
-                <td>$<?= number_format($row['costo'],2) ?></td>
-                <td contenteditable="true" data-id="<?= $row['id_inventario'] ?>" class="editable-precio">
-                    <?= number_format($row['precio_lista'],2) ?>
-                </td>
-                <td><b>$<?= number_format($row['profit'],2) ?></b></td>
-                <td><?= $row['estatus'] ?></td>
-                <td><?= $row['fecha_ingreso'] ?></td>
+                <td>$<?= number_format((float)$row['costo'],2) ?></td>
+                <!-- Precio solo lectura -->
+                <td class="text-end">$<?= number_format((float)$row['precio_lista'],2) ?></td>
+                <td><b>$<?= number_format((float)$row['profit'],2) ?></b></td>
+                <td><?= htmlspecialchars($row['estatus'], ENT_QUOTES) ?></td>
+                <td><?= htmlspecialchars($row['fecha_ingreso'], ENT_QUOTES) ?></td>
                 <td><b><?= $dias ?> días</b></td>
             </tr>
             <?php endforeach; ?>
         </tbody>
     </table>
 </div>
+
+<!-- JS -->
+<script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+<script src="https://cdn.datatables.net/1.13.4/js/jquery.dataTables.min.js"></script>
+<script src="https://cdn.datatables.net/1.13.4/js/dataTables.bootstrap5.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
 <script>
-$(document).ready(function() {
-    $('#tablaInventario').DataTable({
-        "pageLength": 25,
-        "order": [[ 0, "desc" ]],
-        "language": {"url": "//cdn.datatables.net/plug-ins/1.13.4/i18n/es-ES.json"}
-    });
+$(function() {
+  $('#tablaInventario').DataTable({
+    pageLength: 25,
+    order: [[ 0, "desc" ]],
+    language: { url: "//cdn.datatables.net/plug-ins/1.13.4/i18n/es-ES.json" }
+  });
 });
 
-let ultimoValor = '';
-$(document).on('focus', '.editable-precio', function(){
-    ultimoValor = $(this).text().trim();
-});
-$(document).on('blur', '.editable-precio', function() {
-    let idInventario = $(this).data('id');
-    let nuevoPrecio = $(this).text().replace(/\$/g,'').replace(/,/g,'').trim();
-    if(nuevoPrecio === ultimoValor) return;
-    if($.isNumeric(nuevoPrecio) && parseFloat(nuevoPrecio) > 0){
-        $.post('actualizar_precio.php', { id: idInventario, precio: nuevoPrecio }, function(res){
-            alert(res);
-        });
-    } else {
-        alert("Ingrese un valor numérico válido");
-        $(this).text(ultimoValor);
-    }
-});
-
+// Gráfica
 const ctx = document.getElementById('graficaAntiguedad').getContext('2d');
 new Chart(ctx, {
     type: 'bar',
@@ -252,13 +252,14 @@ new Chart(ctx, {
         labels: ['<30 días', '30-90 días', '>90 días'],
         datasets: [{
             label: 'Cantidad de equipos',
-            data: [<?= $rangos['<30'] ?>, <?= $rangos['30-90'] ?>, <?= $rangos['>90'] ?>],
+            data: [<?= (int)$rangos['<30'] ?>, <?= (int)$rangos['30-90'] ?>, <?= (int)$rangos['>90'] ?>],
             backgroundColor: ['#28a745','#ffc107','#dc3545']
         }]
     },
     options: { responsive: true, plugins: { legend: { display: false } } }
 });
 
+// Top vendidos
 function cargarTopVendidos(rango = 'historico') {
     fetch('top_productos.php?rango=' + rango)
         .then(res => res.text())
