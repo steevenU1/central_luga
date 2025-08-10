@@ -69,6 +69,7 @@ if ($idSucursal > 0) {
             <li><a class="dropdown-item" href="panel.php">Inventario sucursal</a></li>
             <?php if ($rolUsuario === 'Admin'): ?>
               <li><a class="dropdown-item" href="inventario_global.php">Inventario global</a></li>
+              <li><a class="dropdown-item" href="inventario_resumen.php">Resumen Global</a></li> <!-- NUEVO -->
               <li><a class="dropdown-item" href="inventario_eulalia.php">Inventario Eulalia</a></li>
               <li><a class="dropdown-item" href="inventario_subdistribuidor.php">Inventario subdistribuidor</a></li>
             <?php endif; ?>
@@ -83,12 +84,23 @@ if ($idSucursal > 0) {
               <?php if ($rolUsuario === 'Admin'): ?>
                 <li><a class="dropdown-item" href="generar_traspaso.php">Generar traspaso desde Eulalia</a></li>
               <?php endif; ?>
+
               <?php if (in_array($rolUsuario, ['Gerente', 'Admin'])): ?>
                 <li><a class="dropdown-item" href="generar_traspaso_sims.php">Generar traspaso SIMs</a></li>
+                <li><hr class="dropdown-divider"></li>
+                <li class="dropdown-header">SIMs</li>
+                <li><a class="dropdown-item" href="traspasos_sims_pendientes.php">SIMs pendientes</a></li> <!-- NUEVO -->
+                <li><a class="dropdown-item" href="traspasos_sims_salientes.php">SIMs salientes</a></li>  <!-- NUEVO -->
               <?php endif; ?>
+
               <?php if ($rolUsuario === 'Gerente'): ?>
+                <li><hr class="dropdown-divider"></li>
+                <li class="dropdown-header">Equipos</li>
                 <li><a class="dropdown-item" href="traspaso_nuevo.php">Generar traspaso entre sucursales</a></li>
               <?php endif; ?>
+
+              <li><hr class="dropdown-divider"></li>
+              <li class="dropdown-header">Historial de equipos</li>
               <li><a class="dropdown-item" href="traspasos_pendientes.php">Historial traspasos entrantes</a></li>
               <li><a class="dropdown-item" href="traspasos_salientes.php">Historial traspasos salientes</a></li>
             </ul>
