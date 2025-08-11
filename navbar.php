@@ -67,22 +67,18 @@ if ($idSucursal > 0) {
           <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">Inventario</a>
           <ul class="dropdown-menu dropdown-menu-dark">
             <?php if (in_array($rolUsuario, ['Ejecutivo','Gerente'])): ?>
-              <!-- SOLO Ejecutivo / Gerente -->
               <li><a class="dropdown-item" href="panel.php">Inventario sucursal</a></li>
             <?php endif; ?>
 
             <?php if (in_array($rolUsuario, ['Admin','Subdistribuidor'])): ?>
-              <!-- Admin y Subdistribuidor -->
               <li><a class="dropdown-item" href="inventario_subdistribuidor.php">Inventario subdistribuidor</a></li>
             <?php endif; ?>
 
             <?php if (in_array($rolUsuario, ['Admin','GerenteZona'])): ?>
-              <!-- Admin y GerenteZona -->
               <li><a class="dropdown-item" href="inventario_global.php">Inventario global</a></li>
             <?php endif; ?>
 
             <?php if ($rolUsuario === 'Admin'): ?>
-              <!-- SOLO Admin -->
               <li><a class="dropdown-item" href="inventario_resumen.php">Resumen Global</a></li>
               <li><a class="dropdown-item" href="inventario_eulalia.php">Inventario Eulalia</a></li>
             <?php endif; ?>
@@ -90,7 +86,7 @@ if ($idSucursal > 0) {
         </li>
 
         <?php if (in_array($rolUsuario, ['Gerente','Admin'])): ?>
-          <!-- TRASPASOS (solo Gerente/Admin) -->
+          <!-- TRASPASOS -->
           <li class="nav-item dropdown">
             <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">Traspasos</a>
             <ul class="dropdown-menu dropdown-menu-dark">
@@ -143,11 +139,18 @@ if ($idSucursal > 0) {
           <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">Operación</a>
           <ul class="dropdown-menu dropdown-menu-dark">
             <li><a class="dropdown-item" href="lista_precios.php">Lista de precios</a></li>
+            
             <?php if ($rolUsuario === 'Gerente'): ?>
               <li><a class="dropdown-item" href="insumos_pedido.php">Pedido de insumos</a></li>
             <?php endif; ?>
+
             <?php if ($rolUsuario === 'Admin'): ?>
               <li><a class="dropdown-item" href="insumos_admin.php">Administrar insumos</a></li>
+            <?php endif; ?>
+
+            <?php if (in_array($rolUsuario, ['Gerente','Admin'])): ?>
+              <li><hr class="dropdown-divider"></li>
+              <li><a class="dropdown-item" href="gestionar_usuarios.php">Gestionar usuarios</a></li>
             <?php endif; ?>
           </ul>
         </li>
