@@ -181,6 +181,7 @@ if ($idSucursal > 0) {
               <li><a class="dropdown-item" href="esquemas_comisiones_ejecutivos.php">Esquema ejecutivos</a></li>
               <li><a class="dropdown-item" href="esquemas_comisiones_gerentes.php">Esquema gerentes</a></li>
               <li><a class="dropdown-item" href="esquemas_comisiones_pospago.php">Esquema pospago</a></li>
+              <li><a class="dropdown-item" href="comisiones_especiales_equipos.php">Comisiones escalables</a></li>
               <li><a class="dropdown-item" href="carga_masiva_productos.php">Carga masiva equipos</a></li>
               <li><a class="dropdown-item" href="carga_masiva_sims.php">Carga masiva SIMs</a></li>
               <li><a class="dropdown-item" href="alta_usuario.php">Alta usuario</a></li>
