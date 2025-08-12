@@ -4,6 +4,8 @@ if (session_status() === PHP_SESSION_NONE) {
 }
 include 'db.php';
 
+date_default_timezone_set('America/Mexico_City');
+
 $rolUsuario    = $_SESSION['rol'] ?? 'Ejecutivo';
 $nombreUsuario = $_SESSION['nombre'] ?? 'Usuario';
 $idSucursal    = (int)($_SESSION['id_sucursal'] ?? 0);
@@ -18,6 +20,17 @@ if ($idSucursal > 0) {
   $stmt->fetch();
   $stmt->close();
 }
+
+// Badge: Traspasos pendientes (para la sucursal destino del usuario)
+$badgeTraspasos = 0;
+if ($idSucursal > 0) {
+  $stmt = $conn->prepare("SELECT COUNT(*) FROM traspasos WHERE id_sucursal_destino=? AND estatus='Pendiente'");
+  $stmt->bind_param("i", $idSucursal);
+  $stmt->execute();
+  $stmt->bind_result($badgeTraspasos);
+  $stmt->fetch();
+  $stmt->close();
+}
 ?>
 
 <!-- Bootstrap CSS y JS -->
@@ -28,7 +41,7 @@ if ($idSucursal > 0) {
   <div class="container-fluid">
 
     <!-- LOGO -->
-    <a class="navbar-brand d-flex align-items-center" href="panel.php">
+    <a class="navbar-brand d-flex align-items-center" href="dashboard_unificado.php">
       <img src="https://i.ibb.co/DDw7yjYV/43f8e23a-8877-4928-9407-32d18fb70f79.png" alt="Logo" width="35" height="35" class="me-2" style="object-fit: contain;">
       <span>Central2.0</span>
     </a>
@@ -45,7 +58,6 @@ if ($idSucursal > 0) {
         <li class="nav-item dropdown">
           <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">Dashboard</a>
           <ul class="dropdown-menu dropdown-menu-dark">
-            <!-- NUEVO: Dashboard Diario (visible para todos) -->
             <li><a class="dropdown-item" href="productividad_dia.php">Dashboard Diario</a></li>
             <li><a class="dropdown-item" href="dashboard_unificado.php">Dashboard semanal</a></li>
             <li><a class="dropdown-item" href="dashboard_mensual.php">Dashboard mensual</a></li>
@@ -90,7 +102,12 @@ if ($idSucursal > 0) {
         <?php if (in_array($rolUsuario, ['Gerente','Admin'])): ?>
           <!-- TRASPASOS -->
           <li class="nav-item dropdown">
-            <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">Traspasos</a>
+            <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">
+              Traspasos
+              <?php if ((int)$badgeTraspasos > 0): ?>
+                <span class="badge rounded-pill text-bg-danger ms-1"><?= (int)$badgeTraspasos ?></span>
+              <?php endif; ?>
+            </a>
             <ul class="dropdown-menu dropdown-menu-dark">
               <?php if ($rolUsuario === 'Admin'): ?>
                 <li><a class="dropdown-item" href="generar_traspaso.php">Generar traspaso desde Eulalia</a></li>
@@ -195,6 +212,15 @@ if ($idSucursal > 0) {
             </ul>
           </li>
         <?php endif; ?>
+
+        <!-- CELEBRACIONES (AL FINAL, visible para todos, sin badge) -->
+        <li class="nav-item dropdown">
+          <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">Celebraciones</a>
+          <ul class="dropdown-menu dropdown-menu-dark">
+            <li><a class="dropdown-item" href="cumples_aniversarios.php">🎉 Cumpleaños & Aniversarios</a></li>
+          </ul>
+        </li>
+
       </ul>
 
       <!-- DERECHA: Perfil -->
