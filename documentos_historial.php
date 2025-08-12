@@ -26,6 +26,14 @@ $stmt->execute();
 if ($rs = $stmt->get_result()) { if ($row = $rs->fetch_assoc()) $usuario_nombre = $row['nombre']; }
 $stmt->close();
 
+/* Foto actual (desde usuarios_expediente) */
+$foto_actual = null;
+$stmt = $conn->prepare("SELECT foto FROM usuarios_expediente WHERE usuario_id=? LIMIT 1");
+$stmt->bind_param('i', $usuario_id);
+$stmt->execute();
+if ($rs = $stmt->get_result()) { if ($row = $rs->fetch_assoc()) $foto_actual = $row['foto']; }
+$stmt->close();
+
 /* Progreso requeridos */
 $totalReq = 0; $uploadedReq = 0;
 foreach ($tipos as $t) {
@@ -42,9 +50,15 @@ function puede_subir(string $rol, int $mi_id, int $usuario_id): bool {
 }
 
 /* Mensajes */
-$ok     = !empty($_GET['ok']) || !empty($_GET['ok_doc']);
-$err    = !empty($_GET['err']) ? $_GET['err'] : '';
-$errDoc = !empty($_GET['err_doc']) ? $_GET['err_doc'] : '';
+$ok       = !empty($_GET['ok']) || !empty($_GET['ok_doc']);
+$err      = !empty($_GET['err']) ? $_GET['err'] : '';
+$errDoc   = !empty($_GET['err_doc']) ? $_GET['err_doc'] : '';
+$ok_foto  = !empty($_GET['ok_foto']);
+$err_foto = !empty($_GET['err_foto']) ? $_GET['err_foto'] : '';
+
+/* Parámetros foto */
+$maxFotoMB = 5;
+$placeholder = 'https://ui-avatars.com/api/?name='.urlencode($usuario_nombre ?: 'Usuario').'&background=random&bold=true';
 ?>
 <!doctype html>
 <html lang="es">
@@ -64,6 +78,14 @@ $errDoc = !empty($_GET['err_doc']) ? $_GET['err_doc'] : '';
     .title{margin:10px 0 4px;font-weight:800;font-size:28px}
     .sub{color:var(--muted);margin:0 0 14px}
     .card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:16px;box-shadow:0 1px 2px rgba(0,0,0,.04);margin-bottom:14px}
+
+    /* bloque foto */
+    .pfp{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+    .pfp img{width:96px;height:96px;border-radius:50%;object-fit:cover;border:2px solid var(--line);background:#fff}
+    .pfp .actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+    .pfp .file input[type="file"]{display:none}
+    .pfp .file .file-label{display:inline-block;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer}
+    .pfp .file-name{font-size:12px;color:#111;padding:4px 10px;border-radius:999px;background:#edf2f7;max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
     /* progreso */
     .progress{background:#eef2f7;height:12px;border-radius:999px;overflow:hidden}
@@ -120,7 +142,37 @@ $errDoc = !empty($_GET['err_doc']) ? $_GET['err_doc'] : '';
 
   <?php if ($ok): ?><div class="alert alert-ok">Documento subido correctamente.</div><?php endif; ?>
   <?php if ($err || $errDoc): ?><div class="alert alert-err"><?= htmlspecialchars($err ?: $errDoc) ?></div><?php endif; ?>
+  <?php if ($ok_foto): ?><div class="alert alert-ok">Foto actualizada correctamente.</div><?php endif; ?>
+  <?php if ($err_foto): ?><div class="alert alert-err"><?= htmlspecialchars($err_foto) ?></div><?php endif; ?>
 
+  <!-- Bloque FOTO -->
+  <div class="card">
+    <div class="pfp">
+      <img id="pfp-img" src="<?= htmlspecialchars($foto_actual ?: $placeholder) ?>" alt="Foto del usuario">
+      <div>
+        <div style="font-weight:700;margin-bottom:6px">Foto del usuario</div>
+        <div class="sub" style="margin:0 0 10px">Formatos: JPG/PNG/WebP · Límite <?= (int)$maxFotoMB ?>MB</div>
+
+        <?php if (puede_subir($mi_rol, $mi_id, $usuario_id)): ?>
+          <form class="actions" action="expediente_subir_foto.php" method="post" enctype="multipart/form-data">
+            <input type="hidden" name="usuario_id" value="<?= (int)$usuario_id ?>">
+            <input type="hidden" name="return_to" value="<?= htmlspecialchars($_SERVER['PHP_SELF'].'?usuario_id='.$usuario_id) ?>">
+            <span class="file">
+              <label class="file-label" for="foto">Elegir foto…</label>
+              <input id="foto" type="file" name="foto" accept="image/*">
+            </span>
+            <span class="file-name" id="foto-name">No se ha seleccionado archivo</span>
+            <button class="btn btn-success" id="btn-foto" type="submit" disabled>Guardar</button>
+            <button class="btn btn-secondary" id="btn-foto-clear" type="button" disabled>Quitar</button>
+          </form>
+        <?php else: ?>
+          <div class="sub" style="margin:0">No tienes permisos para actualizar la foto.</div>
+        <?php endif; ?>
+      </div>
+    </div>
+  </div>
+
+  <!-- Progreso -->
   <div class="card">
     <div class="progress" aria-label="Progreso documentos requeridos">
       <div class="bar" style="width: <?= $pct ?>%"></div>
@@ -128,6 +180,7 @@ $errDoc = !empty($_GET['err_doc']) ? $_GET['err_doc'] : '';
     <div class="sub" style="margin-top:6px"><?= $pct ?>% completo de documentos requeridos</div>
   </div>
 
+  <!-- Lista de documentos -->
   <div class="doc-list">
     <?php foreach ($tipos as $t):
       $docTipoId  = (int)$t['id'];
@@ -180,7 +233,7 @@ $errDoc = !empty($_GET['err_doc']) ? $_GET['err_doc'] : '';
 </div>
 
 <script>
-/* UX uploader: habilitar Subir/Quitar y marcar tarjeta como lista */
+/* UX uploader documentos */
 document.querySelectorAll('.js-upload').forEach(function(form){
   const row    = form.closest('.doc');
   const input  = form.querySelector('input[type="file"]');
@@ -214,6 +267,40 @@ document.querySelectorAll('.js-upload').forEach(function(form){
     input.dispatchEvent(new Event('change'));
   });
 });
+
+/* UX foto: preview + habilitar */
+(function(){
+  const file = document.getElementById('foto');
+  if (!file) return;
+  const img  = document.getElementById('pfp-img');
+  const name = document.getElementById('foto-name');
+  const btn  = document.getElementById('btn-foto');
+  const clr  = document.getElementById('btn-foto-clear');
+
+  function reset(){
+    name.textContent = 'No se ha seleccionado archivo';
+    btn.disabled = true;
+    clr.disabled = true;
+  }
+
+  file.addEventListener('change', () => {
+    if (file.files && file.files[0]) {
+      name.textContent = file.files[0].name;
+      img.src = URL.createObjectURL(file.files[0]);
+      btn.disabled = false;
+      clr.disabled = false;
+    } else {
+      reset();
+    }
+  });
+
+  clr?.addEventListener('click', () => {
+    file.value = '';
+    reset();
+    // Opcional: volver a la imagen anterior (no guardada)
+    // location.reload();
+  });
+})();
 </script>
 </body>
 </html>
