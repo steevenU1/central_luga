@@ -140,6 +140,10 @@ if ($idSucursal > 0) {
           <ul class="dropdown-menu dropdown-menu-dark">
             <li><a class="dropdown-item" href="lista_precios.php">Lista de precios</a></li>
             
+            <?php if (in_array($rolUsuario, ['Ejecutivo','Gerente'])): ?>
+              <li><a class="dropdown-item" href="prospectos.php">Prospectos</a></li>
+            <?php endif; ?>
+
             <?php if ($rolUsuario === 'Gerente'): ?>
               <li><a class="dropdown-item" href="insumos_pedido.php">Pedido de insumos</a></li>
             <?php endif; ?>
