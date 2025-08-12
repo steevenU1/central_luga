@@ -45,6 +45,8 @@ if ($idSucursal > 0) {
         <li class="nav-item dropdown">
           <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">Dashboard</a>
           <ul class="dropdown-menu dropdown-menu-dark">
+            <!-- NUEVO: Dashboard Diario (visible para todos) -->
+            <li><a class="dropdown-item" href="productividad_dia.php">Dashboard Diario</a></li>
             <li><a class="dropdown-item" href="dashboard_unificado.php">Dashboard semanal</a></li>
             <li><a class="dropdown-item" href="dashboard_mensual.php">Dashboard mensual</a></li>
           </ul>
