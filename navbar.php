@@ -97,7 +97,6 @@ if ($idSucursal > 0) {
               <li class="dropdown-header">Administrador</li>
               <li><a class="dropdown-item" href="inventario_resumen.php">Resumen Global</a></li>
               <li><a class="dropdown-item" href="inventario_eulalia.php">Inventario Eulalia</a></li>
-              <!-- Nuevo: Retiros de Inventario (solo Admin) -->
               <li>
                 <a class="dropdown-item" href="inventario_retiros.php" title="Cambiar estatus a Retirado con historial y reversión">
                   🛑 Retiros de Inventario
@@ -183,6 +182,19 @@ if ($idSucursal > 0) {
               <li><hr class="dropdown-divider"></li>
               <li><a class="dropdown-item" href="gestionar_usuarios.php">Gestionar usuarios</a></li>
             <?php endif; ?>
+
+            <!-- 🔧 MANTENIMIENTO (lo nuevo) -->
+            <?php if (in_array($rolUsuario, ['Gerente','GerenteZona','GerenteSucursal','Admin'])): ?>
+              <li><hr class="dropdown-divider"></li>
+              <li class="dropdown-header">Mantenimiento</li>
+              <?php if (in_array($rolUsuario, ['Gerente','GerenteZona','GerenteSucursal'])): ?>
+                <li><a class="dropdown-item" href="mantenimiento_solicitar.php">Solicitar mantenimiento</a></li>
+              <?php endif; ?>
+              <?php if ($rolUsuario === 'Admin'): ?>
+                <li><a class="dropdown-item" href="mantenimiento_admin.php">Administrar solicitudes</a></li>
+              <?php endif; ?>
+            <?php endif; ?>
+            <!-- /Mantenimiento -->
           </ul>
         </li>
 
@@ -221,7 +233,7 @@ if ($idSucursal > 0) {
           </li>
         <?php endif; ?>
 
-        <!-- CELEBRACIONES (AL FINAL, visible para todos, sin badge) -->
+        <!-- CELEBRACIONES -->
         <li class="nav-item dropdown">
           <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">Celebraciones</a>
           <ul class="dropdown-menu dropdown-menu-dark">
