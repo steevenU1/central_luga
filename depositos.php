@@ -123,7 +123,6 @@ if ($hasta !== '') {
     $sqlHistorial .= " AND DATE(ds.fecha_deposito) <= ? ";
     $types .= 's'; $params[] = $hasta;
 }
-
 $sqlHistorial .= " ORDER BY ds.fecha_deposito DESC, ds.id DESC";
 
 $stmtH = $conn->prepare($sqlHistorial);
@@ -150,6 +149,42 @@ $sqlSaldos = "
     ORDER BY saldo_pendiente DESC
 ";
 $saldos = $conn->query($sqlSaldos)->fetch_all(MYSQLI_ASSOC);
+
+/* ==========================
+   5) CORTES DE CAJA (con filtros por sucursal y fecha)
+   ========================== */
+$c_sucursal_id = isset($_GET['c_sucursal_id']) ? (int)$_GET['c_sucursal_id'] : 0;
+$c_desde       = trim($_GET['c_desde'] ?? '');
+$c_hasta       = trim($_GET['c_hasta'] ?? '');
+
+$sqlCortes = "
+  SELECT cc.id,
+         s.nombre AS sucursal,
+         cc.fecha_operacion,
+         cc.fecha_corte,
+         cc.estado,
+         cc.total_efectivo,
+         cc.total_tarjeta,
+         cc.total_comision_especial,
+         cc.total_general,
+         cc.depositado,
+         cc.monto_depositado,
+         (SELECT COUNT(*) FROM cobros cb WHERE cb.id_corte = cc.id) AS num_cobros
+  FROM cortes_caja cc
+  INNER JOIN sucursales s ON s.id = cc.id_sucursal
+  WHERE 1=1
+";
+$typesC=''; $paramsC=[];
+if ($c_sucursal_id > 0) { $sqlCortes .= " AND cc.id_sucursal = ? "; $typesC.='i'; $paramsC[]=$c_sucursal_id; }
+if ($c_desde !== '')     { $sqlCortes .= " AND cc.fecha_operacion >= ? "; $typesC.='s'; $paramsC[]=$c_desde; }
+if ($c_hasta !== '')     { $sqlCortes .= " AND cc.fecha_operacion <= ? "; $typesC.='s'; $paramsC[]=$c_hasta; }
+$sqlCortes .= " ORDER BY cc.fecha_operacion DESC, cc.id DESC";
+
+$stmtC = $conn->prepare($sqlCortes);
+if ($typesC) { $stmtC->bind_param($typesC, ...$paramsC); }
+$stmtC->execute();
+$cortes = $stmtC->get_result()->fetch_all(MYSQLI_ASSOC);
+$stmtC->close();
 ?>
 <!DOCTYPE html>
 <html lang="es">
@@ -168,6 +203,7 @@ $saldos = $conn->query($sqlSaldos)->fetch_all(MYSQLI_ASSOC);
   <h2>🏦 Validación de Depósitos - Admin</h2>
   <?= $msg ?>
 
+  <!-- ============ PENDIENTES ============ -->
   <h4 class="mt-4">Depósitos Pendientes de Validación</h4>
   <?php if (count($pendientes) === 0): ?>
     <div class="alert alert-info">No hay depósitos pendientes.</div>
@@ -232,12 +268,12 @@ $saldos = $conn->query($sqlSaldos)->fetch_all(MYSQLI_ASSOC);
     </table>
   <?php endif; ?>
 
+  <!-- ============ HISTORIAL ============ -->
   <div class="d-flex align-items-center mt-4">
     <h4 class="mb-0">Historial de Depósitos</h4>
     <small class="text-muted ms-2">(usa los filtros para acotar resultados)</small>
   </div>
 
-  <!-- Filtros -->
   <form class="row g-2 mt-2 mb-3" method="get">
     <div class="col-md-4 col-lg-3">
       <label class="form-label mb-0">Sucursal</label>
@@ -265,7 +301,7 @@ $saldos = $conn->query($sqlSaldos)->fetch_all(MYSQLI_ASSOC);
     </div>
     <div class="col-12 d-flex gap-2">
       <button class="btn btn-primary btn-sm">Aplicar filtros</button>
-      <a class="btn btn-outline-secondary btn-sm" href="admin_depositos.php">Limpiar</a>
+      <a class="btn btn-outline-secondary btn-sm" href="depositos.php">Limpiar</a>
     </div>
   </form>
 
@@ -316,6 +352,166 @@ $saldos = $conn->query($sqlSaldos)->fetch_all(MYSQLI_ASSOC);
     </tbody>
   </table>
 
+  <!-- ============ CORTES DE CAJA ============ -->
+  <div class="d-flex align-items-center mt-5">
+    <h4 class="mb-0">🧾 Cortes de caja</h4>
+    <small class="text-muted ms-2">(filtra por sucursal y rango de fechas)</small>
+  </div>
+
+  <form class="row g-2 mt-2 mb-3" method="get">
+    <div class="col-md-4 col-lg-3">
+      <label class="form-label mb-0">Sucursal</label>
+      <select name="c_sucursal_id" class="form-select form-select-sm">
+        <option value="0">Todas</option>
+        <?php foreach ($sucursales as $s): ?>
+          <option value="<?= (int)$s['id'] ?>" <?= $c_sucursal_id===(int)$s['id']?'selected':'' ?>>
+            <?= htmlspecialchars($s['nombre']) ?>
+          </option>
+        <?php endforeach; ?>
+      </select>
+    </div>
+    <div class="col-md-4 col-lg-3">
+      <label class="form-label mb-0">Desde</label>
+      <input type="date" name="c_desde" class="form-control form-control-sm" value="<?= htmlspecialchars($c_desde) ?>">
+    </div>
+    <div class="col-md-4 col-lg-3">
+      <label class="form-label mb-0">Hasta</label>
+      <input type="date" name="c_hasta" class="form-control form-control-sm" value="<?= htmlspecialchars($c_hasta) ?>">
+    </div>
+    <div class="col-12 d-flex gap-2">
+      <button class="btn btn-primary btn-sm">Filtrar cortes</button>
+      <a class="btn btn-outline-secondary btn-sm" href="depositos.php">Limpiar</a>
+    </div>
+  </form>
+
+  <div class="table-responsive">
+    <table class="table table-bordered table-sm align-middle">
+      <thead class="table-dark">
+        <tr>
+          <th>ID Corte</th>
+          <th>Sucursal</th>
+          <th>Fecha Operación</th>
+          <th>Fecha Corte</th>
+          <th>Efec.</th>
+          <th>Tarj.</th>
+          <th>Com. Esp.</th>
+          <th>Total</th>
+          <th>Depositado</th>
+          <th>Estado</th>
+          <th>Detalle</th>
+        </tr>
+      </thead>
+      <tbody>
+        <?php if (!$cortes): ?>
+          <tr><td colspan="11" class="text-muted">Sin cortes con los filtros seleccionados.</td></tr>
+        <?php else: foreach ($cortes as $c): ?>
+          <tr>
+            <td><?= (int)$c['id'] ?></td>
+            <td><?= htmlspecialchars($c['sucursal']) ?></td>
+            <td><?= htmlspecialchars($c['fecha_operacion']) ?></td>
+            <td><?= htmlspecialchars($c['fecha_corte']) ?></td>
+            <td>$<?= number_format($c['total_efectivo'],2) ?></td>
+            <td>$<?= number_format($c['total_tarjeta'],2) ?></td>
+            <td>$<?= number_format($c['total_comision_especial'],2) ?></td>
+            <td><b>$<?= number_format($c['total_general'],2) ?></b></td>
+            <td>
+              <?= $c['depositado'] ? 
+                    ('$'.number_format($c['monto_depositado'],2)) : 
+                    '<span class="text-muted">No</span>' ?>
+            </td>
+            <td>
+              <span class="badge <?= $c['estado']==='Cerrado'?'bg-success':'bg-warning text-dark' ?>">
+                <?= htmlspecialchars($c['estado']) ?>
+              </span>
+            </td>
+            <td>
+              <button class="btn btn-sm btn-outline-primary" type="button"
+                      data-bs-toggle="collapse" data-bs-target="#det<?= $c['id'] ?>">
+                Ver cobros (<?= (int)$c['num_cobros'] ?>)
+              </button>
+            </td>
+          </tr>
+          <tr class="collapse" id="det<?= $c['id'] ?>">
+            <td colspan="11">
+              <?php
+                $qc = $conn->prepare("
+                  SELECT cb.id, cb.motivo, cb.tipo_pago, cb.monto_total, cb.monto_efectivo, cb.monto_tarjeta,
+                         cb.comision_especial, cb.fecha_cobro, u.nombre AS ejecutivo
+                  FROM cobros cb
+                  LEFT JOIN usuarios u ON u.id = cb.id_usuario
+                  WHERE cb.id_corte = ?
+                  ORDER BY cb.fecha_cobro ASC, cb.id ASC
+                ");
+                $qc->bind_param('i', $c['id']);
+                $qc->execute();
+                $rows = $qc->get_result()->fetch_all(MYSQLI_ASSOC);
+                $qc->close();
+              ?>
+              <div class="table-responsive">
+                <table class="table table-sm mb-0">
+                  <thead>
+                    <tr>
+                      <th>ID Cobro</th>
+                      <th>Fecha/Hora</th>
+                      <th>Ejecutivo</th>
+                      <th>Motivo</th>
+                      <th>Tipo pago</th>
+                      <th>Total</th>
+                      <th>Efectivo</th>
+                      <th>Tarjeta</th>
+                      <th>Com. Especial</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                  <?php foreach ($rows as $r): ?>
+                    <tr>
+                      <td><?= (int)$r['id'] ?></td>
+                      <td><?= htmlspecialchars($r['fecha_cobro']) ?></td>
+                      <td><?= htmlspecialchars($r['ejecutivo'] ?? 'N/D') ?></td>
+                      <td><?= htmlspecialchars($r['motivo']) ?></td>
+                      <td><?= htmlspecialchars($r['tipo_pago']) ?></td>
+                      <td>$<?= number_format($r['monto_total'],2) ?></td>
+                      <td>$<?= number_format($r['monto_efectivo'],2) ?></td>
+                      <td>$<?= number_format($r['monto_tarjeta'],2) ?></td>
+                      <td>$<?= number_format($r['comision_especial'],2) ?></td>
+                    </tr>
+                  <?php endforeach; if(!$rows): ?>
+                    <tr><td colspan="9" class="text-muted">Sin cobros ligados a este corte.</td></tr>
+                  <?php endif; ?>
+                  </tbody>
+                </table>
+              </div>
+            </td>
+          </tr>
+        <?php endforeach; endif; ?>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ============ EXPORTAR TRANSACCIONES POR DÍA ============ -->
+  <div class="card mt-5">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <span>📤 Exportar transacciones completas por día (todas las sucursales)</span>
+    </div>
+    <div class="card-body">
+      <form class="row g-2 align-items-end" method="get" action="export_transacciones_dia.php" target="_blank">
+        <div class="col-sm-4 col-md-3">
+          <label class="form-label mb-0">Día</label>
+          <input type="date" name="dia" class="form-control" required>
+        </div>
+        <div class="col-sm-8 col-md-5">
+          <div class="form-text">
+            Exporta los registros de <b>cobros</b> (ventas/cobros) de ese día en CSV, con sucursal y ejecutivo.
+          </div>
+        </div>
+        <div class="col-md-4 text-end">
+          <button class="btn btn-outline-success">Descargar CSV</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ============ SALDOS ============ -->
   <h4 class="mt-5">📊 Saldos por Sucursal</h4>
   <table class="table table-bordered table-sm mt-3">
     <thead class="table-dark">
@@ -359,7 +555,7 @@ $saldos = $conn->query($sqlSaldos)->fetch_all(MYSQLI_ASSOC);
 </div>
 
 <script>
-  // Toggle inputs cuando seleccionas semana
+  // Toggle inputs cuando seleccionas semana (historial)
   const semanaInput = document.querySelector('input[name="semana"]');
   const desdeInput  = document.querySelector('input[name="desde"]');
   const hastaInput  = document.querySelector('input[name="hasta"]');
