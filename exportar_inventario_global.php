@@ -1,25 +1,39 @@
 <?php
 session_start();
-if (!isset($_SESSION['id_usuario']) || $_SESSION['rol'] != 'Admin') {
+if (!isset($_SESSION['id_usuario'])) {
+    header("Location: 403.php");
+    exit();
+}
+$ROL = $_SESSION['rol'] ?? '';
+$ALLOWED = ['Admin','GerenteZona'];
+if (!in_array($ROL, $ALLOWED, true)) {
     header("Location: 403.php");
     exit();
 }
 
 include 'db.php';
 
-// 🔹 Filtros desde GET
-$filtroImei = $_GET['imei'] ?? '';
-$filtroSucursal = $_GET['sucursal'] ?? '';
-$filtroEstatus = $_GET['estatus'] ?? '';
+/* ===== Filtros (mismos que la vista) ===== */
+$filtroImei       = $_GET['imei']        ?? '';
+$filtroSucursal   = $_GET['sucursal']    ?? '';
+$filtroEstatus    = $_GET['estatus']     ?? '';
+$filtroAntiguedad = $_GET['antiguedad']  ?? '';
+$filtroPrecioMin  = $_GET['precio_min']  ?? '';
+$filtroPrecioMax  = $_GET['precio_max']  ?? '';
 
-// 🔹 Consulta base
+/* ===== Consulta ===== */
 $sql = "
     SELECT i.id AS id_inventario,
            s.nombre AS sucursal,
            p.marca, p.modelo, p.color, p.capacidad,
-           p.imei1, p.imei2, p.costo, p.precio_lista,
+           p.codigo_producto,           -- código en BD
+           p.proveedor,                 -- proveedor
+           p.imei1, p.imei2,
+           p.costo, p.precio_lista,
            (p.precio_lista - p.costo) AS profit,
-           i.estatus, i.fecha_ingreso
+           p.tipo_producto,             -- para fallback del código
+           i.estatus, i.fecha_ingreso,
+           TIMESTAMPDIFF(DAY, i.fecha_ingreso, NOW()) AS antiguedad_dias
     FROM inventario i
     INNER JOIN productos p ON p.id = i.id_producto
     INNER JOIN sucursales s ON s.id = i.id_sucursal
@@ -27,16 +41,13 @@ $sql = "
 ";
 
 $params = [];
-$types = "";
+$types  = "";
 
-// 🔹 Filtro por sucursal
 if ($filtroSucursal !== '') {
     $sql .= " AND s.id = ?";
-    $params[] = $filtroSucursal;
+    $params[] = (int)$filtroSucursal;
     $types .= "i";
 }
-
-// 🔹 Filtro por IMEI
 if ($filtroImei !== '') {
     $sql .= " AND (p.imei1 LIKE ? OR p.imei2 LIKE ?)";
     $like = "%$filtroImei%";
@@ -44,12 +55,27 @@ if ($filtroImei !== '') {
     $params[] = $like;
     $types .= "ss";
 }
-
-// 🔹 Filtro por estatus
 if ($filtroEstatus !== '') {
     $sql .= " AND i.estatus = ?";
     $params[] = $filtroEstatus;
     $types .= "s";
+}
+if ($filtroAntiguedad == '<30') {
+    $sql .= " AND TIMESTAMPDIFF(DAY, i.fecha_ingreso, NOW()) < 30";
+} elseif ($filtroAntiguedad == '30-90') {
+    $sql .= " AND TIMESTAMPDIFF(DAY, i.fecha_ingreso, NOW()) BETWEEN 30 AND 90";
+} elseif ($filtroAntiguedad == '>90') {
+    $sql .= " AND TIMESTAMPDIFF(DAY, i.fecha_ingreso, NOW()) > 90";
+}
+if ($filtroPrecioMin !== '') {
+    $sql .= " AND p.precio_lista >= ?";
+    $params[] = (float)$filtroPrecioMin;
+    $types .= "d";
+}
+if ($filtroPrecioMax !== '') {
+    $sql .= " AND p.precio_lista <= ?";
+    $params[] = (float)$filtroPrecioMax;
+    $types .= "d";
 }
 
 $sql .= " ORDER BY s.nombre, i.fecha_ingreso DESC";
@@ -61,32 +87,80 @@ if (!empty($params)) {
 $stmt->execute();
 $result = $stmt->get_result();
 
-// 🔹 Cabeceras para Excel
-header("Content-Type: application/vnd.ms-excel");
+/* ===== Cabeceras: Excel abre HTML como libro ===== */
+header("Content-Type: application/vnd.ms-excel; charset=UTF-8");
 header("Content-Disposition: attachment; filename=inventario_global.xls");
 header("Pragma: no-cache");
 header("Expires: 0");
 
-// 🔹 Encabezado de columnas
-echo "ID\tSucursal\tMarca\tModelo\tColor\tCapacidad\tIMEI1\tIMEI2\tCosto ($)\tPrecio Lista ($)\tProfit ($)\tEstatus\tFecha Ingreso\n";
+// BOM para UTF-8
+echo "\xEF\xBB\xBF";
 
-// 🔹 Filas de datos
-while ($row = $result->fetch_assoc()) {
-    echo $row['id_inventario']."\t".
-         $row['sucursal']."\t".
-         $row['marca']."\t".
-         $row['modelo']."\t".
-         $row['color']."\t".
-         ($row['capacidad'] ?? '-')."\t".
-         ($row['imei1'] ?? '-')."\t".
-         ($row['imei2'] ?? '-')."\t".
-         number_format($row['costo'],2)."\t".
-         number_format($row['precio_lista'],2)."\t".
-         number_format($row['profit'],2)."\t".
-         $row['estatus']."\t".
-         $row['fecha_ingreso']."\n";
+/* Helpers */
+function h($v) { return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
+function nf($n) { return number_format((float)$n, 2, '.', ''); }
+function codigo_fallback($row) {
+    $partes = array_filter([
+        $row['tipo_producto'] ?? '',
+        $row['marca'] ?? '',
+        $row['modelo'] ?? '',
+        $row['color'] ?? '',
+        $row['capacidad'] ?? ''
+    ], fn($x) => $x !== '');
+    if (!$partes) return '-';
+    $code = strtoupper(implode('-', $partes));
+    return preg_replace('/\s+/', '', $code);
 }
+
+/* ===== HTML Table ===== */
+echo "<html><head><meta charset='UTF-8'></head><body>";
+echo "<table border='1' cellspacing='0' cellpadding='4'>";
+echo "<tr style='background:#222;color:#fff;font-weight:bold'>"
+    ."<td>ID</td>"
+    ."<td>Sucursal</td>"
+    ."<td>Marca</td>"
+    ."<td>Modelo</td>"
+    ."<td>Código</td>"
+    ."<td>Color</td>"
+    ."<td>Capacidad</td>"
+    ."<td>IMEI1</td>"
+    ."<td>IMEI2</td>"
+    ."<td>Proveedor</td>"
+    ."<td>Costo ($)</td>"
+    ."<td>Precio Lista ($)</td>"
+    ."<td>Profit ($)</td>"
+    ."<td>Estatus</td>"
+    ."<td>Fecha Ingreso</td>"
+    ."<td>Antigüedad (días)</td>"
+    ."</tr>";
+
+while ($row = $result->fetch_assoc()) {
+    $codigo = $row['codigo_producto'] ?? '';
+    if ($codigo === '' || $codigo === null) {
+        $codigo = codigo_fallback($row);
+    }
+
+    echo "<tr>"
+        ."<td>".h($row['id_inventario'])."</td>"
+        ."<td>".h($row['sucursal'])."</td>"
+        ."<td>".h($row['marca'])."</td>"
+        ."<td>".h($row['modelo'])."</td>"
+        ."<td>".h($codigo)."</td>"
+        ."<td>".h($row['color'])."</td>"
+        ."<td>".h($row['capacidad'] ?? '-')."</td>"
+        // Prefijo ' para forzar texto y no se trunque IMEI largo en Excel
+        ."<td>'".h($row['imei1'] ?? '-')."</td>"
+        ."<td>'".h($row['imei2'] ?? '-')."</td>"
+        ."<td>".h($row['proveedor'] ?? '-')."</td>"
+        ."<td>".nf($row['costo'])."</td>"
+        ."<td>".nf($row['precio_lista'])."</td>"
+        ."<td>".nf($row['profit'])."</td>"
+        ."<td>".h($row['estatus'])."</td>"
+        ."<td>".h($row['fecha_ingreso'])."</td>"
+        ."<td>".h($row['antiguedad_dias'])."</td>"
+        ."</tr>";
+}
+echo "</table></body></html>";
 
 $stmt->close();
 $conn->close();
-?>

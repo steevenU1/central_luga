@@ -12,7 +12,7 @@ if (!in_array($ROL, $ALLOWED, true)) {
     exit();
 }
 
-// Forzamos que NO se pueda editar precio desde esta vista
+// No se puede editar precio desde esta vista
 $canEditPrice = false;
 
 include 'db.php';
@@ -33,6 +33,9 @@ $sql = "
            p.id AS id_producto,
            p.marca, p.modelo, p.color, p.capacidad,
            p.imei1, p.imei2, p.costo, p.precio_lista,
+           p.proveedor,                 -- proveedor ya en BD
+           p.codigo_producto,           -- ✅ usar el código guardado
+           p.tipo_producto,             -- lo conservamos solo para fallback
            (p.precio_lista - p.costo) AS profit,
            i.estatus, i.fecha_ingreso,
            TIMESTAMPDIFF(DAY, i.fecha_ingreso, NOW()) AS antiguedad_dias
@@ -100,6 +103,15 @@ while ($row = $result->fetch_assoc()) {
     if ($dias < 30) $rangos['<30']++;
     elseif ($dias <= 90) $rangos['30-90']++;
     else $rangos['>90']++;
+}
+
+// Fallback para código (por si hay registros viejos sin codigo_producto)
+function buildCodigoFallback($tipo, $marca, $modelo, $color, $cap) {
+    $partes = array_filter([$tipo, $marca, $modelo, $color, $cap], fn($v) => $v !== null && $v !== '');
+    if (!$partes) return '-';
+    $codigo = strtoupper(implode('-', $partes));
+    $codigo = preg_replace('/\s+/', '', $codigo);
+    return $codigo;
 }
 ?>
 <!DOCTYPE html>
@@ -190,10 +202,12 @@ while ($row = $result->fetch_assoc()) {
                 <th>Sucursal</th>
                 <th>Marca</th>
                 <th>Modelo</th>
+                <th>Código</th>            <!-- ahora desde p.codigo_producto -->
                 <th>Color</th>
                 <th>Capacidad</th>
                 <th>IMEI1</th>
                 <th>IMEI2</th>
+                <th>Proveedor</th>
                 <th>Costo ($)</th>
                 <th>Precio Lista ($)</th>
                 <th>Profit ($)</th>
@@ -206,18 +220,24 @@ while ($row = $result->fetch_assoc()) {
             <?php foreach ($inventario as $row):
                 $dias  = (int)$row['antiguedad_dias'];
                 $clase = $dias < 30 ? 'table-success' : ($dias <= 90 ? 'table-warning' : 'table-danger');
+                // usa codigo_producto; si viene vacío, genera fallback temporal
+                $codigo = $row['codigo_producto'] ?? '';
+                if ($codigo === '' || $codigo === null) {
+                    $codigo = buildCodigoFallback($row['tipo_producto'] ?? '', $row['marca'] ?? '', $row['modelo'] ?? '', $row['color'] ?? '', $row['capacidad'] ?? '');
+                }
             ?>
             <tr class="<?= $clase ?>">
                 <td><?= (int)$row['id_inventario'] ?></td>
                 <td><?= htmlspecialchars($row['sucursal'], ENT_QUOTES) ?></td>
                 <td><?= htmlspecialchars($row['marca'], ENT_QUOTES) ?></td>
                 <td><?= htmlspecialchars($row['modelo'], ENT_QUOTES) ?></td>
+                <td><code><?= htmlspecialchars($codigo, ENT_QUOTES) ?></code></td>
                 <td><?= htmlspecialchars($row['color'], ENT_QUOTES) ?></td>
                 <td><?= htmlspecialchars($row['capacidad'] ?? '-', ENT_QUOTES) ?></td>
                 <td><?= htmlspecialchars($row['imei1'] ?? '-', ENT_QUOTES) ?></td>
                 <td><?= htmlspecialchars($row['imei2'] ?? '-', ENT_QUOTES) ?></td>
+                <td><?= htmlspecialchars($row['proveedor'] ?? '-', ENT_QUOTES) ?></td>
                 <td>$<?= number_format((float)$row['costo'],2) ?></td>
-                <!-- Precio solo lectura -->
                 <td class="text-end">$<?= number_format((float)$row['precio_lista'],2) ?></td>
                 <td><b>$<?= number_format((float)$row['profit'],2) ?></b></td>
                 <td><?= htmlspecialchars($row['estatus'], ENT_QUOTES) ?></td>
