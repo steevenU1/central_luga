@@ -93,8 +93,16 @@ if ($idSucursal > 0) {
             <?php endif; ?>
 
             <?php if ($rolUsuario === 'Admin'): ?>
+              <li><hr class="dropdown-divider"></li>
+              <li class="dropdown-header">Administrador</li>
               <li><a class="dropdown-item" href="inventario_resumen.php">Resumen Global</a></li>
               <li><a class="dropdown-item" href="inventario_eulalia.php">Inventario Eulalia</a></li>
+              <!-- Nuevo: Retiros de Inventario (solo Admin) -->
+              <li>
+                <a class="dropdown-item" href="inventario_retiros.php" title="Cambiar estatus a Retirado con historial y reversión">
+                  🛑 Retiros de Inventario
+                </a>
+              </li>
             <?php endif; ?>
           </ul>
         </li>

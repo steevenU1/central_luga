@@ -19,7 +19,6 @@ function norm_tel($t) {
 }
 
 function buscarVentaRecientePorTel($conn, $tel10) {
-  // Tomamos la venta más reciente por teléfono (normalizando en SQL con REPLACE)
   $sql = "
     SELECT v.nombre_cliente, v.telefono_cliente, v.fecha_venta,
            u.nombre AS ejecutivo, s.nombre AS sucursal
@@ -151,6 +150,47 @@ $stmt->bind_param("i", $idUsuario);
 $stmt->execute();
 $pros = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
 $stmt->close();
+
+/* ========== Mi CARTERA (desde ventas del propio ejecutivo) ========== */
+/* Agrupa por teléfono normalizado (últimos 10), toma la venta más reciente,
+   y calcula semanas transcurridas/restantes. Si es 'Contado' o sin plazo (>0), muestra "Contado". */
+$carteraBusqueda = trim($_GET['c_q'] ?? '');
+$sqlBaseCartera = "
+  SELECT t.tel10,
+         v2.nombre_cliente,
+         v2.telefono_cliente,
+         v2.fecha_venta,
+         v2.tipo_venta,
+         v2.plazo_semanas,
+         TIMESTAMPDIFF(WEEK, v2.fecha_venta, NOW()) AS semanas_transcurridas,
+         GREATEST(v2.plazo_semanas - TIMESTAMPDIFF(WEEK, v2.fecha_venta, NOW()), 0) AS semanas_restantes
+  FROM (
+      SELECT RIGHT(REPLACE(REPLACE(REPLACE(REPLACE(v.telefono_cliente,'+',''),' ',''),'-',''), '(', ''), 10) AS tel10,
+             MAX(v.fecha_venta) AS last_fecha
+      FROM ventas v
+      WHERE v.id_usuario = ?
+      GROUP BY tel10
+  ) t
+  INNER JOIN ventas v2
+    ON t.tel10 = RIGHT(REPLACE(REPLACE(REPLACE(REPLACE(v2.telefono_cliente,'+',''),' ',''),'-',''), '(', ''), 10)
+   AND t.last_fecha = v2.fecha_venta
+";
+$params = [['i', $idUsuario]];
+if ($carteraBusqueda !== '') {
+  $sqlBaseCartera .= " WHERE (v2.nombre_cliente LIKE ? OR t.tel10 LIKE ?) ";
+  $like = "%$carteraBusqueda%";
+  $params[] = ['s', $like];
+  $params[] = ['s', $like];
+}
+$sqlBaseCartera .= " ORDER BY v2.fecha_venta DESC LIMIT 300";
+
+$types = ''; $binds = [];
+foreach ($params as $p){ $types .= $p[0]; $binds[] = $p[1]; }
+$stmt = $conn->prepare($sqlBaseCartera);
+$stmt->bind_param($types, ...$binds);
+$stmt->execute();
+$cartera = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+$stmt->close();
 ?>
 <!DOCTYPE html>
 <html lang="es">
@@ -237,6 +277,74 @@ $stmt->close();
                 <?php endforeach; endif; ?>
               </tbody>
             </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- CARTERA DE CLIENTES (desde ventas) -->
+    <div class="col-12">
+      <div class="card shadow-sm">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span>🗂️ Mi cartera (clientes con venta) — últimas 300 coincidencias</span>
+          <form class="d-flex" method="get">
+            <input type="text" name="c_q" class="form-control form-control-sm me-2" placeholder="Buscar por nombre o teléfono" value="<?= htmlspecialchars($carteraBusqueda) ?>">
+            <button class="btn btn-sm btn-outline-secondary">Buscar</button>
+          </form>
+        </div>
+        <div class="card-body p-0">
+          <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+              <thead class="table-light">
+                <tr>
+                  <th>#</th>
+                  <th>Cliente</th>
+                  <th>Teléfono</th>
+                  <th>Última venta</th>
+                  <th>Plazo</th>
+                  <th>Restan</th>
+                  <th class="text-end">Acciones</th>
+                </tr>
+              </thead>
+              <tbody>
+              <?php if (!$cartera): ?>
+                <tr><td colspan="7" class="text-center py-3 text-muted">Sin registros en cartera.</td></tr>
+              <?php else: $i=1; foreach ($cartera as $c):
+                $tel10 = norm_tel($c['telefono_cliente'] ?? '');
+                $wa = $tel10 ? "https://wa.me/52$tel10" : "#";
+                $plazo  = (int)($c['plazo_semanas'] ?? 0);
+                $restan = (int)($c['semanas_restantes'] ?? 0);
+                $tipo   = trim($c['tipo_venta'] ?? '');
+                $esContado = ($plazo <= 0) || (strcasecmp($tipo, 'Contado') === 0);
+                $mostrarPlazo = !$esContado;
+              ?>
+                <tr>
+                  <td><?= $i++ ?></td>
+                  <td><?= htmlspecialchars($c['nombre_cliente'] ?: '—') ?></td>
+                  <td><?= htmlspecialchars($c['telefono_cliente'] ?: '—') ?></td>
+                  <td><?= htmlspecialchars($c['fecha_venta']) ?></td>
+                  <td>
+                    <?= $mostrarPlazo ? ($plazo . ' sem.') : 'Contado' ?>
+                  </td>
+                  <td>
+                    <?php if ($mostrarPlazo): ?>
+                      <span class="badge <?= $restan<=2 ? 'bg-danger' : ($restan<=4 ? 'bg-warning text-dark' : 'bg-success') ?>">
+                        <?= $restan ?> sem.
+                      </span>
+                    <?php else: ?>
+                      —
+                    <?php endif; ?>
+                  </td>
+                  <td class="text-end">
+                    <a class="btn btn-sm btn-outline-success" href="<?= $wa ?>" target="_blank">WhatsApp</a>
+                  </td>
+                </tr>
+              <?php endforeach; endif; ?>
+              </tbody>
+            </table>
+          </div>
+          <div class="p-2 small text-muted">
+            Agrupado por teléfono (últimos 10 dígitos). Se toma la venta más reciente por cliente.
           </div>
         </div>
       </div>

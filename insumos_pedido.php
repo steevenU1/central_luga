@@ -2,12 +2,29 @@
 session_start();
 if (!isset($_SESSION['id_usuario'])) { header("Location: index.php"); exit(); }
 
-include 'db.php';
+require_once __DIR__ . '/db.php';
 
 $ROL        = $_SESSION['rol'] ?? '';
 $idSucursal = (int)($_SESSION['id_sucursal'] ?? 0);
 
-// ------------------ Acceso: SOLO Gerente de TIENDA PROPIA ------------------
+/*
+  Requiere índice único si quieres evitar líneas duplicadas:
+  ALTER TABLE insumos_pedidos_detalle
+  ADD UNIQUE KEY uq_pedido_insumo (id_pedido, id_insumo);
+*/
+
+/* ===================================================================
+   >>>>>>>>>>>>>>>>>>>>  DEV OVERRIDE (PROVISIONAL) <<<<<<<<<<<<<<<<<<
+   Cambia SOLO estas 2 líneas durante tus pruebas y luego
+   regresa a estos valores por defecto:
+     $DEV_FORCE_WINDOW     = null;   // null = normal, true = abrir, false = cerrar
+     $DEV_ALLOW_ANY_PERIOD = false;  // false = solo mes siguiente, true = cualquier mes
+   =================================================================== */
+$DEV_FORCE_WINDOW     = false;   // ← true/false para forzar ventana; null para normal
+$DEV_ALLOW_ANY_PERIOD = false;  // ← true permite capturar en cualquier mes
+/* =================================================================== */
+
+/* ------------------ Acceso: SOLO Gerente de TIENDA PROPIA ------------------ */
 if ($ROL !== 'Gerente') {
   echo "<!doctype html><html><body><div class='container mt-4'><div class='alert alert-danger'>Solo un Gerente puede hacer el pedido de insumos.</div></div></body></html>";
   exit;
@@ -34,7 +51,7 @@ if (!$esTiendaPropia) {
   exit;
 }
 
-// ------------------ Periodo seleccionado por el usuario ------------------
+/* ------------------ Periodo seleccionado por el usuario ------------------ */
 $anio = isset($_GET['anio']) ? (int)$_GET['anio'] : (int)date('Y');
 $mes  = isset($_GET['mes'])  ? (int)$_GET['mes']  : (int)date('n');
 
@@ -44,7 +61,6 @@ $mes  = isset($_GET['mes'])  ? (int)$_GET['mes']  : (int)date('n');
    ============================================================ */
 function obtenerRangoVentana(int $anio, int $mes): array {
   $tz = new DateTimeZone('America/Mexico_City');
-
   $periodo = DateTime::createFromFormat('Y-n-j', "$anio-$mes-1", $tz);
   if (!$periodo) return ['inicio'=>null,'fin'=>null];
 
@@ -58,44 +74,108 @@ function obtenerRangoVentana(int $anio, int $mes): array {
 function ventanaAbiertaParaPeriodo(int $anio, int $mes): bool {
   $tz   = new DateTimeZone('America/Mexico_City');
   $hoy  = new DateTime('now', $tz);
-
   $r = obtenerRangoVentana($anio, $mes);
   if (!$r['inicio'] || !$r['fin']) return false;
-
   return ($hoy >= $r['inicio'] && $hoy <= $r['fin']);
 }
 
-// ------------------ Ventana (cálculo + periodo permitido) ------------------
+/* ------------------ Ventana (cálculo + periodo permitido) ------------------ */
 $tz  = new DateTimeZone('America/Mexico_City');
 $hoy = new DateTime('now', $tz);
 
-// Periodo permitido: SIEMPRE el SIGUIENTE mes al actual
+/* Periodo permitido: SIEMPRE el SIGUIENTE mes al actual */
 $periodoPermitido = (clone $hoy)->modify('first day of next month');
 $anioPermitido = (int)$periodoPermitido->format('Y');
 $mesPermitido  = (int)$periodoPermitido->format('n');
 
-// Rango de ventana del periodo seleccionado
 $rango = obtenerRangoVentana($anio, $mes);
 $desde = $rango['inicio'] ? $rango['inicio']->format('d/m/Y') : '';
 $hasta = $rango['fin']    ? $rango['fin']->format('d/m/Y')    : '';
 
-// 1) Ventana abierta hoy para ese periodo
 $ventanaActiva = ventanaAbiertaParaPeriodo($anio, $mes);
-
-// 2) El periodo elegido debe ser exactamente el periodo permitido (mes siguiente)
 $solicitudEsPeriodoPermitido = ($anio === $anioPermitido && $mes === $mesPermitido);
-if (!$solicitudEsPeriodoPermitido) {
-  $ventanaActiva = false;
-}
 
-// (opcional demo) — deja false en producción
-$FORZAR_VENTANA = true;
-if ($FORZAR_VENTANA) $ventanaActiva = true;
+/* Reglas normales (productivas) */
+if (!$solicitudEsPeriodoPermitido) { $ventanaActiva = false; }
+
+/* DEV override (provisional) */
+if ($DEV_ALLOW_ANY_PERIOD === true) { $solicitudEsPeriodoPermitido = true; }
+if ($DEV_FORCE_WINDOW !== null)     { $ventanaActiva = (bool)$DEV_FORCE_WINDOW; }
 
 $ventanaLeyenda      = $ventanaActiva ? "Abierta del $desde al $hasta" : "Estuvo abierta del $desde al $hasta";
 $periodoPermitidoTxt = sprintf('%02d/%d', $mesPermitido, $anioPermitido);
 
-// ------------------ Obtener/crear pedido del periodo ------------------
+/* ============================================================
+   Helpers de límites (¡CORREGIDOS!)
+   ============================================================ */
+function normalizarSubtipo(?string $s): ?string {
+  if ($s === null || $s === '') return null;
+  return ucfirst(strtolower($s)); // 'Propia', 'Subdistribuidor', etc.
+}
+
+/**
+ * Busca límites priorizando:
+ *   1) Regla específica de sucursal (id_sucursal = X)
+ *   2) Regla global con id_sucursal = 0
+ *   3) Regla global con id_sucursal = NULL
+ * Además pondera coincidencia exacta de rol y subtipo (o acepta NULL).
+ */
+function obtenerLimiteInsumo(mysqli $conn, int $idInsumo, int $idSucursal, string $rol = 'Gerente', ?string $subtipoSucursal = 'Propia'): ?array {
+  $subtipoSucursal = normalizarSubtipo($subtipoSucursal);
+
+  $sql = "
+    SELECT max_por_linea, max_por_mes
+    FROM insumos_limites
+    WHERE id_insumo = ?
+      AND (rol = ? OR rol IS NULL)
+      AND (subtipo IS NULL OR subtipo = ?)
+      AND (id_sucursal IS NULL OR id_sucursal = 0 OR id_sucursal = ?)
+      AND (max_por_linea IS NOT NULL OR max_por_mes IS NOT NULL)
+      AND activo = 1
+    ORDER BY
+      (id_sucursal = ?) DESC,
+      (id_sucursal = 0) DESC,
+      (id_sucursal IS NULL) DESC,
+      (rol = ?) DESC,
+      (subtipo = ?) DESC
+    LIMIT 1
+  ";
+
+  $st = $conn->prepare($sql);
+  // tipos: i s s i i s s  -> "issiiss"
+  $st->bind_param(
+    "issiiss",
+    $idInsumo,         // i
+    $rol,              // s
+    $subtipoSucursal,  // s
+    $idSucursal,       // i (filtro)
+    $idSucursal,       // i (ORDER BY prioridad)
+    $rol,              // s (ORDER BY)
+    $subtipoSucursal   // s (ORDER BY)
+  );
+  $st->execute();
+  $res = $st->get_result()->fetch_assoc();
+  $st->close();
+
+  if (!$res) return null;
+
+  return [
+    'max_por_linea' => $res['max_por_linea'] !== null ? (float)$res['max_por_linea'] : null,
+    'max_por_mes'   => $res['max_por_mes']   !== null ? (float)$res['max_por_mes']   : null,
+  ];
+}
+
+function sumaCapturadaPedido(mysqli $conn, int $idPedido, int $idInsumo): float {
+  $sql = "SELECT COALESCE(SUM(cantidad),0) AS total FROM insumos_pedidos_detalle WHERE id_pedido=? AND id_insumo=?";
+  $st = $conn->prepare($sql);
+  $st->bind_param('ii', $idPedido, $idInsumo);
+  $st->execute();
+  $total = (float)($st->get_result()->fetch_assoc()['total'] ?? 0);
+  $st->close();
+  return $total;
+}
+
+/* ------------------ Obtener/crear pedido del periodo ------------------ */
 $stmtPed = $conn->prepare("
   SELECT id, estatus FROM insumos_pedidos
   WHERE id_sucursal=? AND anio=? AND mes=?
@@ -107,7 +187,6 @@ $rowPed = $stmtPed->get_result()->fetch_assoc();
 $stmtPed->close();
 
 if (!$rowPed) {
-  // Crear en Borrador para que se pueda consultar aunque no sea editable
   $stmtIns = $conn->prepare("INSERT INTO insumos_pedidos (id_sucursal, anio, mes) VALUES (?,?,?)");
   $stmtIns->bind_param("iii", $idSucursal,$anio,$mes);
   $stmtIns->execute();
@@ -131,65 +210,37 @@ $msg = '';
 $msgClass = 'success';
 
 /* ============================================================
-   Helpers límites
-   ============================================================ */
-function obtenerLimiteInsumo(mysqli $conn, int $idInsumo, int $idSucursal): ?array {
-  $sql = "
-    SELECT max_por_linea, max_por_mes
-    FROM insumos_limites
-    WHERE id_insumo = ?
-      AND rol = 'Gerente'
-      AND (subtipo = 'Propia' OR subtipo IS NULL)
-      AND (id_sucursal IS NULL OR id_sucursal = ?)
-      AND (max_por_linea IS NOT NULL OR max_por_mes IS NOT NULL)
-      AND activo = 1
-    ORDER BY (id_sucursal IS NULL) ASC
-    LIMIT 1
-  ";
-  $st = $conn->prepare($sql);
-  $st->bind_param('ii', $idInsumo, $idSucursal);
-  $st->execute();
-  $res = $st->get_result()->fetch_assoc();
-  $st->close();
-  return $res ?: null;
-}
-
-function sumaCapturadaPedido(mysqli $conn, int $idPedido, int $idInsumo): float {
-  $sql = "SELECT COALESCE(SUM(cantidad),0) AS total FROM insumos_pedidos_detalle WHERE id_pedido=? AND id_insumo=?";
-  $st = $conn->prepare($sql);
-  $st->bind_param('ii', $idPedido, $idInsumo);
-  $st->execute();
-  $total = (float)($st->get_result()->fetch_assoc()['total'] ?? 0);
-  $st->close();
-  return $total;
-}
-
-/* ============================================================
    POST: agregar / borrar / enviar (solo si Borrador y ventanaActiva)
    ============================================================ */
 if ($_SERVER['REQUEST_METHOD']==='POST' && $estatus==='Borrador') {
 
+  // Seguridad adicional
+  if (!$solicitudEsPeriodoPermitido || !$ventanaActiva) {
+    $msg = 'No puedes editar fuera de la ventana de captura del mes permitido.';
+    $msgClass='warning';
+    goto END_POST;
+  }
+
   // Agregar/actualizar línea
   if (isset($_POST['add_line'])) {
-    if (!$ventanaActiva) {
-      $msg = 'La ventana de captura no está activa para este periodo (solo el mes siguiente y en los últimos 5 días del mes actual).';
-      $msgClass='warning';
-      goto END_POST;
-    }
-
     $id_insumo = (int)($_POST['id_insumo'] ?? 0);
     $cantidad  = max(0, (float)($_POST['cantidad'] ?? 0));
     $coment    = trim($_POST['comentario'] ?? '');
-    $comentEsc = $conn->real_escape_string($coment);
 
-    // límites
-    $lim = obtenerLimiteInsumo($conn, $id_insumo, $idSucursal);
+    if ($id_insumo <= 0 || $cantidad <= 0) {
+      $msg = 'Selecciona un insumo y una cantidad válida.';
+      $msgClass='danger';
+      goto END_POST;
+    }
+
+    // límites (usar ROL y subtipo de la sucursal real)
+    $lim = obtenerLimiteInsumo($conn, $id_insumo, $idSucursal, $ROL, $tipoRow['subtipo'] ?? 'Propia');
     if ($lim) {
-      $maxLinea = $lim['max_por_linea'] !== null ? (float)$lim['max_por_linea'] : null;
-      $maxMes   = $lim['max_por_mes']   !== null ? (float)$lim['max_por_mes']   : null;
+      $maxLinea = $lim['max_por_linea'];
+      $maxMes   = $lim['max_por_mes'];
 
       if ($maxLinea !== null && $cantidad > $maxLinea) {
-        $msg = "No puedes agregar más de {$maxLinea} por línea para este insumo. Corrígelo.";
+        $msg = "No puedes agregar más de {$maxLinea} por línea para este insumo.";
         $msgClass='danger';
         goto END_POST;
       }
@@ -203,24 +254,29 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && $estatus==='Borrador') {
       }
     }
 
-    // insertar/actualizar (requiere índice único id_pedido+id_insumo)
-    $conn->query("
-      INSERT INTO insumos_pedidos_detalle (id_pedido,id_insumo,cantidad,comentario)
-      VALUES ($idPedido,$id_insumo,$cantidad,'$comentEsc')
+    // INSERT ... ON DUPLICATE KEY UPDATE
+    $sql = "
+      INSERT INTO insumos_pedidos_detalle (id_pedido, id_insumo, cantidad, comentario)
+      VALUES (?,?,?,?)
       ON DUPLICATE KEY UPDATE cantidad=VALUES(cantidad), comentario=VALUES(comentario)
-    ");
+    ";
+    $st = $conn->prepare($sql);
+    $st->bind_param('iids', $idPedido, $id_insumo, $cantidad, $coment);
+    $st->execute();
+    $st->close();
+
     $msg = 'Línea guardada.';
     $msgClass='success';
   }
 
   // Eliminar línea
   if (isset($_POST['del_line'])) {
-    if (!$ventanaActiva) {
-      $msg = 'No puedes editar fuera de la ventana de captura.';
-      $msgClass='warning';
-    } else {
-      $id_linea = (int)($_POST['id_linea'] ?? 0);
-      $conn->query("DELETE FROM insumos_pedidos_detalle WHERE id=$id_linea AND id_pedido=$idPedido");
+    $id_linea = (int)($_POST['id_linea'] ?? 0);
+    if ($id_linea > 0) {
+      $st = $conn->prepare("DELETE FROM insumos_pedidos_detalle WHERE id=? AND id_pedido=?");
+      $st->bind_param('ii', $id_linea, $idPedido);
+      $st->execute();
+      $st->close();
       $msg = 'Línea eliminada.';
       $msgClass='success';
     }
@@ -228,20 +284,18 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && $estatus==='Borrador') {
 
   // Enviar pedido
   if (isset($_POST['enviar'])) {
-    if (!$ventanaActiva) {
-      $msg = 'No puedes enviar fuera de la ventana de captura.';
-      $msgClass='warning';
-    } else {
-      $conn->query("UPDATE insumos_pedidos SET estatus='Enviado', fecha_envio=NOW() WHERE id=$idPedido");
-      $estatus = 'Enviado';
-      $msg = 'Pedido enviado a Admin.';
-      $msgClass='success';
-    }
+    $st = $conn->prepare("UPDATE insumos_pedidos SET estatus='Enviado', fecha_envio=NOW() WHERE id=?");
+    $st->bind_param('i', $idPedido);
+    $st->execute();
+    $st->close();
+    $estatus = 'Enviado';
+    $msg = 'Pedido enviado a Admin.';
+    $msgClass='success';
   }
 }
 END_POST:
 
-// ------------------ Catálogo agrupado por categoría ------------------
+/* ------------------ Catálogo agrupado por categoría ------------------ */
 $catQ = $conn->query("
   SELECT 
     COALESCE(cat.nombre,'Sin categoría') AS cat_nombre,
@@ -257,7 +311,7 @@ while ($r=$catQ->fetch_assoc()) {
   $catalogoGrouped[$r['cat_nombre']][] = $r;
 }
 
-// ------------------ Detalle del pedido ------------------
+/* ------------------ Detalle del pedido ------------------ */
 $det = $conn->query("
   SELECT d.id, c.nombre, c.unidad, d.cantidad, d.comentario,
          COALESCE(cat.nombre,'Sin categoría') AS categoria
@@ -290,7 +344,7 @@ $det = $conn->query("
     <?= $ventanaActiva
           ? '<span class="badge bg-success ms-2">Ventana activa</span>'
           : '<span class="badge bg-danger ms-2">Ventana cerrada</span>' ?>
-    <span class="ms-2 text-secondary">La ventana actual solo permite pedidos para <strong><?= $periodoPermitidoTxt ?></strong>.</span>
+    <span class="ms-2 text-secondary">Solo puedes capturar para <strong><?= $periodoPermitidoTxt ?></strong>.</span>
   </p>
 
   <?php if ($msg): ?>
@@ -346,6 +400,9 @@ $det = $conn->query("
           <button class="btn btn-success w-100" name="add_line">Agregar</button>
         </div>
       </form>
+      <small class="text-muted d-block mt-2">
+        * Se aplican límites por línea y por mes definidos en <code>insumos_limites</code>.
+      </small>
     </div>
   </div>
   <?php elseif(!$ventanaActiva): ?>
@@ -400,6 +457,5 @@ $det = $conn->query("
   </div>
 </div>
 
-<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script> -->
 </body>
 </html>
