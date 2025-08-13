@@ -11,7 +11,7 @@ if (file_exists(__DIR__ . '/includes/docs_lib.php')) {
 if (file_exists(__DIR__ . '/navbar.php')) require_once __DIR__ . '/navbar.php';
 
 /* ==== Contexto ==== */
-$mi_id      = (int)($_SESSION['id_usuario'] ?? 0);
+$mi_id      = (int)$_SESSION['id_usuario'];
 $usuario_id = $mi_id; // vista del propio usuario
 
 /* ==== Campos requeridos para el progreso (SIN baja/motivo) ==== */
@@ -25,7 +25,9 @@ $requiredFields = [
   'genero'               => 'Género',
   'contacto_emergencia'  => 'Contacto de emergencia',
   'tel_emergencia'       => 'Tel. de emergencia',
-  'clabe'                => 'CLABE'
+  'clabe'                => 'CLABE',
+  // Si quieres que Banco cuente en el progreso, descomenta la línea siguiente:
+  // 'banco'               => 'Banco'
 ];
 
 /* ==== Cargar expediente ==== */
@@ -223,6 +225,11 @@ $err_doc= !empty($_GET['err_doc']) ? $_GET['err_doc'] : '';
         <input type="text" name="clabe" maxlength="18" pattern="\d{18}" placeholder="18 dígitos"
                value="<?= htmlspecialchars($exp['clabe'] ?? '') ?>" title="CLABE de 18 dígitos">
       </div>
+      <div>
+        <label>Banco (institución)</label>
+        <input type="text" name="banco" maxlength="80" placeholder="Ej. BBVA, Santander, Banorte…"
+               value="<?= htmlspecialchars($exp['banco'] ?? '') ?>">
+      </div>
     </div>
     <div style="margin-top:12px">
       <button class="btn btn-primary" type="submit">Guardar (continuar después)</button>
@@ -297,7 +304,6 @@ document.querySelectorAll('.js-upload').forEach(function(form){
 
   btnClr.addEventListener('click', () => {
     input.value = '';
-    // Dispara el mismo flujo que cuando no hay archivo
     const ev = new Event('change');
     input.dispatchEvent(ev);
   });

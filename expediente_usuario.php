@@ -57,7 +57,6 @@ $err = !empty($_GET['err']) ? $_GET['err'] : '';
   <title>Expediente del usuario</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    /* FIX navbar: sin margen en body; márgenes/padding en el container */
     body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;background:#f7fafc}
     .container{max-width:980px;margin:16px auto;padding:0 12px}
     .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
@@ -109,8 +108,7 @@ $err = !empty($_GET['err']) ? $_GET['err'] : '';
             <?php
               $g = $exp['genero'] ?? '';
               foreach (['M'=>'Masculino','F'=>'Femenino','Otro'=>'Otro'] as $val=>$txt) {
-                $sel = ($g===$val)?'selected':'';
-                echo "<option value=\"$val\" $sel>$txt</option>";
+                $sel = ($g===$val)?'selected':''; echo "<option value=\"$val\" $sel>$txt</option>";
               }
             ?>
           </select>
@@ -167,10 +165,16 @@ $err = !empty($_GET['err']) ? $_GET['err'] : '';
           <input type="text" name="rfc" maxlength="13" style="text-transform:uppercase"
                  value="<?= htmlspecialchars($exp['rfc'] ?? '') ?>" <?= $puede_editar?'':'readonly class="readonly"' ?>>
         </div>
+
         <div class="row">
           <label>CLABE</label>
           <input type="text" name="clabe" maxlength="18" pattern="\d{18}" placeholder="18 dígitos"
                  value="<?= htmlspecialchars($exp['clabe'] ?? '') ?>" <?= $puede_editar?'':'readonly class="readonly"' ?>>
+        </div>
+        <div class="row">
+          <label>Banco (institución)</label>
+          <input type="text" name="banco" maxlength="80" placeholder="Ej. BBVA, Santander, Banorte…"
+                 value="<?= htmlspecialchars($exp['banco'] ?? '') ?>" <?= $puede_editar?'':'readonly class="readonly"' ?>>
         </div>
       </div>
     </div>

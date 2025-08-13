@@ -39,6 +39,7 @@ if ($genero === '' || !in_array($genero, ['M','F','Otro'], true)) { $genero = nu
 $contacto_emergencia = trim($_POST['contacto_emergencia'] ?? '');
 $tel_emergencia      = trim($_POST['tel_emergencia'] ?? '');
 $clabe               = trim($_POST['clabe'] ?? '');
+$banco               = trim($_POST['banco'] ?? '');
 
 # ===== Validaciones (si hay valor) =====
 $errores = [];
@@ -62,6 +63,7 @@ if ($rfc !== '') {
 }
 if ($nss !== ''   && !preg_match('/^\d{11}$/', $nss))   $errores[] = 'El NSS debe tener 11 dígitos.';
 if ($clabe !== '' && !preg_match('/^\d{18}$/', $clabe)) $errores[] = 'La CLABE debe tener 18 dígitos.';
+if ($banco !== '' && strlen($banco) > 80)              $errores[] = 'El nombre del banco es muy largo.';
 
 if ($errores) { header("Location: mi_expediente.php?err=".urlencode(implode(' ', $errores))); exit; }
 
@@ -87,31 +89,34 @@ if ($exists) {
             genero = NULLIF(?, ''),
             contacto_emergencia=?,
             tel_emergencia=?,
-            clabe=?
+            clabe=?,
+            banco = NULLIF(?, '')
           WHERE usuario_id=?";
   $stmt = $conn->prepare($sql);
-  // 12 's' + 1 'i'
+  // 13 's' + 1 'i'
   $stmt->bind_param(
-    'ssssssssssssi',
+    'sssssssssssssi',
     $tel_contacto,
     $fecha_nacimiento, $fecha_ingreso, $fecha_baja, $motivo_baja,
-    $curp, $nss, $rfc, $genero, $contacto_emergencia, $tel_emergencia, $clabe,
+    $curp, $nss, $rfc, $genero,
+    $contacto_emergencia, $tel_emergencia, $clabe,
+    $banco,
     $usuario_id
   );
 } else {
   $sql = "INSERT INTO usuarios_expediente
           (usuario_id, tel_contacto, fecha_nacimiento, fecha_ingreso, fecha_baja, motivo_baja,
-           curp, nss, rfc, genero, contacto_emergencia, tel_emergencia, clabe)
+           curp, nss, rfc, genero, contacto_emergencia, tel_emergencia, clabe, banco)
           VALUES (?,
                   ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''),
-                  ?, ?, ?, NULLIF(?, ''), ?, ?, ?)";
+                  ?, ?, ?, NULLIF(?, ''), ?, ?, ?, NULLIF(?, ''))";
   $stmt = $conn->prepare($sql);
-  // 1 'i' + 12 's'
+  // 1 'i' + 13 's'
   $stmt->bind_param(
-    'issssssssssss',
+    'isssssssssssss',
     $usuario_id,
     $tel_contacto, $fecha_nacimiento, $fecha_ingreso, $fecha_baja, $motivo_baja,
-    $curp, $nss, $rfc, $genero, $contacto_emergencia, $tel_emergencia, $clabe
+    $curp, $nss, $rfc, $genero, $contacto_emergencia, $tel_emergencia, $clabe, $banco
   );
 }
 
