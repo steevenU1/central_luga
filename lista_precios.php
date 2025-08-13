@@ -11,7 +11,7 @@ if (!isset($_SESSION['id_usuario'])) {
 $idSucursal = $_SESSION['id_sucursal'];
 $rol = $_SESSION['rol'] ?? '';
 
-// Obtener los datos de precios por modelo+capacidad
+// Consulta de precios por modelo+capacidad incluyendo la promoción
 $sql = "
     SELECT 
         p.marca,
@@ -20,7 +20,8 @@ $sql = "
         COUNT(*) AS disponibles_global,
         SUM(CASE WHEN i.id_sucursal = $idSucursal THEN 1 ELSE 0 END) AS disponibles_sucursal,
         MAX(p.precio_lista) AS precio_lista,
-        MAX(pc.precio_combo) AS precio_combo
+        MAX(pc.precio_combo) AS precio_combo,
+        MAX(pc.promocion) AS promocion
     FROM inventario i
     INNER JOIN productos p ON p.id = i.id_producto
     LEFT JOIN precios_combo pc 
@@ -57,6 +58,7 @@ $datos = $result->fetch_all(MYSQLI_ASSOC);
                     <th>Capacidad</th>
                     <th>Precio Lista ($)</th>
                     <th>Precio Combo ($)</th>
+                    <th>Promoción</th>
                     <th>Disponibles (Global)</th>
                     <th>Disponibles en Sucursal</th>
                 </tr>
@@ -72,6 +74,11 @@ $datos = $result->fetch_all(MYSQLI_ASSOC);
                             <?= is_null($row['precio_combo']) 
                                 ? '<span class="text-muted">No definido</span>' 
                                 : '$' . number_format($row['precio_combo'], 2) ?>
+                        </td>
+                        <td>
+                            <?= empty($row['promocion']) 
+                                ? '<span class="text-muted">Sin promoción</span>' 
+                                : htmlspecialchars($row['promocion']) ?>
                         </td>
                         <td><b><?= $row['disponibles_global'] ?></b></td>
                         <td><b><?= $row['disponibles_sucursal'] ?></b></td>

@@ -12,15 +12,18 @@ $mensaje = "";
 
 // 🔹 Procesar formulario de actualización
 if($_SERVER['REQUEST_METHOD'] === 'POST'){
-    $modeloCapacidad = $_POST['modelo'] ?? '';
-    $nuevoPrecioLista = floatval($_POST['precio_lista'] ?? 0);
-    $nuevoPrecioCombo = floatval($_POST['precio_combo'] ?? 0);
+    $modeloCapacidad  = $_POST['modelo'] ?? '';
+    $nuevoPrecioLista = isset($_POST['precio_lista']) && $_POST['precio_lista'] !== '' ? floatval($_POST['precio_lista']) : null;
+    $nuevoPrecioCombo = isset($_POST['precio_combo']) && $_POST['precio_combo'] !== '' ? floatval($_POST['precio_combo']) : null;
+
+    $promocionTexto   = trim($_POST['promocion'] ?? '');
+    $quitarPromo      = isset($_POST['limpiar_promocion']); // si viene marcado, borraremos la promo (NULL)
 
     if($modeloCapacidad){
         list($marca, $modelo, $capacidad) = explode('|', $modeloCapacidad);
 
-        if($nuevoPrecioLista > 0){
-            // 🔹 Actualizar productos
+        // 1) Actualizar precio de lista en productos (para items Disponibles / En tránsito)
+        if ($nuevoPrecioLista !== null && $nuevoPrecioLista > 0){
             $sql = "
                 UPDATE productos p
                 INNER JOIN inventario i ON i.id_producto = p.id
@@ -32,24 +35,51 @@ if($_SERVER['REQUEST_METHOD'] === 'POST'){
             $stmt->bind_param("dssss", $nuevoPrecioLista, $marca, $modelo, $capacidad, $capacidad);
             $stmt->execute();
             $afectados = $stmt->affected_rows;
-            $mensaje .= "✅ Se actualizó precio de lista a $" . number_format($nuevoPrecioLista,2) . " ($afectados registros).<br>";
+            $stmt->close();
+            $mensaje .= "✅ Precio de lista actualizado a $" . number_format($nuevoPrecioLista,2) . " ({$afectados} registros).<br>";
         }
 
-        if($nuevoPrecioCombo > 0){
-            // 🔹 Insertar o actualizar en precios_combo
+        // 2) Upsert en precios_combo (precio combo y/o promoción)
+        //    Ejecutar si:
+        //    - viene un precio_combo válido (>0)  ó
+        //    - viene un texto de promoción  ó
+        //    - se pide limpiar la promoción
+        if (
+            ($nuevoPrecioCombo !== null && $nuevoPrecioCombo > 0) ||
+            ($promocionTexto !== '') ||
+            $quitarPromo
+        ){
+            // Si no viene precio_combo, lo dejamos en NULL para no sobreescribir el vigente.
+            // La expresión COALESCE en el UPDATE mantiene el existente si enviamos NULL.
+            $precioComboParam = ($nuevoPrecioCombo !== null && $nuevoPrecioCombo > 0) ? $nuevoPrecioCombo : null;
+            // Si se marca "limpiar", guardaremos NULL; si no, guardamos el texto (o NULL si está vacío)
+            $promocionParam   = $quitarPromo ? null : ($promocionTexto !== '' ? $promocionTexto : null);
+
             $sql = "
-                INSERT INTO precios_combo (marca, modelo, capacidad, precio_combo)
-                VALUES (?, ?, ?, ?)
-                ON DUPLICATE KEY UPDATE precio_combo = VALUES(precio_combo)
+                INSERT INTO precios_combo (marca, modelo, capacidad, precio_combo, promocion)
+                VALUES (?, ?, ?, ?, ?)
+                ON DUPLICATE KEY UPDATE
+                    precio_combo = COALESCE(VALUES(precio_combo), precio_combo),
+                    promocion    = VALUES(promocion)
             ";
             $stmt = $conn->prepare($sql);
-            $stmt->bind_param("sssd", $marca, $modelo, $capacidad, $nuevoPrecioCombo);
+            // tipos: sss d s  (el d admite NULL; MySQLi lo manda como NULL)
+            $stmt->bind_param("sssds", $marca, $modelo, $capacidad, $precioComboParam, $promocionParam);
             $stmt->execute();
-            $mensaje .= "✅ Se actualizó precio combo a $" . number_format($nuevoPrecioCombo,2) . ".";
+            $stmt->close();
+
+            if ($nuevoPrecioCombo !== null && $nuevoPrecioCombo > 0) {
+                $mensaje .= "✅ Precio combo actualizado a $" . number_format($nuevoPrecioCombo,2) . ".<br>";
+            }
+            if ($quitarPromo) {
+                $mensaje .= "🧹 Promoción eliminada.<br>";
+            } elseif ($promocionTexto !== '') {
+                $mensaje .= "✅ Promoción guardada: <i>".htmlspecialchars($promocionTexto)."</i>.<br>";
+            }
         }
 
-        if ($nuevoPrecioLista <= 0 && $nuevoPrecioCombo <= 0) {
-            $mensaje = "⚠️ Debes ingresar al menos un precio válido.";
+        if ($mensaje === "") {
+            $mensaje = "⚠️ No enviaste cambios: captura un precio o promoción.";
         }
 
     } else {
@@ -92,7 +122,7 @@ $modelos = $conn->query("
         <div class="alert alert-info"><?= $mensaje ?></div>
     <?php endif; ?>
 
-    <form method="POST" class="card p-3 shadow-sm bg-white" style="max-width:550px;">
+    <form method="POST" class="card p-3 shadow-sm bg-white" style="max-width:650px;">
         <div class="mb-3">
             <label class="form-label">Modelo y Capacidad</label>
             <select name="modelo" class="form-select" required>
@@ -106,18 +136,34 @@ $modelos = $conn->query("
             </select>
         </div>
 
-        <div class="mb-3">
-            <label class="form-label">Nuevo Precio de Lista ($)</label>
-            <input type="number" step="0.01" name="precio_lista" class="form-control" placeholder="Ej. 2500.00">
+        <div class="row">
+          <div class="col-md-6 mb-3">
+              <label class="form-label">Nuevo Precio de Lista ($)</label>
+              <input type="number" step="0.01" name="precio_lista" class="form-control" placeholder="Ej. 2500.00">
+              <div class="form-text">Déjalo en blanco si no deseas cambiarlo.</div>
+          </div>
+
+          <div class="col-md-6 mb-3">
+              <label class="form-label">Nuevo Precio Combo ($)</label>
+              <input type="number" step="0.01" name="precio_combo" class="form-control" placeholder="Ej. 2199.00">
+              <div class="form-text">Déjalo en blanco para conservar el combo actual.</div>
+          </div>
         </div>
 
         <div class="mb-3">
-            <label class="form-label">Nuevo Precio Combo ($)</label>
-            <input type="number" step="0.01" name="precio_combo" class="form-control" placeholder="Ej. 2199.00">
+            <label class="form-label">Promoción (texto informativo)</label>
+            <input type="text" name="promocion" class="form-control" placeholder="Ej. Descuento $500 en enganche / Incentivo portabilidad">
+            <div class="form-check mt-2">
+                <input class="form-check-input" type="checkbox" name="limpiar_promocion" id="limpiar_promocion">
+                <label class="form-check-label" for="limpiar_promocion">Quitar promoción (dejar en blanco/NULL)</label>
+            </div>
+            <div class="form-text">Puedes guardar promoción sin cambiar el precio combo. Marca “Quitar promoción” para borrar el texto.</div>
         </div>
 
-        <button class="btn btn-primary">Actualizar Precios</button>
-        <a href="lista_precios.php" class="btn btn-secondary">Ver Lista</a>
+        <div class="d-flex gap-2">
+            <button class="btn btn-primary">Actualizar</button>
+            <a href="lista_precios.php" class="btn btn-secondary">Ver Lista</a>
+        </div>
     </form>
 </div>
 
