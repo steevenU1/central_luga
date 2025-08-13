@@ -25,7 +25,7 @@ $diasMes   = (int)date('t', strtotime($inicioMes));
 $factorSem = 7 / max(1,$diasMes); // semanas “efectivas” del mes
 
 /* ======================================================
-   0) Cuota mensual ejecutivos (POR EJECUTIVO, misma para todos)
+   0) Cuota mensual ejecutivos (POR EJECUTIVO)
 ====================================================== */
 $cuotaMesU_porEj = 0.0;  // unidades / ejecutivo / mes
 $cuotaMesM_porEj = 0.0;  // monto $ / ejecutivo / mes
@@ -43,7 +43,7 @@ if ($rowQ = $qe->get_result()->fetch_assoc()) {
 }
 $qe->close();
 
-$cuotaSemU_porEj = $cuotaMesU_porEj * $factorSem; // (informativo en badge)
+$cuotaSemU_porEj = $cuotaMesU_porEj * $factorSem; // (informativo)
 
 /* ======================================================
    1) Sucursales: ventas, unidades, cuotas mensuales
@@ -111,6 +111,7 @@ while ($row = $res->fetch_assoc()) {
     $cumpl = $cuotaMonto > 0 ? ($row['ventas']/$cuotaMonto*100) : 0;
 
     $sucursales[] = [
+        'id_sucursal'     => $id_suc,
         'sucursal'        => $row['sucursal'],
         'zona'            => $row['zona'],
         'unidades'        => (int)$row['unidades'],
@@ -192,7 +193,7 @@ while ($row = $resEj->fetch_assoc()) {
         'sucursal'       => $row['sucursal'],
         'unidades'       => (int)$row['unidades'],
         'ventas'         => (float)$row['ventas'],
-        'cuota_unidades' => $cuotaMesU_porEj,  // mensual por ejecutivo (u)
+        'cuota_unidades' => $cuotaMesU_porEj,
         'cumpl_uni'      => $cumpl_uni,
     ];
 }
@@ -201,6 +202,118 @@ $stEj->close();
 function badgeFila($pct) {
     if ($pct === null) return '';
     return $pct>=100 ? 'table-success' : ($pct>=60 ? 'table-warning' : 'table-danger');
+}
+
+/* ======================================================
+   4) 📈 Serie MENSUAL por SEMANAS (mar–lun) — TODAS
+====================================================== */
+
+// Helper: inicio de semana (martes) para una fecha
+function inicioSemanaMartes(DateTime $dt): DateTime {
+    $dow = (int)$dt->format('N'); // 1=Lun..7=Dom
+    $diff = $dow - 2;            // Martes=2
+    if ($diff < 0) $diff += 7;
+    $start = clone $dt;
+    $start->modify("-{$diff} days")->setTime(0,0,0);
+    return $start;
+}
+
+// Construir tramos semanales del mes (mar–lun)
+$inicioMesDT = new DateTime($inicioMes.' 00:00:00');
+$finMesDT    = new DateTime($finMes.' 23:59:59');
+
+$wkStart = inicioSemanaMartes(clone $inicioMesDT); // martes anterior o mismo día
+$semanas = []; // ['ini'=>'Y-m-d','fin'=>'Y-m-d','label'=>'Sem N (dd/mm–dd/mm)']
+$idx = 1;
+while ($wkStart <= $finMesDT) {
+    $wkFin = (clone $wkStart)->modify('+6 days')->setTime(23,59,59);
+    // recorte al mes para mostrarse en la etiqueta
+    $visIni = ($wkStart < $inicioMesDT) ? $inicioMesDT : $wkStart;
+    $visFin = ($wkFin   > $finMesDT)    ? $finMesDT    : $wkFin;
+    $semanas[] = [
+        'ini'   => $wkStart->format('Y-m-d'),
+        'fin'   => $wkFin->format('Y-m-d'),
+        'label' => sprintf('Sem %d (%s–%s)', $idx, $visIni->format('d/m'), $visFin->format('d/m'))
+    ];
+    $idx++;
+    $wkStart->modify('+7 days')->setTime(0,0,0);
+}
+
+// Mapa rápido: día → índice semana
+function findWeekIndex(string $dia, array $semanas): ?int {
+    foreach ($semanas as $i => $sem) {
+        if ($dia >= $sem['ini'] && $dia <= $sem['fin']) return $i;
+    }
+    return null;
+}
+
+// Traer unidades por sucursal y DÍA en el mes, luego agregamos por semana
+$sqlMonthDaily = "
+SELECT s.nombre AS sucursal,
+       DATE(CONVERT_TZ(v.fecha_venta,'+00:00','-06:00')) AS dia,
+       SUM(CASE 
+             WHEN dv.id IS NULL THEN 0
+             WHEN LOWER(p.tipo_producto) IN ('modem','mifi') THEN 0
+             WHEN v.tipo_venta='Financiamiento+Combo' 
+                  AND dv.id = (SELECT MIN(dv2.id) FROM detalle_venta dv2 WHERE dv2.id_venta=v.id)
+                  THEN 2
+             ELSE 1
+           END) AS unidades
+FROM sucursales s
+LEFT JOIN ventas v
+  ON v.id_sucursal = s.id
+ AND DATE(CONVERT_TZ(v.fecha_venta,'+00:00','-06:00')) BETWEEN ? AND ?
+LEFT JOIN detalle_venta dv ON dv.id_venta = v.id
+LEFT JOIN productos p ON p.id = dv.id_producto
+WHERE s.tipo_sucursal='Tienda'
+  AND v.id IS NOT NULL          -- ✅ evita filas con fecha NULL
+GROUP BY s.id, dia
+";
+$stMd = $conn->prepare($sqlMonthDaily);
+$stMd->bind_param("ss", $inicioMes, $finMes);
+$stMd->execute();
+$resMd = $stMd->get_result();
+
+$weeklySeries = []; // [sucursal => [indexSemana => unidades]]
+while ($r = $resMd->fetch_assoc()) {
+    $suc = $r['sucursal'];
+    $dia = $r['dia'];
+    if (empty($dia)) {           // ✅ guard clause extra de seguridad
+        continue;
+    }
+    $u   = (int)$r['unidades'];
+    $i   = findWeekIndex($dia, $semanas);
+    if ($i === null) continue;
+    if (!isset($weeklySeries[$suc])) $weeklySeries[$suc] = [];
+    if (!isset($weeklySeries[$suc][$i])) $weeklySeries[$suc][$i] = 0;
+    $weeklySeries[$suc][$i] += $u;
+}
+$stMd->close();
+
+// Garantiza que todas las sucursales existan y rellena ceros
+$labelsSemanas = array_column($semanas, 'label');
+$k = count($labelsSemanas);
+foreach ($sucursales as $s) {
+    $name = $s['sucursal'];
+    if (!isset($weeklySeries[$name])) $weeklySeries[$name] = [];
+    for ($i=0; $i<$k; $i++) {
+        if (!isset($weeklySeries[$name][$i])) $weeklySeries[$name][$i] = 0;
+    }
+    ksort($weeklySeries[$name]);
+}
+
+// Construye datasets para Chart.js (todas las sucursales)
+$datasetsMonth = [];
+foreach ($weeklySeries as $sucursalNombre => $serie) {
+    $row = [];
+    for ($i=0; $i<$k; $i++) $row[] = (int)$serie[$i];
+    $datasetsMonth[] = [
+        'label'        => $sucursalNombre,
+        'data'         => $row,
+        'tension'      => 0.3,
+        'borderWidth'  => 2,
+        'pointRadius'  => 2
+    ];
 }
 ?>
 <!DOCTYPE html>
@@ -275,12 +388,18 @@ function badgeFila($pct) {
     </div>
   </div>
 
-  <!-- Badge resumen cuotas ejecutivos (informativo) -->
-  <!-- <div class="alert alert-info py-2">
-    Cuota mensual por ejecutivo: <strong><?= number_format($cuotaMesU_porEj,2) ?> u</strong>
-    <?php if ($cuotaMesM_porEj>0): ?> &nbsp;|&nbsp; <strong>$<?= number_format($cuotaMesM_porEj,2) ?></strong><?php endif; ?>
-    &nbsp;|&nbsp; Equiv. semanal (u): <strong><?= number_format($cuotaSemU_porEj,2) ?></strong>
-  </div> -->
+  <!-- 👇 Gráfica mensual por SEMANAS (mar–lun) — TODAS las sucursales -->
+  <div class="card shadow mb-4">
+    <div class="card-header bg-dark text-white">Comportamiento por Semanas del Mes (mar–lun) — Sucursales</div>
+    <div class="card-body">
+      <div style="position:relative; height:220px;">
+        <canvas id="chartMensualSemanas"></canvas>
+      </div>
+      <small class="text-muted d-block mt-2">
+        * Toca los nombres en la leyenda para ocultar/mostrar sucursales.
+      </small>
+    </div>
+  </div>
 
   <!-- Tabs -->
   <ul class="nav nav-tabs" role="tablist">
@@ -341,7 +460,7 @@ function badgeFila($pct) {
             </thead>
             <tbody>
               <?php foreach ($ejecutivos as $e):
-                $pct = $e['cumpl_uni'];                         // ✅ cumplimiento por unidades
+                $pct = $e['cumpl_uni'];
                 $pctRound = ($pct===null) ? null : round($pct,1);
                 $fila = badgeFila($pct);
                 $barClass = ($pct===null) ? 'bg-secondary' : ($pct>=100?'bg-success':($pct>=60?'bg-warning':'bg-danger'));
@@ -373,5 +492,23 @@ function badgeFila($pct) {
 </div>
 
 <!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script> -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+// Datos para la gráfica mensual por semanas
+const labelsSemanas = <?= json_encode($labelsSemanas, JSON_UNESCAPED_UNICODE) ?>;
+const datasetsMonth = <?= json_encode($datasetsMonth, JSON_UNESCAPED_UNICODE) ?>;
+
+new Chart(document.getElementById('chartMensualSemanas').getContext('2d'), {
+  type: 'line',
+  data: { labels: labelsSemanas, datasets: datasetsMonth },
+  options: {
+    responsive: true,
+    maintainAspectRatio: false, // usa la altura del contenedor (220px)
+    interaction: { mode: 'index', intersect: false },
+    plugins: { title: { display: false }, legend: { position: 'bottom' } },
+    scales: { y: { beginAtZero: true, title: { display: true, text: 'Unidades' } } }
+  }
+});
+</script>
 </body>
 </html>
