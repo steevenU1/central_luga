@@ -72,7 +72,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['accion'])) {
     if (!$target) {
       $mensaje = "<div class='alert alert-danger'>❌ Usuario no encontrado.</div>";
     } elseif (intval($target['id']) === $ID_USUARIO && $accion !== 'cambiar_rol') {
-      // Puedes permitir cambiarte tu propio rol si quisieras; aquí solo bloqueamos otras acciones
       $mensaje = "<div class='alert alert-warning'>⚠️ No puedes operar sobre tu propia cuenta.</div>";
     } else {
       try {
@@ -131,8 +130,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['accion'])) {
           $stmt->execute();
           $stmt->close();
 
-          // Mantener historial (si quisieras limpiar, descomenta la siguiente línea)
-          // $conn->query("UPDATE usuarios_expediente SET fecha_baja=NULL, motivo_baja=NULL, updated_at=NOW() WHERE usuario_id={$usuario_id}");
           $stmt = $conn->prepare("UPDATE usuarios_expediente SET updated_at=NOW() WHERE usuario_id=?");
           $stmt->bind_param("i", $usuario_id);
           $stmt->execute();
@@ -177,7 +174,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['accion'])) {
           log_usuario($conn, $ID_USUARIO, $usuario_id, 'reset_password', "Se generó contraseña temporal");
           $conn->commit();
 
-          // Mostrar la temporal una sola vez
           $mensaje = "<div class='alert alert-warning'>🔐 Contraseña temporal generada: 
                       <code style='user-select:all'>".htmlspecialchars($temp)."</code><br>
                       * Compártela al usuario. Se le pedirá cambiarla al iniciar sesión.
@@ -440,6 +436,7 @@ $roles = ['Ejecutivo','Gerente','GerenteZona','Supervisor','Admin'];
         <input type="hidden" name="accion" value="baja">
         <input type="hidden" name="csrf" value="<?=$csrf?>">
         <input type="hidden" name="usuario_id" id="baja_usuario_id">
+
         <div class="mb-2">
           <label class="form-label">Usuario</label>
           <input type="text" id="baja_usuario_nombre" class="form-control" readonly>
@@ -452,11 +449,30 @@ $roles = ['Ejecutivo','Gerente','GerenteZona','Supervisor','Admin'];
           <label class="form-label">Fecha de baja</label>
           <input type="date" name="fecha_baja" class="form-control" value="<?=date('Y-m-d')?>">
         </div>
+
+        <!-- ✅ Checklist informativo, no se guarda (habilita el botón al marcar los tres) -->
+        <div class="mb-3">
+          <label class="form-label">Checklist de bajas/seguridad</label>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="chkPayjoy">
+            <label class="form-check-label" for="chkPayjoy">Ya generé baja de usuario PayJoy</label>
+          </div>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="chkKrediya">
+            <label class="form-check-label" for="chkKrediya">Ya generé baja de usuario Krediya</label>
+          </div>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="chkTiempoAire">
+            <label class="form-check-label" for="chkTiempoAire">Cambio de contraseña para Tiempo aire</label>
+          </div>
+          <!-- <div class="form-text">Estos checks no se guardan; para confirmar debes marcar los 3.</div> -->
+        </div>
+
         <div class="alert alert-warning mb-0">Esta acción desactiva el acceso inmediatamente.</div>
       </div>
       <div class="modal-footer">
         <button class="btn btn-secondary" type="button" data-bs-dismiss="modal">Cancelar</button>
-        <button class="btn btn-danger" type="submit">Confirmar baja</button>
+        <button class="btn btn-danger" id="btnConfirmarBaja" type="submit" disabled>Confirmar baja</button>
       </div>
     </form>
   </div>
@@ -552,13 +568,35 @@ $roles = ['Ejecutivo','Gerente','GerenteZona','Supervisor','Admin'];
   </div>
 </div>
 
-<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script> -->
 <script>
+// Modal Baja: setea datos y controla el checklist
 const modalBaja = document.getElementById('modalBaja');
 modalBaja.addEventListener('show.bs.modal', e => {
   const b = e.relatedTarget;
   document.getElementById('baja_usuario_id').value = b.getAttribute('data-id');
   document.getElementById('baja_usuario_nombre').value = b.getAttribute('data-nombre');
+
+  const chkPay = modalBaja.querySelector('#chkPayjoy');
+  const chkKre = modalBaja.querySelector('#chkKrediya');
+  const chkTA  = modalBaja.querySelector('#chkTiempoAire');
+  const btn    = modalBaja.querySelector('#btnConfirmarBaja');
+
+  function toggleBtn(){ btn.disabled = !(chkPay.checked && chkKre.checked && chkTA.checked); }
+
+  // Reiniciar estado y asignar listeners (sin duplicar)
+  chkPay.checked = false;
+  chkKre.checked = false;
+  chkTA.checked  = false;
+
+  chkPay.onchange = toggleBtn;
+  chkKre.onchange = toggleBtn;
+  chkTA.onchange  = toggleBtn;
+
+  chkPay.oninput = toggleBtn;
+  chkKre.oninput = toggleBtn;
+  chkTA.oninput  = toggleBtn;
+
+  toggleBtn();
 });
 
 const modalReactivar = document.getElementById('modalReactivar');
