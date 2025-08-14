@@ -106,6 +106,25 @@ if ($idSucursal > 0) {
           </ul>
         </li>
 
+        <!-- COMPRAS (solo Admin) -->
+        <?php if ($rolUsuario === 'Admin'): ?>
+        <li class="nav-item dropdown">
+          <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">Compras</a>
+          <ul class="dropdown-menu dropdown-menu-dark">
+            <li><a class="dropdown-item" href="compras_nueva.php">Nueva factura</a></li>
+            <li><a class="dropdown-item" href="compras_resumen.php">Resumen de compras</a></li>
+            <li><a class="dropdown-item" href="modelos.php">Catálogo de modelos</a></li>
+            <li><a class="dropdown-item" href="proveedores.php">Proveedores</a></li>
+            <li><hr class="dropdown-divider"></li>
+            <!-- Enlace funcional para ingresar desde el resumen -->
+            <li><a class="dropdown-item" href="compras_resumen.php?estado=Pendiente">Ingreso a almacén (pendientes)</a></li>
+            <!-- Por petición: mostrar la vista directa, pero deshabilitada (requiere parámetros) -->
+            <!-- <li><a class="dropdown-item disabled" href="#" tabindex="-1" aria-disabled="true" title="Se accede desde el Resumen">compras_ingreso.php (directo)</a></li> -->
+          </ul>
+        </li>
+        <?php endif; ?>
+        <!-- /COMPRAS -->
+
         <?php if (in_array($rolUsuario, ['Gerente','Admin'])): ?>
           <!-- TRASPASOS -->
           <li class="nav-item dropdown">
@@ -183,7 +202,7 @@ if ($idSucursal > 0) {
               <li><a class="dropdown-item" href="gestionar_usuarios.php">Gestionar usuarios</a></li>
             <?php endif; ?>
 
-            <!-- 🔧 MANTENIMIENTO (lo nuevo) -->
+            <!-- 🔧 MANTENIMIENTO -->
             <?php if (in_array($rolUsuario, ['Gerente','GerenteZona','GerenteSucursal','Admin'])): ?>
               <li><hr class="dropdown-divider"></li>
               <li class="dropdown-header">Mantenimiento</li>
