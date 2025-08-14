@@ -23,6 +23,18 @@ $planesPospago = [
    FUNCIONES AUXILIARES
 ================================ */
 
+// Tipado dinámico para bind_param (evita desajustes)
+function tipos_mysqli(array $vals): string {
+    $t = '';
+    foreach ($vals as $v) {
+        if (is_int($v)) { $t .= 'i'; continue; }
+        if (is_float($v)) { $t .= 'd'; continue; }
+        // Permitimos null como string (MySQLi lo maneja como NULL con s)
+        $t .= 's';
+    }
+    return $t;
+}
+
 // 1) Traer fila vigente de comisiones de POSPAGO por plan (tipo=Ejecutivo)
 function obtenerFilaPospagoVigente(mysqli $conn, float $planMonto): ?array {
     $sql = "SELECT comision_con_equipo, comision_sin_equipo
@@ -55,10 +67,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $plan           = $_POST['plan'] ?? '';
     $precioPlan     = $planesPospago[$plan] ?? 0;             // 199|249|289|339
     $modalidad      = $_POST['modalidad'] ?? 'Sin equipo';    // 'Con equipo' | 'Sin equipo'
-    $idVentaEquipo  = !empty($_POST['id_venta_equipo']) ? (int)$_POST['id_venta_equipo'] : null;
+    $idVentaEquipo  = ($_POST['id_venta_equipo'] ?? '') !== '' ? (int)$_POST['id_venta_equipo'] : null;
     $nombreCliente  = trim($_POST['nombre_cliente'] ?? '');
     $numeroCliente  = trim($_POST['numero_cliente'] ?? '');
-    $comentarios    = trim($_POST['comentarios'] ?? '');
+    $comentarios    = trim($_POST['comentarios'] ?? '');      // siempre definido
 
     // Validaciones mínimas
     if (!$plan || $precioPlan <= 0) {
@@ -67,7 +79,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     // Validar SIM física si corresponde
     if ($mensaje === '' && !$esEsim && $idSim) {
-        $sql = "SELECT id, iccid FROM inventario_sims 
+        $sql = "SELECT id, iccid FROM inventario_sims
                 WHERE id=? AND estatus='Disponible' AND id_sucursal=?";
         $stmt = $conn->prepare($sql);
         $stmt->bind_param("ii", $idSim, $idSucursal);
@@ -81,31 +93,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if ($mensaje === '') {
-        // Calcular comisiones (ejecutivo). Gerente lo dejamos en 0 aquí; se puede recalcular después.
+        // Calcular comisiones (ejecutivo). Gerente en 0 aquí (se puede recalcular después).
         $comisionEjecutivo = calcularComisionPospago($conn, (float)$precioPlan, $modalidad);
         $comisionGerente   = 0.0;
 
+        // ===========================
         // INSERT en ventas_sims
-        // NOTA: no mandamos tipo_sim para usar DEFAULT 'Bait' que definiste en la tabla
-        $sqlVenta = "INSERT INTO ventas_sims 
-            (tipo_venta, comentarios, precio_total, comision_ejecutivo, comision_gerente, 
+        // ===========================
+        $sqlVenta = "INSERT INTO ventas_sims
+            (tipo_venta, comentarios, precio_total, comision_ejecutivo, comision_gerente,
              id_usuario, id_sucursal, fecha_venta, es_esim, modalidad, id_venta_equipo, numero_cliente, nombre_cliente)
             VALUES ('Pospago', ?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?)";
         $stmt = $conn->prepare($sqlVenta);
-        $stmt->bind_param(
-            "sdddiiisiss",
-            $comentarios,           // s
-            $precioPlan,            // d
-            $comisionEjecutivo,     // d
-            $comisionGerente,       // d
-            $idUsuario,             // i
-            $idSucursal,            // i
-            $esEsim,                // i
-            $modalidad,             // s
-            $idVentaEquipo,         // i (puede ser null)
-            $numeroCliente,         // s
-            $nombreCliente          // s
-        );
+
+        // valores en el orden EXACTO de los ?
+        $vals = [
+            $comentarios,        // s
+            $precioPlan,         // d
+            $comisionEjecutivo,  // d
+            $comisionGerente,    // d
+            $idUsuario,          // i
+            $idSucursal,         // i
+            $esEsim,             // i
+            $modalidad,          // s
+            $idVentaEquipo,      // i (NULL permitido)
+            $numeroCliente,      // s
+            $nombreCliente       // s
+        ];
+        $types = tipos_mysqli($vals);
+
+        $stmt->bind_param($types, ...$vals);
         $stmt->execute();
         $idVenta = $stmt->insert_id;
         $stmt->close();
@@ -120,7 +137,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $stmt->close();
 
             // Inventario
-            $sqlUpdate = "UPDATE inventario_sims 
+            $sqlUpdate = "UPDATE inventario_sims
                           SET estatus='Vendida', id_usuario_venta=?, fecha_venta=NOW()
                           WHERE id=?";
             $stmt = $conn->prepare($sqlUpdate);
@@ -134,11 +151,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 /* ===============================
-   LISTAR SIMs DISPONIBLES e HISTÓRICO DE EQUIPOS
+   LISTAR SIMs DISPONIBLES
 ================================ */
-$sql = "SELECT id, iccid, caja_id, fecha_ingreso 
-        FROM inventario_sims 
-        WHERE estatus='Disponible' AND id_sucursal=? 
+$sql = "SELECT id, iccid, caja_id, fecha_ingreso
+        FROM inventario_sims
+        WHERE estatus='Disponible' AND id_sucursal=?
         ORDER BY fecha_ingreso ASC";
 $stmt = $conn->prepare($sql);
 $stmt->bind_param("i", $idSucursal);
@@ -146,11 +163,30 @@ $stmt->execute();
 $disponibles = $stmt->get_result();
 $stmt->close();
 
-$sqlEquipos = "SELECT id, tag, fecha_venta 
-               FROM ventas 
-               WHERE id_sucursal=? AND id_usuario=?
-               ORDER BY fecha_venta DESC 
-               LIMIT 50";
+/* ===============================
+   LISTAR VENTAS DE EQUIPO (MISMO DÍA) CON CLIENTE + MODELO + IMEI
+================================ */
+$sqlEquipos = "
+    SELECT v.id,
+           v.fecha_venta,
+           v.nombre_cliente,
+           p.marca,
+           p.modelo,
+           p.color,
+           dv.imei1
+    FROM ventas v
+    INNER JOIN (
+        SELECT id_venta, MIN(id) AS min_detalle_id
+        FROM detalle_venta
+        GROUP BY id_venta
+    ) dmin ON dmin.id_venta = v.id
+    INNER JOIN detalle_venta dv ON dv.id = dmin.min_detalle_id
+    INNER JOIN productos p ON p.id = dv.id_producto
+    WHERE v.id_sucursal = ?
+      AND v.id_usuario  = ?
+      AND DATE(v.fecha_venta) = CURDATE()
+    ORDER BY v.fecha_venta DESC
+";
 $stmt = $conn->prepare($sqlEquipos);
 $stmt->bind_param("ii", $idSucursal, $idUsuario);
 $stmt->execute();
@@ -163,6 +199,16 @@ $stmt->close();
     <meta charset="UTF-8">
     <title>Venta SIM Pospago</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+
+    <!-- 🔎 Select2 (buscador en <select>) -->
+    <link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet" />
+    <style>
+      /* Integración visual con Bootstrap */
+      .select2-container .select2-selection--single { height: 38px; }
+      .select2-container--default .select2-selection--single .select2-selection__rendered { line-height: 36px; }
+      .select2-container--default .select2-selection--single .select2-selection__arrow { height: 36px; }
+    </style>
+
     <script>
         function toggleSimSelect() {
             const isEsim = document.getElementById('es_esim').checked;
@@ -198,18 +244,19 @@ $stmt->close();
             <label class="form-check-label">Es eSIM (no afecta inventario)</label>
         </div>
 
-        <!-- SIM Física -->
+        <!-- SIM Física con buscador -->
         <div class="row mb-3" id="sim_fisica">
-            <div class="col-md-4">
+            <div class="col-md-6">
                 <label class="form-label">SIM física disponible</label>
-                <select name="id_sim" class="form-select">
+                <select name="id_sim" class="form-select select2-sims">
                     <option value="">-- Selecciona SIM --</option>
                     <?php while($row = $disponibles->fetch_assoc()): ?>
                         <option value="<?= $row['id'] ?>">
-                            <?= $row['iccid'] ?> | Caja: <?= $row['caja_id'] ?> | Ingreso: <?= $row['fecha_ingreso'] ?>
+                            <?= htmlspecialchars($row['iccid']) ?> | Caja: <?= htmlspecialchars($row['caja_id']) ?> | Ingreso: <?= htmlspecialchars($row['fecha_ingreso']) ?>
                         </option>
                     <?php endwhile; ?>
                 </select>
+                <div class="form-text">Escribe ICCID, caja o fecha para filtrar.</div>
             </div>
         </div>
 
@@ -219,8 +266,8 @@ $stmt->close();
                 <label class="form-label">Plan pospago</label>
                 <select name="plan" id="plan" class="form-select" onchange="setPrecio()" required>
                     <option value="">-- Selecciona plan --</option>
-                    <?php foreach($planesPospago as $plan => $precioPlan): ?>
-                        <option value="<?= $plan ?>"><?= $plan ?></option>
+                    <?php foreach($planesPospago as $planNombre => $precioP): ?>
+                        <option value="<?= $planNombre ?>"><?= $planNombre ?></option>
                     <?php endforeach; ?>
                 </select>
             </div>
@@ -235,16 +282,24 @@ $stmt->close();
                     <option value="Con equipo">Con equipo</option>
                 </select>
             </div>
+
+            <!-- Relacionar venta de equipo (solo del mismo día) -->
             <div class="col-md-4" id="venta_equipo" style="display:none;">
-                <label class="form-label">Relacionar venta de equipo</label>
-                <select name="id_venta_equipo" class="form-select">
+                <label class="form-label">Relacionar venta de equipo (hoy)</label>
+                <select name="id_venta_equipo" class="form-select select2-ventas">
                     <option value="">-- Selecciona venta --</option>
-                    <?php while($row = $ventasEquipos->fetch_assoc()): ?>
-                        <option value="<?= $row['id'] ?>">
-                            #<?= $row['id'] ?> | Fecha: <?= $row['fecha_venta'] ?>
+                    <?php while($ve = $ventasEquipos->fetch_assoc()): ?>
+                        <option value="<?= $ve['id'] ?>">
+                            #<?= $ve['id'] ?> | Cliente: <?= htmlspecialchars($ve['nombre_cliente'] ?? 'N/D') ?>
+                            | Equipo: <?= htmlspecialchars($ve['marca'].' '.$ve['modelo'].' '.$ve['color']) ?>
+                            | IMEI: <?= htmlspecialchars($ve['imei1']) ?>
+                            | <?= date('H:i', strtotime($ve['fecha_venta'])) ?>
                         </option>
                     <?php endwhile; ?>
                 </select>
+                <div class="form-text">
+                    Se muestran únicamente ventas de <b>hoy</b> en tu sucursal. Busca por ID, cliente, modelo o IMEI.
+                </div>
             </div>
         </div>
 
@@ -268,7 +323,47 @@ $stmt->close();
     </form>
 </div>
 
-<script>toggleSimSelect(); toggleEquipo();</script>
+<!-- jQuery + Select2 -->
+<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
+
+<script>
+// Inicialización de Select2 y UI
+(function(){
+    function initSelects(){
+        $('.select2-sims').select2({
+            placeholder: '-- Selecciona SIM --',
+            width: '100%',
+            language: {
+                noResults: function() { return 'Sin resultados'; },
+                searching: function() { return 'Buscando…'; }
+            }
+        });
+        $('.select2-ventas').select2({
+            placeholder: '-- Selecciona venta --',
+            width: '100%',
+            language: {
+                noResults: function() { return 'Sin resultados'; },
+                searching: function() { return 'Buscando…'; }
+            }
+        });
+    }
+
+    function initToggles(){
+        toggleSimSelect();
+        toggleEquipo();
+        setPrecio();
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', function(){
+            initSelects(); initToggles();
+        });
+    } else {
+        initSelects(); initToggles();
+    }
+})();
+</script>
 
 </body>
 </html>

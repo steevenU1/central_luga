@@ -161,6 +161,15 @@ $stmt->close();
     <meta charset="UTF-8">
     <title>Venta SIM Prepago</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+
+    <!-- 🔎 Select2 (buscador en <select>) -->
+    <link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet" />
+    <style>
+      /* Para que Select2 combine bien con Bootstrap */
+      .select2-container .select2-selection--single { height: 38px; }
+      .select2-container--default .select2-selection--single .select2-selection__rendered { line-height: 36px; }
+      .select2-container--default .select2-selection--single .select2-selection__arrow { height: 36px; }
+    </style>
 </head>
 <body class="bg-light">
 
@@ -172,10 +181,10 @@ $stmt->close();
 
     <form method="POST" class="card shadow p-3 mb-4" id="formVentaSim">
         <div class="row mb-3">
-            <!-- SIM -->
-            <div class="col-md-5">
+            <!-- SIM con buscador -->
+            <div class="col-md-6">
                 <label class="form-label">SIM disponible</label>
-                <select name="id_sim" id="selectSim" class="form-select" required>
+                <select name="id_sim" id="selectSim" class="form-select select2-sims" required>
                     <option value="">-- Selecciona SIM --</option>
                     <?php while($row = $disponibles->fetch_assoc()): ?>
                         <option
@@ -186,13 +195,13 @@ $stmt->close();
                         </option>
                     <?php endwhile; ?>
                 </select>
+                <div class="form-text">Escribe ICCID, operador o caja para filtrar.</div>
             </div>
 
             <!-- Tipo de SIM: SOLO LECTURA -->
             <div class="col-md-3">
                 <label class="form-label">Tipo de SIM</label>
                 <input type="text" id="tipoSimView" class="form-control" value="" readonly>
-                <!-- No hay campo editable; el backend no usa POST para esto -->
             </div>
 
             <!-- Tipo de venta -->
@@ -206,8 +215,8 @@ $stmt->close();
             </div>
 
             <!-- Precio -->
-            <div class="col-md-2">
-                <label class="form-label">Precio venta</label>
+            <div class="col-md-1">
+                <label class="form-label">Precio</label>
                 <input type="number" step="0.01" name="precio" class="form-control" value="0" required>
             </div>
         </div>
@@ -223,20 +232,33 @@ $stmt->close();
     </form>
 </div>
 
-<script>
-// Mostrar el operador del SIM elegido en el campo de solo lectura
-(function(){
-    const selectSim   = document.getElementById('selectSim');
-    const tipoSimView = document.getElementById('tipoSimView');
+<!-- jQuery + Select2 -->
+<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
 
-    function showOperador(){
-        const op = selectSim.options[selectSim.selectedIndex];
-        const operador = (op && op.dataset.operador) ? op.dataset.operador.trim() : '';
+<script>
+// Inicializar Select2 y sincronizar el campo Tipo de SIM (solo lectura)
+(function(){
+    const $selectSim   = $('.select2-sims');
+    const tipoSimView  = document.getElementById('tipoSimView');
+
+    $selectSim.select2({
+        placeholder: '-- Selecciona SIM --',
+        width: '100%',
+        language: {
+          noResults: function() { return 'Sin resultados'; },
+          searching: function() { return 'Buscando…'; }
+        }
+    });
+
+    function actualizarTipo() {
+        const el = $selectSim.find(':selected');
+        const operador = (el && el.data('operador')) ? String(el.data('operador')).trim() : '';
         tipoSimView.value = operador || '';
     }
 
-    showOperador();
-    selectSim.addEventListener('change', showOperador);
+    actualizarTipo();
+    $selectSim.on('change', actualizarTipo);
 })();
 </script>
 

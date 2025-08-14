@@ -7,20 +7,39 @@ if (!isset($_SESSION['id_usuario']) || $_SESSION['rol'] != 'Admin') {
 
 include 'db.php';
 $mensaje = '';
+$errores = [];
 
 // Obtener sucursales
 $sucursales = $conn->query("SELECT id, nombre FROM sucursales ORDER BY nombre ASC");
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $nombre = trim($_POST['nombre']);
-    $usuario = trim($_POST['usuario']);
-    $password = trim($_POST['password']);
-    $id_sucursal = (int)$_POST['id_sucursal'];
-    $rol = $_POST['rol'];
+// Mantener valores posteados para repoblar el formulario si hay error
+$nombre_post      = $_POST['nombre']      ?? '';
+$usuario_post     = $_POST['usuario']     ?? '';
+$id_sucursal_post = $_POST['id_sucursal'] ?? '';
+$rol_post         = $_POST['rol']         ?? '';
 
-    if ($nombre && $usuario && $password && $id_sucursal && $rol) {
-        // Verificar si el usuario ya existe
-        $stmt = $conn->prepare("SELECT COUNT(*) FROM usuarios WHERE usuario=?");
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $nombre      = trim($_POST['nombre'] ?? '');
+    $usuario     = trim($_POST['usuario'] ?? '');
+    $password    = trim($_POST['password'] ?? '');
+    $id_sucursal = (int)($_POST['id_sucursal'] ?? 0);
+    $rol         = $_POST['rol'] ?? '';
+
+    // Validaciones básicas
+    if ($nombre === '' || $usuario === '' || $password === '' || $id_sucursal <= 0 || $rol === '') {
+        $errores[] = "Todos los campos son obligatorios.";
+    }
+
+    // Reglas simples de formato de usuario (opcional)
+    if ($usuario !== '' && !preg_match('/^[A-Za-z0-9._-]{3,32}$/', $usuario)) {
+        $errores[] = "El usuario solo puede contener letras, números, punto, guion y guion bajo (3 a 32 caracteres).";
+    }
+
+    if (empty($errores)) {
+        // Verificar duplicado case-insensitive
+        // Usamos LOWER(usuario) = LOWER(?) para evitar 'Juan' vs 'juan'
+        $sqlDup = "SELECT COUNT(*) FROM usuarios WHERE LOWER(usuario) = LOWER(?)";
+        $stmt = $conn->prepare($sqlDup);
         $stmt->bind_param("s", $usuario);
         $stmt->execute();
         $stmt->bind_result($existe);
@@ -28,22 +47,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $stmt->close();
 
         if ($existe > 0) {
-            $mensaje = "<div class='alert alert-danger'>❌ El usuario <b>$usuario</b> ya existe.</div>";
+            $errores[] = "El usuario <b>" . htmlspecialchars($usuario) . "</b> ya existe.";
         } else {
+            // Hash de contraseña
             $passwordHash = password_hash($password, PASSWORD_BCRYPT);
 
+            // Insert
             $stmt = $conn->prepare("
                 INSERT INTO usuarios (nombre, usuario, password, id_sucursal, rol)
-                VALUES (?,?,?,?,?)
+                VALUES (?, ?, ?, ?, ?)
             ");
-            $stmt->bind_param("sssds", $nombre, $usuario, $passwordHash, $id_sucursal, $rol);
-            $stmt->execute();
-            $stmt->close();
+            // tipos: nombre(s), usuario(s), password(s), id_sucursal(i), rol(s) => "sssis"
+            $stmt->bind_param("sssis", $nombre, $usuario, $passwordHash, $id_sucursal, $rol);
 
-            $mensaje = "<div class='alert alert-success'>✅ Usuario <b>$usuario</b> registrado correctamente.</div>";
+            if ($stmt->execute()) {
+                $mensaje = "<div class='alert alert-success'>✅ Usuario <b>" . htmlspecialchars($usuario) . "</b> registrado correctamente.</div>";
+                // Limpiar campos del form tras éxito
+                $nombre_post = $usuario_post = $id_sucursal_post = $rol_post = '';
+            } else {
+                $errores[] = "Error al registrar el usuario: " . htmlspecialchars($stmt->error);
+            }
+            $stmt->close();
         }
-    } else {
-        $mensaje = "<div class='alert alert-danger'>❌ Todos los campos son obligatorios.</div>";
+    }
+
+    if (!empty($errores)) {
+        $mensaje = "<div class='alert alert-danger'>❌ " . implode("<br>", $errores) . "</div>";
     }
 }
 ?>
@@ -66,12 +95,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <form method="POST" class="card p-4 shadow-sm bg-white">
         <div class="mb-3">
             <label class="form-label">Nombre Completo</label>
-            <input type="text" name="nombre" class="form-control" required>
+            <input type="text" name="nombre" class="form-control" required
+                   value="<?= htmlspecialchars($nombre_post) ?>">
         </div>
 
         <div class="mb-3">
             <label class="form-label">Usuario</label>
-            <input type="text" name="usuario" class="form-control" required>
+            <input type="text" name="usuario" class="form-control" required
+                   placeholder="ej. e.fernandez"
+                   value="<?= htmlspecialchars($usuario_post) ?>">
+            <div class="form-text">De 3 a 32 caracteres. Permitido: letras, números, punto, guion y guion bajo.</div>
         </div>
 
         <div class="mb-3">
@@ -83,8 +116,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <label class="form-label">Sucursal</label>
             <select name="id_sucursal" class="form-select" required>
                 <option value="">-- Selecciona sucursal --</option>
-                <?php while ($s = $sucursales->fetch_assoc()): ?>
-                    <option value="<?= $s['id'] ?>"><?= $s['nombre'] ?></option>
+                <?php
+                // Re-consultar sucursales por si el puntero se consumió
+                $sucursales->data_seek(0);
+                while ($s = $sucursales->fetch_assoc()): ?>
+                    <option value="<?= $s['id'] ?>" <?= ($id_sucursal_post == $s['id']) ? 'selected' : '' ?>>
+                        <?= htmlspecialchars($s['nombre']) ?>
+                    </option>
                 <?php endwhile; ?>
             </select>
         </div>
@@ -93,11 +131,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <label class="form-label">Rol</label>
             <select name="rol" class="form-select" required>
                 <option value="">-- Selecciona rol --</option>
-                <option value="Ejecutivo">Ejecutivo</option>
-                <option value="Gerente">Gerente</option>
-                <option value="Supervisor">Supervisor</option>
-                <option value="GerenteZona">Gerente de Zona</option>
-                <option value="Admin">Administrador</option>
+                <?php
+                $roles = ['Ejecutivo' => 'Ejecutivo', 'Gerente' => 'Gerente', 'Supervisor' => 'Supervisor', 'GerenteZona' => 'Gerente de Zona', 'Admin' => 'Administrador'];
+                foreach ($roles as $value => $label):
+                ?>
+                    <option value="<?= $value ?>" <?= ($rol_post === $value) ? 'selected' : '' ?>><?= $label ?></option>
+                <?php endforeach; ?>
             </select>
         </div>
 

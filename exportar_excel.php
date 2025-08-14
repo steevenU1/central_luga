@@ -15,7 +15,7 @@ header("Expires: 0");
 
 echo "\xEF\xBB\xBF"; // BOM para UTF-8
 
-$rolUsuario = $_SESSION['rol'];
+$rolUsuario  = $_SESSION['rol'];
 $id_sucursal = $_SESSION['id_sucursal'];
 
 // 🔹 Calcular semana martes-lunes desde parámetro GET
@@ -44,29 +44,29 @@ list($fechaInicio, $fechaFin) = obtenerSemanaPorIndice($semanaSeleccionada);
 // =====================
 //   Filtros base
 // =====================
-$where = " WHERE DATE(v.fecha_venta) BETWEEN ? AND ? ";
+$where  = " WHERE DATE(v.fecha_venta) BETWEEN ? AND ? ";
 $params = [$fechaInicio, $fechaFin];
-$types = "ss";
+$types  = "ss";
 
 // Si NO es admin, filtramos por sucursal
 if ($rolUsuario != 'Admin') {
-    $where .= " AND v.id_sucursal = ? ";
+    $where   .= " AND v.id_sucursal = ? ";
     $params[] = $id_sucursal;
-    $types .= "i";
+    $types   .= "i";
 }
 
 // Tipo de venta
 if (!empty($_GET['tipo_venta'])) {
-    $where .= " AND v.tipo_venta = ?";
-    $params[] = $_GET['tipo_venta'];
-    $types .= "s";
+    $where   .= " AND v.tipo_venta = ? ";
+    $params[] = $_GET['tipo_enta'] ?? $_GET['tipo_venta']; // tolerante
+    $types   .= "s";
 }
 
 // Usuario (solo si no es Admin)
 if (!empty($_GET['usuario']) && $rolUsuario != 'Admin') {
-    $where .= " AND v.id_usuario = ?";
+    $where   .= " AND v.id_usuario = ? ";
     $params[] = $_GET['usuario'];
-    $types .= "i";
+    $types   .= "i";
 }
 
 // =====================
@@ -75,9 +75,11 @@ if (!empty($_GET['usuario']) && $rolUsuario != 'Admin') {
 $sqlVentas = "
     SELECT v.id, v.tag, v.nombre_cliente, v.telefono_cliente, v.tipo_venta,
            v.precio_venta, v.fecha_venta, v.comision,
-           u.nombre AS usuario
+           u.nombre AS usuario,
+           s.nombre AS sucursal
     FROM ventas v
-    INNER JOIN usuarios u ON v.id_usuario = u.id
+    INNER JOIN usuarios u   ON v.id_usuario   = u.id
+    INNER JOIN sucursales s ON v.id_sucursal  = s.id
     $where
     ORDER BY v.fecha_venta DESC
 ";
@@ -114,6 +116,7 @@ echo "<thead>
             <th>TAG</th>
             <th>Cliente</th>
             <th>Teléfono</th>
+            <th>Sucursal</th>
             <th>Usuario</th>
             <th>Tipo Venta</th>
             <th>Precio Venta</th>
@@ -138,6 +141,7 @@ while ($venta = $ventas->fetch_assoc()) {
                     <td>{$venta['tag']}</td>
                     <td>{$venta['nombre_cliente']}</td>
                     <td>{$venta['telefono_cliente']}</td>
+                    <td>{$venta['sucursal']}</td>
                     <td>{$venta['usuario']}</td>
                     <td>{$venta['tipo_venta']}</td>
                     <td>{$venta['precio_venta']}</td>
@@ -158,6 +162,7 @@ while ($venta = $ventas->fetch_assoc()) {
                 <td>{$venta['tag']}</td>
                 <td>{$venta['nombre_cliente']}</td>
                 <td>{$venta['telefono_cliente']}</td>
+                <td>{$venta['sucursal']}</td>
                 <td>{$venta['usuario']}</td>
                 <td>{$venta['tipo_venta']}</td>
                 <td>{$venta['precio_venta']}</td>
