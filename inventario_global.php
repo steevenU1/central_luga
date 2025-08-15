@@ -32,11 +32,15 @@ $sql = "
            s.nombre AS sucursal,
            p.id AS id_producto,
            p.marca, p.modelo, p.color, p.capacidad,
-           p.imei1, p.imei2, p.costo, p.precio_lista,
-           p.proveedor,                 -- proveedor ya en BD
-           p.codigo_producto,           -- ✅ usar el código guardado
-           p.tipo_producto,             -- lo conservamos solo para fallback
-           (p.precio_lista - p.costo) AS profit,
+           p.imei1, p.imei2,
+           p.costo,                    -- sin IVA (histórico)
+           p.costo_con_iva,            -- ✅ nuevo campo para mostrar y calcular profit
+           p.precio_lista,
+           p.proveedor,
+           p.codigo_producto,
+           p.tipo_producto,
+           -- ✅ Profit con costo_con_iva; si viene NULL, cae a costo (compatibilidad)
+           (p.precio_lista - COALESCE(p.costo_con_iva, p.costo, 0)) AS profit,
            i.estatus, i.fecha_ingreso,
            TIMESTAMPDIFF(DAY, i.fecha_ingreso, NOW()) AS antiguedad_dias
     FROM inventario i
@@ -202,15 +206,15 @@ function buildCodigoFallback($tipo, $marca, $modelo, $color, $cap) {
                 <th>Sucursal</th>
                 <th>Marca</th>
                 <th>Modelo</th>
-                <th>Código</th>            <!-- ahora desde p.codigo_producto -->
+                <th>Código</th>
                 <th>Color</th>
                 <th>Capacidad</th>
                 <th>IMEI1</th>
                 <th>IMEI2</th>
                 <th>Proveedor</th>
-                <th>Costo ($)</th>
+                <th>Costo c/IVA ($)</th> <!-- ✅ renombrado -->
                 <th>Precio Lista ($)</th>
-                <th>Profit ($)</th>
+                <th>Profit ($)</th>      <!-- ✅ calculado con costo_con_iva -->
                 <th>Estatus</th>
                 <th>Fecha Ingreso</th>
                 <th>Antigüedad (días)</th>
@@ -225,6 +229,11 @@ function buildCodigoFallback($tipo, $marca, $modelo, $color, $cap) {
                 if ($codigo === '' || $codigo === null) {
                     $codigo = buildCodigoFallback($row['tipo_producto'] ?? '', $row['marca'] ?? '', $row['modelo'] ?? '', $row['color'] ?? '', $row['capacidad'] ?? '');
                 }
+                $costoConIva = $row['costo_con_iva'];
+                if ($costoConIva === null || $costoConIva === '') {
+                    // compatibilidad con registros viejos: muestra costo sin IVA si no existe con IVA
+                    $costoConIva = $row['costo'];
+                }
             ?>
             <tr class="<?= $clase ?>">
                 <td><?= (int)$row['id_inventario'] ?></td>
@@ -237,9 +246,9 @@ function buildCodigoFallback($tipo, $marca, $modelo, $color, $cap) {
                 <td><?= htmlspecialchars($row['imei1'] ?? '-', ENT_QUOTES) ?></td>
                 <td><?= htmlspecialchars($row['imei2'] ?? '-', ENT_QUOTES) ?></td>
                 <td><?= htmlspecialchars($row['proveedor'] ?? '-', ENT_QUOTES) ?></td>
-                <td>$<?= number_format((float)$row['costo'],2) ?></td>
+                <td class="text-end">$<?= number_format((float)$costoConIva,2) ?></td>
                 <td class="text-end">$<?= number_format((float)$row['precio_lista'],2) ?></td>
-                <td><b>$<?= number_format((float)$row['profit'],2) ?></b></td>
+                <td class="text-end"><b>$<?= number_format((float)$row['profit'],2) ?></b></td>
                 <td><?= htmlspecialchars($row['estatus'], ENT_QUOTES) ?></td>
                 <td><?= htmlspecialchars($row['fecha_ingreso'], ENT_QUOTES) ?></td>
                 <td><b><?= $dias ?> días</b></td>
@@ -272,8 +281,7 @@ new Chart(ctx, {
         labels: ['<30 días', '30-90 días', '>90 días'],
         datasets: [{
             label: 'Cantidad de equipos',
-            data: [<?= (int)$rangos['<30'] ?>, <?= (int)$rangos['30-90'] ?>, <?= (int)$rangos['>90'] ?>],
-            backgroundColor: ['#28a745','#ffc107','#dc3545']
+            data: [<?= (int)$rangos['<30'] ?>, <?= (int)$rangos['30-90'] ?>, <?= (int)$rangos['>90'] ?>]
         }]
     },
     options: { responsive: true, plugins: { legend: { display: false } } }
