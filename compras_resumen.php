@@ -1,6 +1,6 @@
 <?php
 // compras_resumen.php
-// Resumen de facturas de compra: filtros + acciones (Ver, Abonar, Ingresar a almacén)
+// Resumen de facturas de compra: filtros + KPIs + aging + alertas + acciones
 
 session_start();
 if (!isset($_SESSION['id_usuario'])) { header("Location: index.php"); exit(); }
@@ -11,16 +11,22 @@ include 'navbar.php';
 $ROL = $_SESSION['rol'] ?? 'Ejecutivo';
 $permEscritura = in_array($ROL, ['Admin','Gerente']);
 
-// ====== Filtros ======
+// ====== Helpers ======
 function esc($s){ return htmlspecialchars($s ?? '', ENT_QUOTES, 'UTF-8'); }
 function cap($s,$n){ return substr(trim($s ?? ''),0,$n); }
+function n2($v){ return number_format((float)$v, 2); }
 
+$hoy = date('Y-m-d');
+
+// ====== Filtros ======
 $estado   = cap($_GET['estado'] ?? 'todos', 20);           // todos|Pendiente|Parcial|Pagada|Cancelada
 $prov_id  = (int)($_GET['proveedor'] ?? 0);
 $suc_id   = (int)($_GET['sucursal'] ?? 0);
 $desde    = cap($_GET['desde'] ?? '', 10);                 // YYYY-MM-DD
 $hasta    = cap($_GET['hasta'] ?? '', 10);                 // YYYY-MM-DD
 $q        = cap($_GET['q'] ?? '', 60);                     // búsqueda por # factura
+$pxdias   = (int)($_GET['px'] ?? 7);                       // Próximos X días (default 7)
+if ($pxdias < 0) $pxdias = 0;
 
 $where = [];
 $params = [];
@@ -40,10 +46,8 @@ $proveedores = $conn->query("SELECT id, nombre FROM proveedores WHERE activo=1 O
 $sucursales  = $conn->query("SELECT id, nombre FROM sucursales ORDER BY nombre");
 
 // ====== Consulta principal ======
-// - pagado: SUM(pagos)
-// - saldo: total - pagado
-// - pendientes_ingreso: suma por renglón (cantidad - ingresadas)
-// - primer_detalle_pendiente: el id_detalle con pendiente para botón "Ingresar"
+// pagado: SUM(pagos); saldo = total - pagado;
+// pendientes_ingreso y primer_detalle_pendiente: para botón "Ingresar"
 $sql = "
   SELECT
     c.id,
@@ -54,6 +58,7 @@ $sql = "
     c.iva,
     c.total,
     c.estatus,
+    c.id_proveedor,
     p.nombre AS proveedor,
     s.nombre AS sucursal,
     IFNULL(pg.pagado, 0) AS pagado,
@@ -85,7 +90,6 @@ $sql = "
   ORDER BY c.fecha_factura DESC, c.id DESC
 ";
 
-// Ejecutar con binds si aplica
 $stmt = $conn->prepare($sql);
 if ($stmt === false) { die("Error en prepare: ".$conn->error); }
 if (strlen($types) > 0) {
@@ -94,7 +98,91 @@ if (strlen($types) > 0) {
 $stmt->execute();
 $res = $stmt->get_result();
 
-$hoy = date('Y-m-d');
+// Cargar filas en memoria para calcular KPIs/Aging y también renderizar tabla
+$rows = [];
+while($row = $res->fetch_assoc()){
+  // Normalizar tipos
+  $row['total']  = (float)$row['total'];
+  $row['pagado'] = (float)$row['pagado'];
+  $row['saldo']  = (float)$row['saldo'];
+  $rows[] = $row;
+}
+
+// ====== KPIs y métricas ======
+$totalCompras = 0.0;
+$totalPagado  = 0.0;
+$totalSaldo   = 0.0;
+$saldoVencido = 0.0;
+$saldoPorVencer = 0.0;
+
+// Aging buckets (solo facturas con saldo > 0 y NO pagadas)
+$aging = [
+  'current' => 0.0, // no vencidas (o sin fecha) con saldo
+  'd1_30'   => 0.0,
+  'd31_60'  => 0.0,
+  'd61_90'  => 0.0,
+  'd90p'    => 0.0,
+];
+
+// Para secciones "Vencidas" y "Próximas a vencer"
+$vencidas = [];       // saldo > 0 y fecha_venc < hoy
+$porVencer = [];      // saldo > 0 y 0 <= diff <= pxdias
+
+foreach ($rows as $r) {
+  $totalCompras += $r['total'];
+  $totalPagado  += $r['pagado'];
+  $totalSaldo   += max(0, $r['saldo']);
+
+  $vence = $r['fecha_vencimiento'] ?: null;
+  $saldo = max(0, $r['saldo']);
+  $pagada = ($r['estatus'] === 'Pagada');
+
+  if ($saldo <= 0 || $pagada) {
+    continue;
+  }
+
+  if ($vence) {
+    $diffDays = (int)floor((strtotime($vence) - strtotime($hoy)) / 86400); // días hacia vencimiento (negativo si ya venció)
+    if ($diffDays < 0) {
+      // vencidas
+      $saldoVencido += $saldo;
+      $daysOver = abs($diffDays);
+      if ($daysOver <= 30)       $aging['d1_30']  += $saldo;
+      elseif ($daysOver <= 60)   $aging['d31_60'] += $saldo;
+      elseif ($daysOver <= 90)   $aging['d61_90'] += $saldo;
+      else                       $aging['d90p']   += $saldo;
+
+      $vencidas[] = $r + ['dias' => -$diffDays]; // cuántos días vencida
+    } else {
+      // por vencer
+      if ($diffDays <= $pxdias) {
+        $saldoPorVencer += $saldo;
+        $porVencer[] = $r + ['dias' => $diffDays];
+      }
+      // y en aging caen en 'current'
+      $aging['current'] += $saldo;
+    }
+  } else {
+    // sin fecha de vencimiento -> current
+    $aging['current'] += $saldo;
+  }
+}
+
+// ordenar listas
+usort($vencidas, fn($a,$b)=> $b['dias'] <=> $a['dias']); // más vencidas primero
+usort($porVencer, fn($a,$b)=> $a['dias'] <=> $b['dias']); // más próximas primero
+
+// Top proveedores por saldo (5)
+$saldoPorProveedor = [];
+foreach ($rows as $r) {
+  $saldo = max(0, (float)$r['saldo']);
+  if ($r['estatus'] === 'Pagada' || $saldo <= 0) continue;
+  $pid = (int)$r['id_proveedor'];
+  $saldoPorProveedor[$pid]['proveedor'] = $r['proveedor'];
+  $saldoPorProveedor[$pid]['saldo'] = ($saldoPorProveedor[$pid]['saldo'] ?? 0) + $saldo;
+}
+usort($saldoPorProveedor, function($a,$b){ return ($b['saldo'] ?? 0) <=> ($a['saldo'] ?? 0); });
+$topProv = array_slice($saldoPorProveedor, 0, 5, true);
 ?>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 
@@ -106,6 +194,7 @@ $hoy = date('Y-m-d');
     </div>
   </div>
 
+  <!-- Filtros -->
   <div class="card shadow-sm mb-3">
     <div class="card-header">Filtros</div>
     <div class="card-body">
@@ -154,6 +243,10 @@ $hoy = date('Y-m-d');
           <label class="form-label"># Factura</label>
           <input type="text" name="q" value="<?= esc($q) ?>" class="form-control" placeholder="Buscar por número">
         </div>
+        <div class="col-md-2">
+          <label class="form-label">Próximos (días)</label>
+          <input type="number" name="px" min="0" step="1" value="<?= (int)$pxdias ?>" class="form-control">
+        </div>
         <div class="col-md-2 d-flex align-items-end">
           <button class="btn btn-outline-primary w-100">Aplicar</button>
         </div>
@@ -161,6 +254,126 @@ $hoy = date('Y-m-d');
     </div>
   </div>
 
+  <!-- KPIs -->
+  <div class="row g-3 mb-3">
+    <div class="col-md-3">
+      <div class="card shadow-sm border-0">
+        <div class="card-body">
+          <div class="text-muted">Total compras</div>
+          <div class="fs-4 fw-bold">$<?= n2($totalCompras) ?></div>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-3">
+      <div class="card shadow-sm border-0">
+        <div class="card-body">
+          <div class="text-muted">Pagado</div>
+          <div class="fs-4 fw-bold text-success">$<?= n2($totalPagado) ?></div>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-3">
+      <div class="card shadow-sm border-0">
+        <div class="card-body">
+          <div class="text-muted">Saldo</div>
+          <div class="fs-4 fw-bold text-primary">$<?= n2($totalSaldo) ?></div>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-3">
+      <div class="card shadow-sm border-0">
+        <div class="card-body">
+          <div class="text-muted">Vencido</div>
+          <div class="fs-4 fw-bold text-danger">$<?= n2($saldoVencido) ?></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Aging + Por vencer + Top proveedores -->
+  <div class="row g-3 mb-3">
+    <div class="col-lg-4">
+      <div class="card shadow-sm h-100">
+        <div class="card-header">Aging de saldos</div>
+        <div class="card-body">
+          <div class="table-responsive">
+            <table class="table table-sm align-middle">
+              <thead>
+                <tr><th>Rango</th><th class="text-end">Saldo</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>Current (no vencido)</td><td class="text-end">$<?= n2($aging['current']) ?></td></tr>
+                <tr><td>1–30 días vencido</td><td class="text-end">$<?= n2($aging['d1_30']) ?></td></tr>
+                <tr><td>31–60 días vencido</td><td class="text-end">$<?= n2($aging['d31_60']) ?></td></tr>
+                <tr><td>61–90 días vencido</td><td class="text-end">$<?= n2($aging['d61_90']) ?></td></tr>
+                <tr class="table-danger"><td>&gt; 90 días vencido</td><td class="text-end">$<?= n2($aging['d90p']) ?></td></tr>
+              </tbody>
+              <tfoot>
+                <tr class="table-light"><th>Total</th><th class="text-end">$<?= n2(array_sum($aging)) ?></th></tr>
+              </tfoot>
+            </table>
+          </div>
+          <div class="small text-muted">Solo considera facturas con saldo &gt; 0 y estatus distinto a “Pagada”.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-lg-5">
+      <div class="card shadow-sm h-100">
+        <div class="card-header d-flex justify-content-between">
+          <span>Próximas a vencer (≤ <?= (int)$pxdias ?> días)</span>
+          <span class="text-primary fw-semibold">$<?= n2($saldoPorVencer) ?></span>
+        </div>
+        <div class="card-body">
+          <?php if (count($porVencer)): ?>
+            <div class="table-responsive">
+              <table class="table table-sm table-hover align-middle">
+                <thead>
+                  <tr><th>Proveedor</th><th>Factura</th><th>Vence</th><th class="text-end">Saldo</th><th class="text-center">Días</th><th></th></tr>
+                </thead>
+                <tbody>
+                  <?php foreach (array_slice($porVencer, 0, 8) as $r): ?>
+                    <tr>
+                      <td><?= esc($r['proveedor']) ?></td>
+                      <td><?= esc($r['num_factura']) ?></td>
+                      <td><?= esc($r['fecha_vencimiento']) ?></td>
+                      <td class="text-end">$<?= n2($r['saldo']) ?></td>
+                      <td class="text-center"><?= (int)$r['dias'] ?></td>
+                      <td class="text-end"><a class="btn btn-sm btn-outline-secondary" href="compras_ver.php?id=<?= (int)$r['id'] ?>">Ver</a></td>
+                    </tr>
+                  <?php endforeach; ?>
+                </tbody>
+              </table>
+            </div>
+          <?php else: ?>
+            <div class="text-muted">No hay facturas por vencer en este rango.</div>
+          <?php endif; ?>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-lg-3">
+      <div class="card shadow-sm h-100">
+        <div class="card-header">Top proveedores por saldo</div>
+        <div class="card-body">
+          <?php if (count($topProv)): ?>
+            <ul class="list-group list-group-flush">
+              <?php foreach ($topProv as $tp): ?>
+                <li class="list-group-item d-flex justify-content-between align-items-center">
+                  <span><?= esc($tp['proveedor']) ?></span>
+                  <span class="fw-semibold">$<?= n2($tp['saldo']) ?></span>
+                </li>
+              <?php endforeach; ?>
+            </ul>
+          <?php else: ?>
+            <div class="text-muted">Sin saldos pendientes.</div>
+          <?php endif; ?>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tabla principal -->
   <div class="card shadow-sm">
     <div class="card-body">
       <div class="table-responsive">
@@ -184,15 +397,14 @@ $hoy = date('Y-m-d');
           <tbody>
           <?php
           $i=1;
-          while($r = $res->fetch_assoc()):
+          foreach ($rows as $r):
             $saldo = (float)$r['saldo'];
             $vence = $r['fecha_vencimiento'];
             $rowClass = '';
             if ($r['estatus'] !== 'Pagada' && $saldo > 0 && $vence) {
               if ($vence < $hoy) $rowClass = 'table-danger';
               else {
-                // Por vencer en ≤ 7 días
-                if ($vence <= date('Y-m-d', strtotime('+7 days'))) $rowClass = 'table-warning';
+                if ($vence <= date('Y-m-d', strtotime("+$pxdias days"))) $rowClass = 'table-warning';
               }
             }
           ?>
@@ -202,10 +414,10 @@ $hoy = date('Y-m-d');
               <td><?= esc($r['num_factura']) ?></td>
               <td><?= esc($r['sucursal']) ?></td>
               <td><?= esc($r['fecha_factura']) ?></td>
-              <td><?= esc($r['fecha_vencimiento'] ?: '-') ?></td>
-              <td class="text-end">$<?= number_format($r['total'],2) ?></td>
-              <td class="text-end">$<?= number_format($r['pagado'],2) ?></td>
-              <td class="text-end fw-semibold">$<?= number_format($saldo,2) ?></td>
+              <td><?= esc($vence ?: '-') ?></td>
+              <td class="text-end">$<?= n2($r['total']) ?></td>
+              <td class="text-end">$<?= n2($r['pagado']) ?></td>
+              <td class="text-end fw-semibold">$<?= n2($saldo) ?></td>
               <td class="text-center">
                 <?php if ((int)$r['pendientes_ingreso'] > 0): ?>
                   <span class="badge bg-warning text-dark"><?= (int)$r['pendientes_ingreso'] ?></span>
@@ -237,10 +449,11 @@ $hoy = date('Y-m-d');
                 </div>
               </td>
             </tr>
-          <?php endwhile; ?>
+          <?php endforeach; ?>
           </tbody>
         </table>
       </div>
     </div>
   </div>
+
 </div>

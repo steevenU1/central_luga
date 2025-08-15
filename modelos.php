@@ -1,5 +1,5 @@
 <?php
-// modelos.php - Catálogo de modelos (marca+modelo+codigo_producto)
+// modelos.php - Catálogo de modelos (marca+modelo+color+ram+capacidad+codigo_producto)
 
 session_start();
 if (!isset($_SESSION['id_usuario'])) { header("Location: index.php"); exit(); }
@@ -17,29 +17,70 @@ $mensaje = "";
 
 // ===== Crear / editar =====
 if ($permEscritura && $_SERVER['REQUEST_METHOD']==='POST') {
-  $modo  = $_POST['modo'] ?? 'crear';
-  $id    = (int)($_POST['id'] ?? 0);
-  $marca = texto($_POST['marca'] ?? '',80);
-  $modelo= texto($_POST['modelo']?? '',80);
-  $codigo= texto($_POST['codigo_producto'] ?? '',50);
+  $modo   = $_POST['modo'] ?? 'crear';
+  $id     = (int)($_POST['id'] ?? 0);
+
+  $marca  = texto($_POST['marca']  ?? '', 80);
+  $modelo = texto($_POST['modelo'] ?? '', 80);
+  $color  = texto($_POST['color']  ?? '', 50);
+  $ram    = texto($_POST['ram']    ?? '', 50);
+  $cap    = texto($_POST['capacidad'] ?? '', 50);
+  $codigo = texto($_POST['codigo_producto'] ?? '', 50);
 
   if ($marca==='' || $modelo==='') {
-    $mensaje = "<div class='alert alert-danger'>Marca y modelo son obligatorios.</div>";
+    $mensaje = "<div class='alert alert-danger'>Marca y Modelo son obligatorios.</div>";
   } else {
     if ($modo==='editar' && $id>0) {
-      $stmt = $conn->prepare("UPDATE catalogo_modelos SET marca=?, modelo=?, codigo_producto=? WHERE id=?");
-      $stmt->bind_param("sssi", $marca,$modelo,$codigo,$id);
-      $ok = $stmt->execute();
-      $stmt->close();
-      $mensaje = $ok ? "<div class='alert alert-success'>Modelo actualizado.</div>"
-                     : "<div class='alert alert-danger'>Error al actualizar (¿duplicado de marca+modelo o código?).</div>";
+      $stmt = $conn->prepare("
+        UPDATE catalogo_modelos
+           SET marca=?, modelo=?, color=?, ram=?, capacidad=?, codigo_producto=?
+         WHERE id=?
+      ");
+      if (!$stmt) {
+        $mensaje = "<div class='alert alert-danger'>Error de preparación: ".$conn->error."</div>";
+      } else {
+        $stmt->bind_param("ssssssi", $marca,$modelo,$color,$ram,$cap,$codigo,$id);
+        $ok = $stmt->execute();
+        $errno = $stmt->errno; $stmt->close();
+
+        if ($ok) {
+          $mensaje = "<div class='alert alert-success'>Modelo actualizado.</div>";
+        } else {
+          // 1062 = Duplicado (índice único)
+          if ($errno === 1062) {
+            $mensaje = "<div class='alert alert-danger'>
+              Ya existe un modelo con la misma combinación Marca + Modelo + Color + RAM + Capacidad
+              o el Código de producto está duplicado.
+            </div>";
+          } else {
+            $mensaje = "<div class='alert alert-danger'>Error al actualizar.</div>";
+          }
+        }
+      }
     } else {
-      $stmt = $conn->prepare("INSERT INTO catalogo_modelos (marca,modelo,codigo_producto,activo) VALUES (?,?,?,1)");
-      $stmt->bind_param("sss", $marca,$modelo,$codigo);
-      $ok = $stmt->execute();
-      $stmt->close();
-      $mensaje = $ok ? "<div class='alert alert-success'>Modelo creado.</div>"
-                     : "<div class='alert alert-danger'>Error al crear (¿duplicado de marca+modelo o código?).</div>";
+      $stmt = $conn->prepare("
+        INSERT INTO catalogo_modelos (marca, modelo, color, ram, capacidad, codigo_producto, activo)
+        VALUES (?,?,?,?,?,?,1)
+      ");
+      if (!$stmt) {
+        $mensaje = "<div class='alert alert-danger'>Error de preparación: ".$conn->error."</div>";
+      } else {
+        $stmt->bind_param("ssssss", $marca,$modelo,$color,$ram,$cap,$codigo);
+        $ok = $stmt->execute();
+        $errno = $stmt->errno; $stmt->close();
+
+        if ($ok) {
+          $mensaje = "<div class='alert alert-success'>Modelo creado.</div>";
+        } else {
+          if ($errno === 1062) {
+            $mensaje = "<div class='alert alert-danger'>
+              Duplicado: revisa Marca + Modelo + Color + RAM + Capacidad o el Código de producto.
+            </div>";
+          } else {
+            $mensaje = "<div class='alert alert-danger'>Error al crear.</div>";
+          }
+        }
+      }
     }
   }
 }
@@ -72,11 +113,11 @@ if ($estado==='activos')   $w[]="activo=1";
 if ($estado==='inactivos') $w[]="activo=0";
 if ($q!=='') {
   $x = $conn->real_escape_string($q);
-  $w[] = "(marca LIKE '%$x%' OR modelo LIKE '%$x%' OR codigo_producto LIKE '%$x%')";
+  $w[] = "(marca LIKE '%$x%' OR modelo LIKE '%$x%' OR color LIKE '%$x%' OR ram LIKE '%$x%' OR capacidad LIKE '%$x%' OR codigo_producto LIKE '%$x%')";
 }
 $where = count($w) ? "WHERE ".implode(" AND ",$w) : "";
 
-$list = $conn->query("SELECT * FROM catalogo_modelos $where ORDER BY marca, modelo");
+$list = $conn->query("SELECT * FROM catalogo_modelos $where ORDER BY marca, modelo, color, ram, capacidad");
 ?>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 <div class="container my-4">
@@ -105,11 +146,26 @@ $list = $conn->query("SELECT * FROM catalogo_modelos $where ORDER BY marca, mode
               <label class="form-label">Modelo *</label>
               <input class="form-control" name="modelo" required value="<?= esc($edit['modelo'] ?? '') ?>">
             </div>
+
+            <div class="col-md-4">
+              <label class="form-label">Color</label>
+              <input class="form-control" name="color" value="<?= esc($edit['color'] ?? '') ?>" placeholder="p. ej. Negro">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">RAM</label>
+              <input class="form-control" name="ram" value="<?= esc($edit['ram'] ?? '') ?>" placeholder="p. ej. 4GB">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">Capacidad</label>
+              <input class="form-control" name="capacidad" value="<?= esc($edit['capacidad'] ?? '') ?>" placeholder="p. ej. 128GB">
+            </div>
+
             <div class="col-12">
               <label class="form-label">Código de producto</label>
               <input class="form-control" name="codigo_producto" value="<?= esc($edit['codigo_producto'] ?? '') ?>">
-              <!-- <div class="form-text">Opcional por ahora. Después afinamos la generación automática.</div> -->
+              <div class="form-text">Debe ser único si lo usas como SKU; puedes dejarlo vacío y generar después.</div>
             </div>
+
             <div class="col-12 text-end">
               <button class="btn btn-success"><?= $edit ? 'Actualizar' : 'Guardar' ?></button>
             </div>
@@ -131,7 +187,7 @@ $list = $conn->query("SELECT * FROM catalogo_modelos $where ORDER BY marca, mode
               </select>
             </div>
             <div class="col-md-6">
-              <input name="q" class="form-control" placeholder="Buscar marca, modelo o código"
+              <input name="q" class="form-control" placeholder="Buscar marca, modelo, color, RAM, capacidad o código"
                      value="<?= esc($q) ?>">
             </div>
             <div class="col-md-2"><button class="btn btn-primary w-100">Buscar</button></div>
@@ -144,6 +200,9 @@ $list = $conn->query("SELECT * FROM catalogo_modelos $where ORDER BY marca, mode
                 <tr>
                   <th>Marca</th>
                   <th>Modelo</th>
+                  <th>Color</th>
+                  <th>RAM</th>
+                  <th>Capacidad</th>
                   <th>Código</th>
                   <th class="text-center">Estatus</th>
                   <th class="text-end">Acciones</th>
@@ -154,6 +213,9 @@ $list = $conn->query("SELECT * FROM catalogo_modelos $where ORDER BY marca, mode
                 <tr>
                   <td><?= esc($r['marca']) ?></td>
                   <td><?= esc($r['modelo']) ?></td>
+                  <td><?= esc($r['color']) ?></td>
+                  <td><?= esc($r['ram']) ?></td>
+                  <td><?= esc($r['capacidad']) ?></td>
                   <td><?= esc($r['codigo_producto']) ?></td>
                   <td class="text-center">
                     <?= ((int)$r['activo'] === 1)
@@ -174,7 +236,7 @@ $list = $conn->query("SELECT * FROM catalogo_modelos $where ORDER BY marca, mode
                   </td>
                 </tr>
               <?php endwhile; else: ?>
-                <tr><td colspan="5" class="text-center text-muted py-4">Sin modelos</td></tr>
+                <tr><td colspan="8" class="text-center text-muted py-4">Sin modelos</td></tr>
               <?php endif; ?>
               </tbody>
             </table>
