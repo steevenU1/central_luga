@@ -527,3 +527,9 @@ document.querySelectorAll('.btnVer').forEach(btn => {
   });
 });
 </script>
+
+<script>
+  (function () {
+    try { document.title = 'Catálogo · Proveedores — Central2.0'; } catch(e) {}
+  })();
+</script>

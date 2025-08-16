@@ -6,6 +6,7 @@ if (!isset($_SESSION['id_usuario'])) { header("Location: index.php"); exit(); }
 include 'db.php';
 include 'navbar.php';
 
+
 $ROL = $_SESSION['rol'] ?? 'Ejecutivo';
 $permEscritura = in_array($ROL, ['Admin','Gerente']);
 
@@ -247,3 +248,9 @@ $list = $conn->query("SELECT * FROM catalogo_modelos $where ORDER BY marca, mode
     </div>
   </div>
 </div>
+
+<script>
+  (function () {
+    try { document.title = 'Catálogo · Equipos — Central2.0'; } catch(e) {}
+  })();
+</script>

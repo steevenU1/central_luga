@@ -6,16 +6,23 @@ session_start();
 if (!isset($_SESSION['id_usuario'])) { header("Location: index.php"); exit(); }
 
 include 'db.php';
-include 'navbar.php';
 
 $ROL         = $_SESSION['rol'] ?? 'Ejecutivo';
 $ID_USUARIO  = (int)($_SESSION['id_usuario'] ?? 0);
 $ID_SUCURSAL = (int)($_SESSION['id_sucursal'] ?? 0);
 
-// Permisos
-if (!in_array($ROL, ['Admin','Gerente'])) {
-  header("Location: 403.php"); exit();
+/* =========================
+   Permisos (ANTES de imprimir HTML)
+========================= */
+// Permitidos: Admin y Logistica
+if (!in_array($ROL, ['Admin','Logistica'])) {
+  header("Location: 403.php");
+  exit();
 }
+
+/* =========================
+   Datos para el formulario
+========================= */
 
 // Proveedores
 $proveedores = [];
@@ -36,7 +43,18 @@ $res3 = $conn->query("
   ORDER BY marca, modelo, color, ram, capacidad
 ");
 while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
+
+// Navbar (ya podemos imprimir HTML)
+include 'navbar.php';
 ?>
+<!-- Forzamos el título de la pestaña desde la vista -->
+<script>
+  (function () {
+    var t = 'Compras · Nueva factura — Central2.0';
+    try { document.title = t; } catch (e) {}
+  })();
+</script>
+
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 <!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script> -->
 
@@ -210,7 +228,7 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
 <!-- 🔎 Datalist global: value=código, label=descripción -->
 <datalist id="dlModelos">
   <?php foreach ($modelos as $m):
-    $desc = trim($m['marca'].' '.$m['modelo'].' · '.($m['color']??'').' · '.($m['ram']??'').' · '.($m['capacidad']??''));
+    $desc = trim($m['marca'].' '.$m['modelo'].' · '.($m['color']??'').' · '.($m['ram']??'').' · '.($m['capacidad']??'')); 
     $val  = $m['codigo_producto'] ?: ($m['marca'].' '.$m['modelo']);
   ?>
     <option value="<?= htmlspecialchars($val) ?>" label="<?= htmlspecialchars($desc) ?>"></option>

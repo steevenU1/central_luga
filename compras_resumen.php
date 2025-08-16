@@ -6,6 +6,7 @@ session_start();
 if (!isset($_SESSION['id_usuario'])) { header("Location: index.php"); exit(); }
 
 include 'db.php';
+
 include 'navbar.php';
 
 $ROL = $_SESSION['rol'] ?? 'Ejecutivo';
@@ -46,8 +47,6 @@ $proveedores = $conn->query("SELECT id, nombre FROM proveedores WHERE activo=1 O
 $sucursales  = $conn->query("SELECT id, nombre FROM sucursales ORDER BY nombre");
 
 // ====== Consulta principal ======
-// pagado: SUM(pagos); saldo = total - pagado;
-// pendientes_ingreso y primer_detalle_pendiente: para botón "Ingresar"
 $sql = "
   SELECT
     c.id,
@@ -98,10 +97,9 @@ if (strlen($types) > 0) {
 $stmt->execute();
 $res = $stmt->get_result();
 
-// Cargar filas en memoria para calcular KPIs/Aging y también renderizar tabla
+// Cargar filas en memoria
 $rows = [];
 while($row = $res->fetch_assoc()){
-  // Normalizar tipos
   $row['total']  = (float)$row['total'];
   $row['pagado'] = (float)$row['pagado'];
   $row['saldo']  = (float)$row['saldo'];
@@ -115,18 +113,17 @@ $totalSaldo   = 0.0;
 $saldoVencido = 0.0;
 $saldoPorVencer = 0.0;
 
-// Aging buckets (solo facturas con saldo > 0 y NO pagadas)
+// Aging buckets
 $aging = [
-  'current' => 0.0, // no vencidas (o sin fecha) con saldo
+  'current' => 0.0,
   'd1_30'   => 0.0,
   'd31_60'  => 0.0,
   'd61_90'  => 0.0,
   'd90p'    => 0.0,
 ];
 
-// Para secciones "Vencidas" y "Próximas a vencer"
-$vencidas = [];       // saldo > 0 y fecha_venc < hoy
-$porVencer = [];      // saldo > 0 y 0 <= diff <= pxdias
+$vencidas = [];
+$porVencer = [];
 
 foreach ($rows as $r) {
   $totalCompras += $r['total'];
@@ -137,42 +134,34 @@ foreach ($rows as $r) {
   $saldo = max(0, $r['saldo']);
   $pagada = ($r['estatus'] === 'Pagada');
 
-  if ($saldo <= 0 || $pagada) {
-    continue;
-  }
+  if ($saldo <= 0 || $pagada) continue;
 
   if ($vence) {
-    $diffDays = (int)floor((strtotime($vence) - strtotime($hoy)) / 86400); // días hacia vencimiento (negativo si ya venció)
+    $diffDays = (int)floor((strtotime($vence) - strtotime($hoy)) / 86400);
     if ($diffDays < 0) {
-      // vencidas
       $saldoVencido += $saldo;
       $daysOver = abs($diffDays);
-      if ($daysOver <= 30)       $aging['d1_30']  += $saldo;
-      elseif ($daysOver <= 60)   $aging['d31_60'] += $saldo;
-      elseif ($daysOver <= 90)   $aging['d61_90'] += $saldo;
-      else                       $aging['d90p']   += $saldo;
+      if     ($daysOver <= 30) $aging['d1_30']  += $saldo;
+      elseif ($daysOver <= 60) $aging['d31_60'] += $saldo;
+      elseif ($daysOver <= 90) $aging['d61_90'] += $saldo;
+      else                     $aging['d90p']   += $saldo;
 
-      $vencidas[] = $r + ['dias' => -$diffDays]; // cuántos días vencida
+      $vencidas[] = $r + ['dias' => -$diffDays];
     } else {
-      // por vencer
       if ($diffDays <= $pxdias) {
         $saldoPorVencer += $saldo;
         $porVencer[] = $r + ['dias' => $diffDays];
       }
-      // y en aging caen en 'current'
       $aging['current'] += $saldo;
     }
   } else {
-    // sin fecha de vencimiento -> current
     $aging['current'] += $saldo;
   }
 }
 
-// ordenar listas
-usort($vencidas, fn($a,$b)=> $b['dias'] <=> $a['dias']); // más vencidas primero
-usort($porVencer, fn($a,$b)=> $a['dias'] <=> $b['dias']); // más próximas primero
+usort($vencidas, fn($a,$b)=> $b['dias'] <=> $a['dias']);
+usort($porVencer, fn($a,$b)=> $a['dias'] <=> $b['dias']);
 
-// Top proveedores por saldo (5)
 $saldoPorProveedor = [];
 foreach ($rows as $r) {
   $saldo = max(0, (float)$r['saldo']);
@@ -457,3 +446,10 @@ $topProv = array_slice($saldoPorProveedor, 0, 5, true);
   </div>
 
 </div>
+
+<!-- 🔹 Forzar título de la pestaña al final para que prevalezca -->
+<script>
+  (function () {
+    try { document.title = 'Resumen · Compras — Central2.0'; } catch(e) {}
+  })();
+</script>

@@ -212,6 +212,7 @@ $esAdmin = in_array($rolUsuario, ['Admin','Super']);
           <ul class="dropdown-menu dropdown-menu-dark">
             <?php if ($rolUsuario === 'Logistica'): ?>
               <li><a class="dropdown-item" href="inventario_global.php">Inventario global</a></li>
+              <li><a class="dropdown-item" href="inventario_historico.php">Inventario histórico</a></li> <!-- ✅ NUEVO solo Logística -->
             <?php else: ?>
               <?php if (in_array($rolUsuario, ['Ejecutivo','Gerente'])): ?>
                 <li><a class="dropdown-item" href="panel.php">Inventario sucursal</a></li>
@@ -422,6 +423,8 @@ $esAdmin = in_array($rolUsuario, ['Admin','Super']);
                 <?php if ($sucursalNombre): ?>
                   <div class="text-secondary small"><?= e($sucursalNombre) ?></div>
                 <?php endif; ?>
+                <!-- ✅ Mostrar rol del usuario en el desplegable -->
+                <div class="text-secondary small">Rol: <?= e($rolUsuario) ?></div>
               </div>
             </li>
             <li><hr class="dropdown-divider"></li>
