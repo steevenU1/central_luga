@@ -30,7 +30,7 @@ function appBaseWebAbs() {
   $script = $_SERVER['SCRIPT_NAME'] ?? '/';
   $base   = rtrim(str_replace('\\','/', dirname($script)), '/');
   $base   = ($base === '') ? '/' : $base . '/';
-  return $scheme . '://' . $host . $base; // ej: http://localhost/luga/
+  return $scheme . '://' . $host . $base;
 }
 
 // Normaliza ruta de foto desde BD a URL absoluta servible
@@ -57,7 +57,6 @@ function normalizarFoto($rawPath) {
       return $baseAbs . ltrim($rel, '/') . '?v=' . $v;
     }
   }
-  // Último recurso
   return $baseAbs . ltrim($path, '/');
 }
 
@@ -72,37 +71,32 @@ function detectarColumnaExpediente($conn) {
   foreach ($candidatas as $c) {
     if (in_array($c, $cols, true)) return $c;
   }
-  // Si no hay ninguna, devolvemos null para manejar fallback
   return null;
 }
 
-// Obtiene la foto del usuario desde usuarios_expediente con detección de columna
+// Obtiene la foto del usuario desde usuarios_expediente
 function obtenerFotoUsuario($conn, $idUsuario) {
   $col = detectarColumnaExpediente($conn);
   if ($col) {
-    // Consulta segura usando la columna detectada (whitelist)
     $sql = "SELECT foto FROM usuarios_expediente WHERE $col = ? ORDER BY id DESC LIMIT 1";
     $stmt = $conn->prepare($sql);
     $stmt->bind_param("i", $idUsuario);
     $stmt->execute();
     $stmt->bind_result($foto);
     if ($stmt->fetch()) {
-      $foto = trim((string)$foto);
       $stmt->close();
-      return $foto;
+      return trim((string)$foto);
     }
     $stmt->close();
   } else {
-    // Fallback extremo: intentamos por coincidencia en usuarios_expediente.id (por si usan mismo id)
     $sql = "SELECT foto FROM usuarios_expediente WHERE id = ? LIMIT 1";
     $stmt = $conn->prepare($sql);
     $stmt->bind_param("i", $idUsuario);
     if ($stmt->execute()) {
       $stmt->bind_result($foto2);
       if ($stmt->fetch()) {
-        $f = trim((string)$foto2);
         $stmt->close();
-        return $f;
+        return trim((string)$foto2);
       }
     }
     $stmt->close();
@@ -142,11 +136,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           header("Location: cambiar_password.php?force=1");
           exit();
         } else {
-          // Foto del expediente con detección de columna
           $fotoUsuario = obtenerFotoUsuario($conn, $_SESSION['id_usuario']);
           $fotoUrl     = normalizarFoto($fotoUsuario);
 
-          // Saludo dinámico (CDMX)
           $dt = new DateTime('now', new DateTimeZone('America/Mexico_City'));
           $h  = (int)$dt->format('G');
           if     ($h < 12) $saludo = "Buenos días";
@@ -173,6 +165,8 @@ $inits = iniciales($nombreSesion ?: 'Usuario');
 <meta charset="UTF-8">
 <title>Login - Central Luga 2.0</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Favicon -->
+<link rel="icon" type="image/png" href="./img/favicon.ico">
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
 <style>
   :root{ --brand:#1e90ff; --brand-600:#1877cf; }
