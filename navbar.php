@@ -108,7 +108,7 @@ $grpTraspasos  = ['generar_traspaso.php','generar_traspaso_sims.php','traspasos_
 $grpEfectivo   = ['cobros.php','cortes_caja.php','generar_corte.php','depositos_sucursal.php','depositos.php','recoleccion_comisiones.php'];
 $grpOperacion  = [
   'lista_precios.php','prospectos.php','insumos_pedido.php','insumos_admin.php',
-  'mantenimiento_solicitar.php','mantenimiento_admin.php','gestionar_usuarios.php' // ⬅️ aquí está incluida para el activo
+  'mantenimiento_solicitar.php','mantenimiento_admin.php','gestionar_usuarios.php'
 ];
 $grpRH         = ['reporte_nomina.php','reporte_nomina_gerentes_zona.php','admin_expedientes.php'];
 $grpOperativos = ['insumos_catalogo.php','actualizar_precios_modelo.php','cuotas_mensuales.php','cuotas_mensuales_ejecutivos.php','cuotas_sucursales.php','cargar_cuotas_semanales.php','esquemas_comisiones_ejecutivos.php','esquemas_comisiones_gerentes.php','esquemas_comisiones_pospago.php','comisiones_especiales_equipos.php','carga_masiva_productos.php','carga_masiva_sims.php','alta_usuario.php','alta_sucursal.php'];
@@ -122,6 +122,16 @@ function item_active(string $file, string $current): string { return $current ==
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 
 <style>
+  /* ========== Escalas compactas (fáciles de ajustar) ========== */
+  :root{
+    --brand-font: .88rem;   /* Título "Central 2.0" */
+    --nav-font:   .84rem;   /* Texto de pestañas del navbar */
+    --drop-font:  .86rem;   /* Texto de items en dropdown */
+    --icon-em:    .90em;    /* Escala de íconos en pestañas */
+    --pad-y:      .32rem;   /* Padding vertical de pestañas */
+    --pad-x:      .48rem;   /* Padding horizontal de pestañas */
+  }
+
   /* —— Fondo y línea ——————————————————————— */
   .navbar-luga{
     background: radial-gradient(1200px 600px at 10% -20%, rgba(255,255,255,.18), rgba(255,255,255,0)),
@@ -133,19 +143,22 @@ function item_active(string $file, string $current): string { return $current ==
   /* —— Branding compacto —————————————————— */
   .brand-title{
     font-weight:900; letter-spacing:.1px; line-height:1;
-    font-size:.98rem;
+    font-size:var(--brand-font);
     background: linear-gradient(92deg,#eaf2ff 0%,#cfe0ff 45%,#9ec5ff 100%);
     -webkit-background-clip:text; background-clip:text; color:transparent;
     text-shadow:0 1px 0 rgba(0,0,0,.25);
+    white-space:nowrap;
   }
-  .navbar-brand img{ width:28px; height:28px; }
+  .navbar-brand img{ width:26px; height:26px; }
 
   /* —— Links compactos ——————————————————— */
   .navbar-luga .nav-link{
-    padding:.38rem .58rem;
-    font-size:.90rem;
+    padding:var(--pad-y) var(--pad-x);
+    font-size:var(--nav-font);
     border-radius:.6rem; color:#e7eef7 !important;
+    line-height:1.1;
   }
+  .navbar-luga .nav-link i{ font-size:var(--icon-em); margin-right:.35rem; }
   .navbar-luga .nav-link:hover{ background: rgba(255,255,255,.06); }
 
   /* —— Dropdowns legibles (modo oscuro) —— */
@@ -162,8 +175,9 @@ function item_active(string $file, string $current): string { return $current ==
     border:1px solid rgba(255,255,255,.08);
     border-radius:14px; box-shadow:0 16px 40px rgba(0,0,0,.35);
     overflow:hidden;
+    font-size:var(--drop-font);
   }
-  .navbar-luga .dropdown-item{ padding:.5rem .8rem; }
+  .navbar-luga .dropdown-item{ padding:.48rem .76rem; line-height:1.15; }
   .navbar-luga .nav-link.active-parent{
     background:rgba(255,255,255,.10);
     box-shadow:inset 0 0 0 1px rgba(255,255,255,.12);
@@ -176,11 +190,11 @@ function item_active(string $file, string $current): string { return $current ==
   .nav-avatar,.nav-initials{
     width:32px;height:32px;border-radius:50%;
     display:inline-flex;align-items:center;justify-content:center;
-    font-weight:700;font-size:.95rem;object-fit:cover;
+    font-weight:700;font-size:.92rem;object-fit:cover;
   }
   .nav-initials{ background:#25303a;color:#e8f0f8; }
   .dropdown-avatar,.dropdown-initials{
-    width:56px;height:56px;border-radius:18px;object-fit:cover;
+    width:54px;height:54px;border-radius:16px;object-fit:cover;
   }
   .dropdown-initials{ background:#25303a;color:#e8f0f8;display:inline-flex;align-items:center;justify-content:center;font-weight:800; }
   .user-chip{ color:#e7eef7; font-weight:600; }
@@ -188,11 +202,17 @@ function item_active(string $file, string $current): string { return $current ==
 
   .badge-soft-danger{ background:rgba(220,53,69,.18); color:#ffadb7; border:1px solid rgba(220,53,69,.35); }
 
-  /* —— Ajuste fino para laptops 1366–1440 —— */
+  /* —— Ajuste fino para laptops 1200–1440 —— */
   @media (min-width:1200px) and (max-width:1440px){
-    .navbar-luga .nav-link{ padding:.34rem .54rem; font-size:.88rem; }
-    .brand-title{ font-size:.94rem; }
-    .navbar-brand img{ width:26px; height:26px; }
+    :root{
+      --brand-font: .84rem;
+      --nav-font:   .82rem;
+      --drop-font:  .84rem;
+      --pad-y:      .30rem;
+      --pad-x:      .44rem;
+      --icon-em:    .88em;
+    }
+    .navbar-brand img{ width:24px; height:24px; }
   }
 </style>
 
@@ -217,7 +237,7 @@ function item_active(string $file, string $current): string { return $current ==
         <?php $pActive = parent_active($grpDashboard,$current); ?>
         <li class="nav-item dropdown">
           <a class="nav-link dropdown-toggle<?= $pActive?' active-parent':'' ?>" href="#" role="button" data-bs-toggle="dropdown">
-            <i class="bi bi-speedometer2 me-1"></i>Dashboard
+            <i class="bi bi-speedometer2"></i>Dashboard
           </a>
           <ul class="dropdown-menu">
             <li><a class="dropdown-item <?= item_active('productividad_dia.php',$current) ?>" href="productividad_dia.php">Dashboard diario</a></li>
@@ -230,7 +250,7 @@ function item_active(string $file, string $current): string { return $current ==
         <?php $pActive = parent_active($grpVentas,$current); ?>
         <li class="nav-item dropdown">
           <a class="nav-link dropdown-toggle<?= $pActive?' active-parent':'' ?>" href="#" role="button" data-bs-toggle="dropdown">
-            <i class="bi bi-bag-check me-1"></i>Ventas
+            <i class="bi bi-bag-check"></i>Ventas
           </a>
           <ul class="dropdown-menu">
             <?php if ($rolUsuario === 'Logistica'): ?>
@@ -250,7 +270,7 @@ function item_active(string $file, string $current): string { return $current ==
         <?php $pActive = parent_active($grpInventario,$current); ?>
         <li class="nav-item dropdown">
           <a class="nav-link dropdown-toggle<?= $pActive?' active-parent':'' ?>" href="#" role="button" data-bs-toggle="dropdown">
-            <i class="bi bi-box-seam me-1"></i>Inventario
+            <i class="bi bi-box-seam"></i>Inventario
           </a>
           <ul class="dropdown-menu">
             <?php if ($rolUsuario === 'Logistica'): ?>
@@ -282,7 +302,7 @@ function item_active(string $file, string $current): string { return $current ==
         <?php $pActive = parent_active($grpCompras,$current); ?>
         <li class="nav-item dropdown">
           <a class="nav-link dropdown-toggle<?= $pActive?' active-parent':'' ?>" href="#" role="button" data-bs-toggle="dropdown">
-            <i class="bi bi-cart-check me-1"></i>Compras
+            <i class="bi bi-cart-check"></i>Compras
           </a>
           <ul class="dropdown-menu">
             <li><a class="dropdown-item <?= item_active('compras_nueva.php',$current) ?>" href="compras_nueva.php">Nueva factura</a></li>
@@ -301,7 +321,7 @@ function item_active(string $file, string $current): string { return $current ==
         <?php $pActive = parent_active($grpTraspasos,$current); ?>
         <li class="nav-item dropdown">
           <a class="nav-link dropdown-toggle<?= $pActive?' active-parent':'' ?>" href="#" role="button" data-bs-toggle="dropdown">
-            <i class="bi bi-arrow-left-right me-1"></i>Traspasos
+            <i class="bi bi-arrow-left-right"></i>Traspasos
             <?php if ((int)$badgeTraspasos > 0): ?>
               <span class="badge badge-soft-danger ms-1"><?= (int)$badgeTraspasos ?></span>
             <?php endif; ?>
@@ -333,7 +353,7 @@ function item_active(string $file, string $current): string { return $current ==
         <?php $pActive = parent_active($grpEfectivo,$current); ?>
         <li class="nav-item dropdown">
           <a class="nav-link dropdown-toggle<?= $pActive?' active-parent':'' ?>" href="#" role="button" data-bs-toggle="dropdown">
-            <i class="bi bi-cash-coin me-1"></i>Efectivo
+            <i class="bi bi-cash-coin"></i>Efectivo
           </a>
           <ul class="dropdown-menu">
             <li><a class="dropdown-item <?= item_active('cobros.php',$current) ?>" href="cobros.php">Generar cobro</a></li>
@@ -354,7 +374,7 @@ function item_active(string $file, string $current): string { return $current ==
         <?php $pActive = parent_active($grpOperacion,$current); ?>
         <li class="nav-item dropdown">
           <a class="nav-link dropdown-toggle<?= $pActive?' active-parent':'' ?>" href="#" role="button" data-bs-toggle="dropdown">
-            <i class="bi bi-gear-wide-connected me-1"></i>Operación
+            <i class="bi bi-gear-wide-connected"></i>Operación
           </a>
           <ul class="dropdown-menu">
             <li><a class="dropdown-item <?= item_active('lista_precios.php',$current) ?>" href="lista_precios.php">Lista de precios</a></li>
@@ -367,7 +387,7 @@ function item_active(string $file, string $current): string { return $current ==
 
             <?php if ($esAdmin): ?>
               <li><a class="dropdown-item <?= item_active('insumos_admin.php',$current) ?>" href="insumos_admin.php">Administrar insumos</a></li>
-              <!-- 👇 NUEVO acceso directo solo para Admin/Super -->
+              <!-- Acceso directo solo para Admin/Super -->
               <li><a class="dropdown-item <?= item_active('gestionar_usuarios.php',$current) ?>" href="gestionar_usuarios.php">Gestionar usuarios</a></li>
             <?php endif; ?>
 
@@ -389,7 +409,7 @@ function item_active(string $file, string $current): string { return $current ==
         <?php $pActive = parent_active($grpRH,$current); ?>
           <li class="nav-item dropdown">
             <a class="nav-link dropdown-toggle<?= $pActive?' active-parent':'' ?>" href="#" role="button" data-bs-toggle="dropdown">
-              <i class="bi bi-people me-1"></i>RH
+              <i class="bi bi-people"></i>RH
             </a>
             <ul class="dropdown-menu">
               <li><a class="dropdown-item <?= item_active('reporte_nomina.php',$current) ?>" href="reporte_nomina.php">Reporte semanal</a></li>
@@ -406,7 +426,7 @@ function item_active(string $file, string $current): string { return $current ==
         <?php $pActive = parent_active($grpOperativos,$current); ?>
           <li class="nav-item dropdown">
             <a class="nav-link dropdown-toggle<?= $pActive?' active-parent':'' ?>" href="#" role="button" data-bs-toggle="dropdown">
-              <i class="bi bi-wrench-adjustable-circle me-1"></i>Operativos
+              <i class="bi bi-wrench-adjustable-circle"></i>Operativos
             </a>
             <ul class="dropdown-menu">
               <li><a class="dropdown-item <?= item_active('insumos_catalogo.php',$current) ?>" href="insumos_catalogo.php">Catálogo de insumos</a></li>
@@ -432,7 +452,7 @@ function item_active(string $file, string $current): string { return $current ==
         <?php $pActive = parent_active($grpCeleb,$current); ?>
         <li class="nav-item dropdown">
           <a class="nav-link dropdown-toggle<?= $pActive?' active-parent':'' ?>" href="#" role="button" data-bs-toggle="dropdown">
-            <i class="bi bi-balloon-heart me-1"></i>Celebraciones
+            <i class="bi bi-balloon-heart"></i>Celebraciones
           </a>
           <ul class="dropdown-menu">
             <li><a class="dropdown-item <?= item_active('cumples_aniversarios.php',$current) ?>" href="cumples_aniversarios.php">🎉 Cumpleaños & Aniversarios</a></li>
