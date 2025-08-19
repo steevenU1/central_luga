@@ -1,8 +1,5 @@
 <?php
-// cuadro_honor.php — LUGA (vertical cards)
-// Top 3 Ejecutivos (unidades) y Top 3 Sucursales (monto)
-// Reglas: excluir MiFi/Modem; tipo_venta 'Financiamiento+Combo' cuenta min 2 unidades.
-// Compatible con ONLY_FULL_GROUP_BY. Incluye navbar + fotos (uploads/fotos_usuarios).
+// cuadro_honor.php — LUGA (vertical cards) — versión compatible con ONLY_FULL_GROUP_BY (sin ANY_VALUE)
 
 session_start();
 if (!isset($_SESSION['id_usuario'])) { header("Location: index.php"); exit(); }
@@ -69,7 +66,7 @@ function fotoUsuarioUrl(mysqli $conn, int $idUsuario): ?string {
   }
 
   $candidatos = [
-    'uploads/fotos_usuarios/',   // carpeta real
+    'uploads/fotos_usuarios/',
     'uploads/expediente/',
     'uploads/expediente/fotos/',
     'uploads/usuarios/',
@@ -106,84 +103,93 @@ $finStr = $fin->format('Y-m-d H:i:s');
 $notLike1 = "%modem%";
 $notLike2 = "%mifi%";
 
-/* ========= Top 3 Ejecutivos (unidades) ========= */
-$sqlTopEjecutivos = "
-  SELECT
-    u.id AS id_usuario,
-    ANY_VALUE(u.nombre)  AS nombre_usuario,
-    ANY_VALUE(s.nombre)  AS sucursal,
-    SUM(
-      CASE WHEN v.tipo_venta='Financiamiento+Combo'
-           THEN GREATEST(2, COALESCE(eq.cnt,0))
-           ELSE COALESCE(eq.cnt,0)
-      END
-    ) AS unidades
-  FROM ventas v
-  JOIN usuarios u        ON u.id=v.id_usuario
-  LEFT JOIN sucursales s ON s.id=u.id_sucursal
-  LEFT JOIN (
+/* ========= Consultas (compatibles con ONLY_FULL_GROUP_BY, sin ANY_VALUE) ========= */
+
+$ejecutivos = [];
+$sucursales = [];
+
+try {
+  // Top 3 Ejecutivos (unidades)
+  $sqlTopEjecutivos = "
+    SELECT
+      u.id              AS id_usuario,
+      u.nombre          AS nombre_usuario,
+      s.nombre          AS sucursal,
+      SUM(
+        CASE
+          WHEN v.tipo_venta='Financiamiento+Combo'
+          THEN GREATEST(2, COALESCE(eq.cnt,0))
+          ELSE COALESCE(eq.cnt,0)
+        END
+      ) AS unidades
+    FROM ventas v
+    JOIN usuarios u        ON u.id = v.id_usuario
+    LEFT JOIN sucursales s ON s.id = u.id_sucursal
+    LEFT JOIN (
       SELECT dv.id_venta, COUNT(*) AS cnt
       FROM detalle_venta dv
-      JOIN productos p ON p.id=dv.id_producto
+      JOIN productos p ON p.id = dv.id_producto
       WHERE LOWER(COALESCE(p.modelo,'')) NOT LIKE ? AND LOWER(COALESCE(p.modelo,'')) NOT LIKE ?
       GROUP BY dv.id_venta
-  ) eq ON eq.id_venta=v.id
-  WHERE v.fecha_venta>=? AND v.fecha_venta<?
-  GROUP BY u.id
-  HAVING unidades>0
-  ORDER BY unidades DESC, nombre_usuario ASC
-  LIMIT 3
-";
-$ejecutivos = [];
-$stmt = $conn->prepare($sqlTopEjecutivos);
-$stmt->bind_param("ssss",$notLike1,$notLike2,$iniStr,$finStr);
-$stmt->execute();
-$res = $stmt->get_result();
-while($row = $res->fetch_assoc()){
-  $row['foto_url'] = fotoUsuarioUrl($conn,(int)$row['id_usuario']);
-  $ejecutivos[] = $row;
-}
-$stmt->close();
+    ) eq ON eq.id_venta = v.id
+    WHERE v.fecha_venta >= ? AND v.fecha_venta < ?
+    GROUP BY u.id, u.nombre, s.nombre
+    HAVING unidades > 0
+    ORDER BY unidades DESC, nombre_usuario ASC
+    LIMIT 3
+  ";
+  $stmt = $conn->prepare($sqlTopEjecutivos);
+  $stmt->bind_param("ssss",$notLike1,$notLike2,$iniStr,$finStr);
+  $stmt->execute();
+  $res = $stmt->get_result();
+  while($row = $res->fetch_assoc()){
+    $row['foto_url'] = fotoUsuarioUrl($conn,(int)$row['id_usuario']);
+    $ejecutivos[] = $row;
+  }
+  $stmt->close();
 
-/* ========= Top 3 Sucursales (monto) =========
-   Elegimos 1 gerente por sucursal (MIN(id)) para evitar ONLY_FULL_GROUP_BY
-*/
-$sqlTopSucursales = "
-  SELECT
-    s.id AS id_sucursal,
-    ANY_VALUE(s.nombre) AS sucursal,
-    ANY_VALUE(ger.nombre) AS gerente,
-    ANY_VALUE(ger.id)     AS id_gerente,
-    SUM(dv.precio_unitario) AS monto
-  FROM ventas v
-  JOIN detalle_venta dv ON dv.id_venta=v.id
-  JOIN productos p      ON p.id=dv.id_producto
-  JOIN usuarios u       ON u.id=v.id_usuario
-  JOIN sucursales s     ON s.id=u.id_sucursal
-  LEFT JOIN (
-    SELECT MIN(id) AS id_gerente, id_sucursal
-    FROM usuarios
-    WHERE rol='Gerente'
-    GROUP BY id_sucursal
-  ) pick ON pick.id_sucursal = s.id
-  LEFT JOIN usuarios ger ON ger.id = pick.id_gerente
-  WHERE v.fecha_venta>=? AND v.fecha_venta<?
-    AND LOWER(COALESCE(p.modelo,'')) NOT LIKE ? AND LOWER(COALESCE(p.modelo,'')) NOT LIKE ?
-  GROUP BY s.id
-  HAVING monto>0
-  ORDER BY monto DESC, sucursal ASC
-  LIMIT 3
-";
-$sucursales = [];
-$stmt = $conn->prepare($sqlTopSucursales);
-$stmt->bind_param("ssss",$iniStr,$finStr,$notLike1,$notLike2);
-$stmt->execute();
-$res = $stmt->get_result();
-while($row = $res->fetch_assoc()){
-  $row['foto_url'] = !empty($row['id_gerente']) ? fotoUsuarioUrl($conn,(int)$row['id_gerente']) : null;
-  $sucursales[] = $row;
+  // Top 3 Sucursales (monto)
+  $sqlTopSucursales = "
+    SELECT
+      s.id                 AS id_sucursal,
+      s.nombre             AS sucursal,
+      ger.id               AS id_gerente,
+      ger.nombre           AS gerente,
+      SUM(dv.precio_unitario) AS monto
+    FROM ventas v
+    JOIN detalle_venta dv ON dv.id_venta = v.id
+    JOIN productos p      ON p.id       = dv.id_producto
+    JOIN usuarios u       ON u.id       = v.id_usuario
+    JOIN sucursales s     ON s.id       = u.id_sucursal
+    LEFT JOIN (
+      SELECT id_sucursal, MIN(id) AS id_gerente
+      FROM usuarios
+      WHERE rol = 'Gerente'
+      GROUP BY id_sucursal
+    ) pick ON pick.id_sucursal = s.id
+    LEFT JOIN usuarios ger ON ger.id = pick.id_gerente
+    WHERE v.fecha_venta >= ? AND v.fecha_venta < ?
+      AND LOWER(COALESCE(p.modelo,'')) NOT LIKE ? AND LOWER(COALESCE(p.modelo,'')) NOT LIKE ?
+    GROUP BY s.id, s.nombre, ger.id, ger.nombre
+    HAVING monto > 0
+    ORDER BY monto DESC, sucursal ASC
+    LIMIT 3
+  ";
+  $stmt = $conn->prepare($sqlTopSucursales);
+  $stmt->bind_param("ssss",$iniStr,$finStr,$notLike1,$notLike2);
+  $stmt->execute();
+  $res = $stmt->get_result();
+  while($row = $res->fetch_assoc()){
+    $row['foto_url'] = !empty($row['id_gerente']) ? fotoUsuarioUrl($conn,(int)$row['id_gerente']) : null;
+    $sucursales[] = $row;
+  }
+  $stmt->close();
+
+} catch (Throwable $e) {
+  // Mensaje visible y compacto (útil para prod si hay modo estricto)
+  echo '<div style="max-width:900px;margin:20px auto" class="alert alert-danger"><b>Error al generar el Cuadro de Honor:</b><br>'.h($e->getMessage()).'</div>';
 }
-$stmt->close();
+
 ?>
 <!doctype html>
 <html lang="es">
