@@ -84,6 +84,9 @@ function calcularComisionesSIM($esquema, $tipoSim, $tipoVenta, $cumpleCuota) {
 /* =========================
    PROCESAR VENTA SIM
 ========================= */
+require_once __DIR__ . '/candado_captura.php';
+abortar_si_captura_bloqueada(); // por defecto bloquea POST
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $idSim       = (int)$_POST['id_sim'];
     $tipoVenta   = $_POST['tipo_venta'];

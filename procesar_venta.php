@@ -1,4 +1,6 @@
 <?php
+require_once __DIR__ . '/candado_captura.php';
+abortar_si_captura_bloqueada(); // por defecto bloquea POST
 session_start();
 if (!isset($_SESSION['id_usuario'])) {
   header("Location: index.php");

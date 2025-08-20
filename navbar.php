@@ -459,7 +459,7 @@ function item_active(string $file, string $current): string
           </li>
         <?php endif; ?>
 
-        <!-- EFECTIVO (no Logística) -->
+        <!-- EFECTIVO -->
         <?php if ($rolUsuario !== 'Logistica'): ?>
           <?php $pActive = parent_active($grpEfectivo, $current); ?>
           <li class="nav-item dropdown">
@@ -467,17 +467,18 @@ function item_active(string $file, string $current): string
               <i class="bi bi-cash-coin"></i>Efectivo
             </a>
             <ul class="dropdown-menu">
-              <li><a class="dropdown-item <?= item_active('cobros.php', $current) ?>" href="cobros.php">Generar cobro</a></li>
-              <li><a class="dropdown-item <?= item_active('cortes_caja.php', $current) ?>" href="cortes_caja.php">Corte de caja</a></li>
-              <li><a class="dropdown-item <?= item_active('generar_corte.php', $current) ?>" href="generar_corte.php">Generar corte sucursal</a></li>
-              <li><a class="dropdown-item <?= item_active('depositos_sucursal.php', $current) ?>" href="depositos_sucursal.php">Depósitos sucursal</a></li>
-              <?php if ($esAdmin): ?><li><a class="dropdown-item <?= item_active('depositos.php', $current) ?>" href="depositos.php">Validar depósitos</a></li><?php endif; ?>
               <?php if ($rolUsuario === 'GerenteZona'): ?>
-                <li>
-                  <hr class="dropdown-divider">
-                </li>
-                <li class="dropdown-header">Comisiones</li>
+                <!-- SOLO esta opción para GerenteZona -->
                 <li><a class="dropdown-item <?= item_active('recoleccion_comisiones.php', $current) ?>" href="recoleccion_comisiones.php">Recolección comisiones</a></li>
+              <?php else: ?>
+                <!-- Para todos los demás roles -->
+                <li><a class="dropdown-item <?= item_active('cobros.php', $current) ?>" href="cobros.php">Generar cobro</a></li>
+                <li><a class="dropdown-item <?= item_active('cortes_caja.php', $current) ?>" href="cortes_caja.php">Corte de caja</a></li>
+                <li><a class="dropdown-item <?= item_active('generar_corte.php', $current) ?>" href="generar_corte.php">Generar corte sucursal</a></li>
+                <li><a class="dropdown-item <?= item_active('depositos_sucursal.php', $current) ?>" href="depositos_sucursal.php">Depósitos sucursal</a></li>
+                <?php if ($esAdmin): ?>
+                  <li><a class="dropdown-item <?= item_active('depositos.php', $current) ?>" href="depositos.php">Validar depósitos</a></li>
+                <?php endif; ?>
               <?php endif; ?>
             </ul>
           </li>
@@ -545,7 +546,7 @@ function item_active(string $file, string $current): string
             <a class="nav-link dropdown-toggle<?= $pActive ? ' active-parent' : '' ?>" href="#" role="button" data-bs-toggle="dropdown">
               <i class="bi bi-wrench-adjustable-circle"></i>Operativos
             </a>
-            <ul class="dropdown-menu">
+            <!-- <ul class="dropdown-menu">
               <li><a class="dropdown-item <?= item_active('insumos_catalogo.php', $current) ?>" href="insumos_catalogo.php">Catálogo de insumos</a></li>
               <li><a class="dropdown-item <?= item_active('actualizar_precios_modelo.php', $current) ?>" href="actualizar_precios_modelo.php">Actualizar precios</a></li>
               <li><a class="dropdown-item <?= item_active('cuotas_mensuales.php', $current) ?>" href="cuotas_mensuales.php">Cuotas mensuales</a></li>
@@ -559,7 +560,7 @@ function item_active(string $file, string $current): string
               <li><a class="dropdown-item <?= item_active('carga_masiva_productos.php', $current) ?>" href="carga_masiva_productos.php">Carga masiva equipos</a></li>
               <li><a class="dropdown-item <?= item_active('carga_masiva_sims.php', $current) ?>" href="carga_masiva_sims.php">Carga masiva SIMs</a></li>
               <li><a class="dropdown-item <?= item_active('alta_usuario.php', $current) ?>" href="alta_usuario.php">Alta usuario</a></li>
-              <li><a class="dropdown-item <?= item_active('alta_sucursal.php', $current) ?>" href="alta_sucursal.php">Alta sucursal</a></li>
+              <li><a class="dropdown-item <?= item_active('alta_sucursal.php', $current) ?>" href="alta_sucursal.php">Alta sucursal</a></li> -->
             </ul>
           </li>
         <?php endif; ?>

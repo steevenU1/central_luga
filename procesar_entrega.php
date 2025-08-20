@@ -1,4 +1,6 @@
 <?php
+require_once __DIR__ . '/candado_captura.php';
+abortar_si_captura_bloqueada(); // por defecto bloquea POST
 session_start();
 header('Content-Type: application/json');
 

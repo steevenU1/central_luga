@@ -37,6 +37,9 @@ $msgErr = '';
 /* ============================
    PROCESAR POST ANTES DE IMPRIMIR HTML (PRG)
    ============================ */
+require_once __DIR__ . '/candado_captura.php';
+abortar_si_captura_bloqueada(); // por defecto bloquea POST
+
 if ($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['action']??'')==='crear') {
   $categoria   = trim($_POST['categoria'] ?? 'Otro');
   $titulo      = trim($_POST['titulo'] ?? '');

@@ -62,6 +62,9 @@ function calcularComisionPospago(mysqli $conn, float $planMonto, string $modalid
 /* ===============================
    PROCESAR VENTA
 ================================ */
+require_once __DIR__ . '/candado_captura.php';
+abortar_si_captura_bloqueada(); // por defecto bloquea POST
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $esEsim         = isset($_POST['es_esim']) ? 1 : 0;
     $idSim          = $_POST['id_sim'] ?? null;               // solo si NO es eSIM (opcional)

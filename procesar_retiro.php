@@ -1,4 +1,6 @@
 <?php
+require_once __DIR__ . '/candado_captura.php';
+abortar_si_captura_bloqueada(); // por defecto bloquea POST
 // procesar_retiro.php
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 if (!isset($_SESSION['id_usuario']) || $_SESSION['rol'] !== 'Admin') {
