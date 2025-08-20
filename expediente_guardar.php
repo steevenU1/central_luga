@@ -38,11 +38,16 @@ if ($genero === '' || !in_array($genero, ['M','F','Otro'], true)) { $genero = nu
 
 $contacto_emergencia = trim($_POST['contacto_emergencia'] ?? '');
 $tel_emergencia      = trim($_POST['tel_emergencia'] ?? '');
-$clabe               = trim($_POST['clabe'] ?? '');
-$banco               = trim($_POST['banco'] ?? '');
+
+/* ===== CAMBIO: normalizar CLABE/Tarjeta a solo dígitos antes de validar/guardar ===== */
+$clabe_input = $_POST['clabe'] ?? '';
+$clabe       = preg_replace('/\D+/', '', (string)$clabe_input); // deja solo dígitos
+
+$banco = trim($_POST['banco'] ?? '');
 
 # ===== Validaciones (si hay valor) =====
 $errores = [];
+
 if ($curp !== '') {
   $reCURP = '/^([A-Z])[AEIOUX]([A-Z]{2})(\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])[HM]'
           .'(AS|BC|BS|CC|CS|CH|CL|CM|DF|DG|GT|GR|HG|JC|MC|MN|MS|NT|NL|OC|PL|QT|QR|SP|SL|SR|TC|TS|TL|VZ|YN|ZS|NE)'
@@ -53,6 +58,7 @@ if ($curp !== '') {
     if (!($dt && $dt->format('ymd') === $m[3].$m[4].$m[5])) $errores[] = 'CURP con fecha inválida.';
   }
 }
+
 if ($rfc !== '') {
   $reRFC = '/^([A-ZÑ&]{3,4})(\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])([A-Z0-9]{3})$/u';
   if (!preg_match($reRFC, $rfc, $r)) $errores[] = 'RFC no válido.';
@@ -61,11 +67,20 @@ if ($rfc !== '') {
     if (!($dt && $dt->format('ymd') === $r[2].$r[3].$r[4])) $errores[] = 'RFC con fecha inválida.';
   }
 }
-if ($nss !== ''   && !preg_match('/^\d{11}$/', $nss))   $errores[] = 'El NSS debe tener 11 dígitos.';
-if ($clabe !== '' && !preg_match('/^\d{18}$/', $clabe)) $errores[] = 'La CLABE debe tener 18 dígitos.';
-if ($banco !== '' && strlen($banco) > 80)              $errores[] = 'El nombre del banco es muy largo.';
 
-if ($errores) { header("Location: mi_expediente.php?err=".urlencode(implode(' ', $errores))); exit; }
+if ($nss !== ''   && !preg_match('/^\d{11}$/', $nss)) $errores[] = 'El NSS debe tener 11 dígitos.';
+
+/* ===== CAMBIO: permitir 16 o 18 dígitos ===== */
+if ($clabe !== '' && !preg_match('/^\d{16}(\d{2})?$/', $clabe)) {
+  $errores[] = 'La CLABE o Tarjeta debe tener 16 o 18 dígitos.';
+}
+
+if ($banco !== '' && strlen($banco) > 80) $errores[] = 'El nombre del banco es muy largo.';
+
+if ($errores) {
+  header("Location: mi_expediente.php?err=" . urlencode(implode(' ', $errores)));
+  exit;
+}
 
 # ===== Upsert =====
 $exists = false;

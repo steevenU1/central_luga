@@ -25,9 +25,9 @@ $requiredFields = [
   'genero'               => 'Género',
   'contacto_emergencia'  => 'Contacto de emergencia',
   'tel_emergencia'       => 'Tel. de emergencia',
-  'clabe'                => 'CLABE',
-  // Si quieres que Banco cuente en el progreso, descomenta la línea siguiente:
-  // 'banco'               => 'Banco'
+  // Etiqueta visible actualizada
+  'clabe'                => 'CLABE o Tarjeta (16/18)',
+  // 'banco'             => 'Banco'
 ];
 
 /* ==== Cargar expediente ==== */
@@ -39,7 +39,15 @@ $stmt->close();
 
 /* ==== Documentos requeridos y estado ==== */
 $tipos   = list_doc_types_with_status($conn, $usuario_id);
+
+/* Lista para mostrar en UI (todos los requeridos) */
 $reqDocs = array_values(array_filter($tipos, fn($t) => (int)$t['requerido'] === 1));
+
+/* Lista filtrada solo para el conteo (excluye “Contrato”) */
+$reqDocsForProgress = array_values(array_filter($reqDocs, function($t){
+  $nombre = trim((string)($t['nombre'] ?? ''));
+  return stripos($nombre, 'contrato') === false; // <- excluye cualquier doc que contenga “Contrato”
+}));
 
 /* ==== Progreso ==== */
 $filledFields = 0; $missingFields = [];
@@ -48,12 +56,14 @@ foreach ($requiredFields as $key=>$label) {
   $isFilled = in_array($key, ['fecha_nacimiento','fecha_ingreso'], true) ? !empty($val) : (trim((string)$val) !== '');
   if ($isFilled) $filledFields++; else $missingFields[] = $label;
 }
+
 $uploadedReqDocs = 0; $missingDocs = [];
-foreach ($reqDocs as $d) {
+foreach ($reqDocsForProgress as $d) {
   if (!empty($d['doc_id_vigente'])) $uploadedReqDocs++;
   else $missingDocs[] = $d['nombre'];
 }
-$totalItems = count($requiredFields) + count($reqDocs);
+
+$totalItems = count($requiredFields) + count($reqDocsForProgress);
 $doneItems  = $filledFields + $uploadedReqDocs;
 $percent    = $totalItems > 0 ? floor(($doneItems / $totalItems) * 100) : 0;
 
@@ -220,11 +230,21 @@ $err_doc= !empty($_GET['err_doc']) ? $_GET['err_doc'] : '';
                pattern="^([A-ZÑ&]{3}|[A-ZÑ&]{4})\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])[A-Z0-9]{3}$"
                title="RFC válido con fecha (ej. ABC800101XXX o ABCD800101XXX)">
       </div>
+
+      <!-- Aceptar 16 o 18 dígitos (Tarjeta o CLABE) -->
       <div>
-        <label>CLABE</label>
-        <input type="text" name="clabe" maxlength="18" pattern="\d{18}" placeholder="18 dígitos"
-               value="<?= htmlspecialchars($exp['clabe'] ?? '') ?>" title="CLABE de 18 dígitos">
+        <label>CLABE o Tarjeta (16/18)</label>
+        <input
+          type="text"
+          name="clabe"
+          maxlength="18"
+          inputmode="numeric"
+          pattern="^\d{16}(\d{2})?$"
+          placeholder="Ingresa 16 (tarjeta) o 18 dígitos (CLABE)"
+          value="<?= htmlspecialchars($exp['clabe'] ?? '') ?>"
+          title="Ingresa exactamente 16 o 18 dígitos">
       </div>
+
       <div>
         <label>Banco (institución)</label>
         <input type="text" name="banco" maxlength="80" placeholder="Ej. BBVA, Santander, Banorte…"

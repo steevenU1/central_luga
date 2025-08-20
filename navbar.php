@@ -623,7 +623,7 @@ function item_active(string $file, string $current): string
             <li>
               <hr class="dropdown-divider">
             </li>
-            <li><a class="dropdown-item" href="expediente_usuario.php"><i class="bi bi-folder-person me-2"></i>Mi expediente</a></li>
+            <li><a class="dropdown-item" href="mi_expediente.php"><i class="bi bi-folder-person me-2"></i>Mi expediente</a></li>
             <li><a class="dropdown-item" href="documentos_historial.php"><i class="bi bi-files me-2"></i>Mis documentos</a></li>
             <li>
               <hr class="dropdown-divider">
