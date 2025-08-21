@@ -546,7 +546,7 @@ function item_active(string $file, string $current): string
             <a class="nav-link dropdown-toggle<?= $pActive ? ' active-parent' : '' ?>" href="#" role="button" data-bs-toggle="dropdown">
               <i class="bi bi-wrench-adjustable-circle"></i>Operativos
             </a>
-            <!-- <ul class="dropdown-menu">
+            <ul class="dropdown-menu">
               <li><a class="dropdown-item <?= item_active('insumos_catalogo.php', $current) ?>" href="insumos_catalogo.php">Catálogo de insumos</a></li>
               <li><a class="dropdown-item <?= item_active('actualizar_precios_modelo.php', $current) ?>" href="actualizar_precios_modelo.php">Actualizar precios</a></li>
               <li><a class="dropdown-item <?= item_active('cuotas_mensuales.php', $current) ?>" href="cuotas_mensuales.php">Cuotas mensuales</a></li>
@@ -560,7 +560,7 @@ function item_active(string $file, string $current): string
               <li><a class="dropdown-item <?= item_active('carga_masiva_productos.php', $current) ?>" href="carga_masiva_productos.php">Carga masiva equipos</a></li>
               <li><a class="dropdown-item <?= item_active('carga_masiva_sims.php', $current) ?>" href="carga_masiva_sims.php">Carga masiva SIMs</a></li>
               <li><a class="dropdown-item <?= item_active('alta_usuario.php', $current) ?>" href="alta_usuario.php">Alta usuario</a></li>
-              <li><a class="dropdown-item <?= item_active('alta_sucursal.php', $current) ?>" href="alta_sucursal.php">Alta sucursal</a></li> -->
+              <li><a class="dropdown-item <?= item_active('alta_sucursal.php', $current) ?>" href="alta_sucursal.php">Alta sucursal</a></li>
             </ul>
           </li>
         <?php endif; ?>

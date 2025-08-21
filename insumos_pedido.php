@@ -20,7 +20,7 @@ $idSucursal = (int)($_SESSION['id_sucursal'] ?? 0);
      $DEV_FORCE_WINDOW     = null;   // null = normal, true = abrir, false = cerrar
      $DEV_ALLOW_ANY_PERIOD = false;  // false = solo mes siguiente, true = cualquier mes
    =================================================================== */
-$DEV_FORCE_WINDOW     = false;   // ← true/false para forzar ventana; null para normal
+$DEV_FORCE_WINDOW     = null;   // ← true/false para forzar ventana; null para normal
 $DEV_ALLOW_ANY_PERIOD = false;  // ← true permite capturar en cualquier mes
 /* =================================================================== */
 
