@@ -9,7 +9,7 @@
 
 if (!defined('MODO_CAPTURA')) {
   // Para producción la próxima semana:
-  define('MODO_CAPTURA', false);
+  define('MODO_CAPTURA', true);
   // En local podrías poner true si quieres seguir probando capturas ahí.
   // define('MODO_CAPTURA', (($_SERVER['HTTP_HOST'] ?? '') === 'localhost'));
 }
