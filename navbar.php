@@ -1,5 +1,5 @@
 <?php
-// navbar.php (LUGA) — versión compacta + "Gestionar usuarios" en Operación (solo Admin/Super)
+// navbar.php (LUGA) — versión compacta + "Gestionar usuarios" habilitado para Gerente en Operación
 
 if (session_status() === PHP_SESSION_NONE) {
   session_start();
@@ -120,7 +120,7 @@ $primerNombre  = first_name($nombreUsuario);
 // ============ ACTIVO POR URL ============
 $current = basename(parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH));
 
-$grpDashboard  = ['dashboard_unificado.php', 'dashboard_mensual.php', 'productividad_dia.php'];
+$grpDashboard  = ['productividad_dia.php', 'dashboard_unificado.php', 'dashboard_mensual.php'];
 $grpVentas     = ['nueva_venta.php', 'venta_sim_prepago.php', 'venta_sim_pospago.php', 'historial_ventas.php', 'historial_ventas_sims.php'];
 $grpInventario = ['panel.php', 'inventario_subdistribuidor.php', 'inventario_global.php', 'inventario_resumen.php', 'inventario_eulalia.php', 'inventario_retiros.php', 'inventario_historico.php'];
 $grpCompras    = ['compras_nueva.php', 'compras_resumen.php', 'modelos.php', 'proveedores.php', 'compras_ingreso.php'];
@@ -156,20 +156,13 @@ function item_active(string $file, string $current): string
   /* ========== Escalas compactas (fáciles de ajustar) ========== */
   :root {
     --brand-font: .88rem;
-    /* Título "Central 2.0" */
     --nav-font: .84rem;
-    /* Texto de pestañas del navbar */
     --drop-font: .86rem;
-    /* Texto de items en dropdown */
     --icon-em: .90em;
-    /* Escala de íconos en pestañas */
     --pad-y: .32rem;
-    /* Padding vertical de pestañas */
     --pad-x: .48rem;
-    /* Padding horizontal de pestañas */
   }
 
-  /* —— Fondo y línea ——————————————————————— */
   .navbar-luga {
     background: radial-gradient(1200px 600px at 10% -20%, rgba(255, 255, 255, .18), rgba(255, 255, 255, 0)),
       linear-gradient(90deg, #0b0f14, #0f141a 60%, #121922);
@@ -177,7 +170,6 @@ function item_active(string $file, string $current): string
     backdrop-filter: blur(6px);
   }
 
-  /* —— Branding compacto —————————————————— */
   .brand-title {
     font-weight: 900;
     letter-spacing: .1px;
@@ -191,12 +183,8 @@ function item_active(string $file, string $current): string
     white-space: nowrap;
   }
 
-  .navbar-brand img {
-    width: 26px;
-    height: 26px;
-  }
+  .navbar-brand img { width: 26px; height: 26px; }
 
-  /* —— Links compactos ——————————————————— */
   .navbar-luga .nav-link {
     padding: var(--pad-y) var(--pad-x);
     font-size: var(--nav-font);
@@ -205,16 +193,9 @@ function item_active(string $file, string $current): string
     line-height: 1.1;
   }
 
-  .navbar-luga .nav-link i {
-    font-size: var(--icon-em);
-    margin-right: .35rem;
-  }
+  .navbar-luga .nav-link i { font-size: var(--icon-em); margin-right: .35rem; }
+  .navbar-luga .nav-link:hover { background: rgba(255, 255, 255, .06); }
 
-  .navbar-luga .nav-link:hover {
-    background: rgba(255, 255, 255, .06);
-  }
-
-  /* —— Dropdowns legibles (modo oscuro) —— */
   .navbar-luga .dropdown-menu {
     --bs-dropdown-bg: #0f141a;
     --bs-dropdown-color: #e7eef7;
@@ -232,88 +213,35 @@ function item_active(string $file, string $current): string
     font-size: var(--drop-font);
   }
 
-  .navbar-luga .dropdown-item {
-    padding: .48rem .76rem;
-    line-height: 1.15;
-  }
+  .navbar-luga .dropdown-item { padding: .48rem .76rem; line-height: 1.15; }
 
   .navbar-luga .nav-link.active-parent {
     background: rgba(255, 255, 255, .10);
     box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .12);
   }
+  .navbar-luga .dropdown-item.active { background: rgba(255, 255, 255, .18); font-weight: 600; }
 
-  .navbar-luga .dropdown-item.active {
-    background: rgba(255, 255, 255, .18);
-    font-weight: 600;
+  .nav-avatar, .nav-initials {
+    width: 32px; height: 32px; border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: .92rem; object-fit: cover;
   }
+  .nav-initials { background: #25303a; color: #e8f0f8; }
 
-  /* —— Avatar / nombre ——————————————————— */
-  .nav-avatar,
-  .nav-initials {
-    width: 32px;
-    height: 32px;
-    border-radius: 50%;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    font-weight: 700;
-    font-size: .92rem;
-    object-fit: cover;
+  .dropdown-avatar, .dropdown-initials {
+    width: 54px; height: 54px; border-radius: 16px; object-fit: cover;
   }
-
-  .nav-initials {
-    background: #25303a;
-    color: #e8f0f8;
-  }
-
-  .dropdown-avatar,
   .dropdown-initials {
-    width: 54px;
-    height: 54px;
-    border-radius: 16px;
-    object-fit: cover;
+    background: #25303a; color: #e8f0f8; display: inline-flex; align-items: center; justify-content: center; font-weight: 800;
   }
+  .user-chip { color: #e7eef7; font-weight: 600; }
+  .user-chip small { color: #a7b4c2; font-weight: 500; }
 
-  .dropdown-initials {
-    background: #25303a;
-    color: #e8f0f8;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    font-weight: 800;
-  }
+  .badge-soft-danger { background: rgba(220,53,69,.18); color: #ffadb7; border: 1px solid rgba(220,53,69,.35); }
 
-  .user-chip {
-    color: #e7eef7;
-    font-weight: 600;
-  }
-
-  .user-chip small {
-    color: #a7b4c2;
-    font-weight: 500;
-  }
-
-  .badge-soft-danger {
-    background: rgba(220, 53, 69, .18);
-    color: #ffadb7;
-    border: 1px solid rgba(220, 53, 69, .35);
-  }
-
-  /* —— Ajuste fino para laptops 1200–1440 —— */
   @media (min-width:1200px) and (max-width:1440px) {
-    :root {
-      --brand-font: .84rem;
-      --nav-font: .82rem;
-      --drop-font: .84rem;
-      --pad-y: .30rem;
-      --pad-x: .44rem;
-      --icon-em: .88em;
-    }
-
-    .navbar-brand img {
-      width: 24px;
-      height: 24px;
-    }
+    :root { --brand-font:.84rem; --nav-font:.82rem; --drop-font:.84rem; --pad-y:.30rem; --pad-x:.44rem; --icon-em:.88em; }
+    .navbar-brand img { width: 24px; height: 24px; }
   }
 </style>
 
@@ -388,9 +316,7 @@ function item_active(string $file, string $current): string
                 <li><a class="dropdown-item <?= item_active('inventario_global.php', $current) ?>" href="inventario_global.php">Inventario global</a></li>
               <?php endif; ?>
               <?php if (in_array($rolUsuario, ['Admin', 'Super'])): ?>
-                <li>
-                  <hr class="dropdown-divider">
-                </li>
+                <li><hr class="dropdown-divider"></li>
                 <li class="dropdown-header">Administrador</li>
                 <li><a class="dropdown-item <?= item_active('inventario_resumen.php', $current) ?>" href="inventario_resumen.php">Resumen Global</a></li>
                 <li><a class="dropdown-item <?= item_active('inventario_eulalia.php', $current) ?>" href="inventario_eulalia.php">Inventario Eulalia</a></li>
@@ -412,9 +338,7 @@ function item_active(string $file, string $current): string
               <li><a class="dropdown-item <?= item_active('compras_resumen.php', $current) ?>" href="compras_resumen.php">Resumen de compras</a></li>
               <li><a class="dropdown-item <?= item_active('modelos.php', $current) ?>" href="modelos.php">Catálogo de modelos</a></li>
               <li><a class="dropdown-item <?= item_active('proveedores.php', $current) ?>" href="proveedores.php">Proveedores</a></li>
-              <li>
-                <hr class="dropdown-divider">
-              </li>
+              <li><hr class="dropdown-divider"></li>
               <li><a class="dropdown-item" href="compras_resumen.php?estado=Pendiente">Ingreso a almacén (pendientes)</a></li>
               <li><a class="dropdown-item disabled" href="#" tabindex="-1" aria-disabled="true" title="Se accede desde el Resumen">compras_ingreso.php (directo)</a></li>
             </ul>
@@ -436,22 +360,16 @@ function item_active(string $file, string $current): string
                 <li><a class="dropdown-item <?= item_active('generar_traspaso.php', $current) ?>" href="generar_traspaso.php">Generar traspaso desde Eulalia</a></li>
               <?php endif; ?>
               <li><a class="dropdown-item <?= item_active('generar_traspaso_sims.php', $current) ?>" href="generar_traspaso_sims.php">Generar traspaso SIMs</a></li>
-              <li>
-                <hr class="dropdown-divider">
-              </li>
+              <li><hr class="dropdown-divider"></li>
               <li class="dropdown-header">SIMs</li>
               <li><a class="dropdown-item <?= item_active('traspasos_sims_pendientes.php', $current) ?>" href="traspasos_sims_pendientes.php">SIMs pendientes</a></li>
               <li><a class="dropdown-item <?= item_active('traspasos_sims_salientes.php', $current) ?>" href="traspasos_sims_salientes.php">SIMs salientes</a></li>
               <?php if ($rolUsuario === 'Gerente'): ?>
-                <li>
-                  <hr class="dropdown-divider">
-                </li>
+                <li><hr class="dropdown-divider"></li>
                 <li class="dropdown-header">Equipos</li>
                 <li><a class="dropdown-item <?= item_active('traspaso_nuevo.php', $current) ?>" href="traspaso_nuevo.php">Generar traspaso entre sucursales</a></li>
               <?php endif; ?>
-              <li>
-                <hr class="dropdown-divider">
-              </li>
+              <li><hr class="dropdown-divider"></li>
               <li class="dropdown-header">Historial de equipos</li>
               <li><a class="dropdown-item <?= item_active('traspasos_pendientes.php', $current) ?>" href="traspasos_pendientes.php">Historial traspasos entrantes</a></li>
               <li><a class="dropdown-item <?= item_active('traspasos_salientes.php', $current) ?>" href="traspasos_salientes.php">Historial traspasos salientes</a></li>
@@ -468,10 +386,8 @@ function item_active(string $file, string $current): string
             </a>
             <ul class="dropdown-menu">
               <?php if ($rolUsuario === 'GerenteZona'): ?>
-                <!-- SOLO esta opción para GerenteZona -->
                 <li><a class="dropdown-item <?= item_active('recoleccion_comisiones.php', $current) ?>" href="recoleccion_comisiones.php">Recolección comisiones</a></li>
               <?php else: ?>
-                <!-- Para todos los demás roles -->
                 <li><a class="dropdown-item <?= item_active('cobros.php', $current) ?>" href="cobros.php">Generar cobro</a></li>
                 <li><a class="dropdown-item <?= item_active('cortes_caja.php', $current) ?>" href="cortes_caja.php">Corte de caja</a></li>
                 <li><a class="dropdown-item <?= item_active('generar_corte.php', $current) ?>" href="generar_corte.php">Generar corte sucursal</a></li>
@@ -492,23 +408,25 @@ function item_active(string $file, string $current): string
           </a>
           <ul class="dropdown-menu">
             <li><a class="dropdown-item <?= item_active('lista_precios.php', $current) ?>" href="lista_precios.php">Lista de precios</a></li>
+
             <?php if (in_array($rolUsuario, ['Ejecutivo', 'Gerente'])): ?>
               <li><a class="dropdown-item <?= item_active('prospectos.php', $current) ?>" href="prospectos.php">Prospectos</a></li>
             <?php endif; ?>
+
             <?php if ($rolUsuario === 'Gerente'): ?>
               <li><a class="dropdown-item <?= item_active('insumos_pedido.php', $current) ?>" href="insumos_pedido.php">Pedido de insumos</a></li>
             <?php endif; ?>
 
-            <?php if ($esAdmin): ?>
-              <li><a class="dropdown-item <?= item_active('insumos_admin.php', $current) ?>" href="insumos_admin.php">Administrar insumos</a></li>
-              <!-- Acceso directo solo para Admin/Super -->
+            <!-- 🔧 Cambio: Gestionar usuarios visible para Admin, Super y Gerente -->
+            <?php if (in_array($rolUsuario, ['Admin', 'Super', 'Gerente'])): ?>
+              <?php if ($esAdmin): ?>
+                <li><a class="dropdown-item <?= item_active('insumos_admin.php', $current) ?>" href="insumos_admin.php">Administrar insumos</a></li>
+              <?php endif; ?>
               <li><a class="dropdown-item <?= item_active('gestionar_usuarios.php', $current) ?>" href="gestionar_usuarios.php">Gestionar usuarios</a></li>
             <?php endif; ?>
 
             <?php if (in_array($rolUsuario, ['Gerente', 'GerenteZona', 'GerenteSucursal', 'Admin', 'Super'])): ?>
-              <li>
-                <hr class="dropdown-divider">
-              </li>
+              <li><hr class="dropdown-divider"></li>
               <li class="dropdown-header">Mantenimiento</li>
               <?php if (in_array($rolUsuario, ['Gerente', 'GerenteZona', 'GerenteSucursal'])): ?>
                 <li><a class="dropdown-item <?= item_active('mantenimiento_solicitar.php', $current) ?>" href="mantenimiento_solicitar.php">Solicitar mantenimiento</a></li>
@@ -530,9 +448,7 @@ function item_active(string $file, string $current): string
             <ul class="dropdown-menu">
               <li><a class="dropdown-item <?= item_active('reporte_nomina.php', $current) ?>" href="reporte_nomina.php">Reporte semanal</a></li>
               <li><a class="dropdown-item <?= item_active('reporte_nomina_gerentes_zona.php', $current) ?>" href="reporte_nomina_gerentes_zona.php">Gerentes zona</a></li>
-              <li>
-                <hr class="dropdown-divider">
-              </li>
+              <li><hr class="dropdown-divider"></li>
               <li class="dropdown-header">Expedientes</li>
               <li><a class="dropdown-item <?= item_active('admin_expedientes.php', $current) ?>" href="admin_expedientes.php">Panel de expedientes</a></li>
             </ul>
@@ -621,14 +537,10 @@ function item_active(string $file, string $current): string
                 <div class="text-secondary small"><i class="bi bi-person-badge me-1"></i><?= e($rolUsuario) ?></div>
               </div>
             </li>
-            <li>
-              <hr class="dropdown-divider">
-            </li>
+            <li><hr class="dropdown-divider"></li>
             <li><a class="dropdown-item" href="mi_expediente.php"><i class="bi bi-folder-person me-2"></i>Mi expediente</a></li>
             <li><a class="dropdown-item" href="documentos_historial.php"><i class="bi bi-files me-2"></i>Mis documentos</a></li>
-            <li>
-              <hr class="dropdown-divider">
-            </li>
+            <li><hr class="dropdown-divider"></li>
             <li><a class="dropdown-item" href="logout.php"><i class="bi bi-box-arrow-right me-2"></i>Salir</a></li>
           </ul>
         </li>
