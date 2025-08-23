@@ -1,69 +1,59 @@
 <?php
-// inventario_retiros.php
-// Solo Admin. Opera exclusivamente sobre la sucursal "Eulalia" y permite revertir retiros,
-// ahora con modal de resumen antes de confirmar.
-
+// inventario_retiros.php — LUGA (Eulalia) | UI modernizada + modal resumen + modal detalle (fix DataTables)
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
-if (!isset($_SESSION['id_usuario']) || $_SESSION['rol'] !== 'Admin') {
-    header("Location: 403.php"); exit();
-}
+if (!isset($_SESSION['id_usuario']) || ($_SESSION['rol'] ?? '') !== 'Admin') { header("Location: 403.php"); exit(); }
 
-include 'db.php';
-include 'navbar.php';
+require_once __DIR__.'/db.php';
+require_once __DIR__.'/navbar.php';
 
 $idUsuario = (int)($_SESSION['id_usuario'] ?? 0);
 
-// ===== Obtener ID de sucursal "Eulalia" =====
+// Helper seguro (evita colisiones con otros includes)
+if (!function_exists('h')) { function h($s){ return htmlspecialchars($s ?? '', ENT_QUOTES, 'UTF-8'); } }
+
+// ===== Sucursal Eulalia =====
 $stmt = $conn->prepare("SELECT id, nombre FROM sucursales WHERE nombre = 'Eulalia' LIMIT 1");
 $stmt->execute();
 $res = $stmt->get_result();
 if ($res->num_rows === 0) {
-    echo "<div class='container my-4'><div class='alert alert-danger'>No existe la sucursal 'Eulalia'. Créala primero.</div></div>";
-    exit();
+  echo "<div class='container my-4'><div class='alert alert-danger'>No existe la sucursal 'Eulalia'. Créala primero.</div></div>";
+  exit();
 }
 $rowE = $res->fetch_assoc();
 $idEulalia = (int)$rowE['id'];
 $nombreEulalia = $rowE['nombre'];
 $stmt->close();
 
+// ===== Alerts =====
 $mensaje = $_GET['msg'] ?? '';
 $alert   = '';
 if ($mensaje === 'ok') {
-    $alert = "<div class='alert alert-success my-3'>✅ Retiro realizado correctamente.</div>";
+  $alert = "<div class='alert alert-success my-3'>✅ Retiro realizado correctamente.</div>";
 } elseif ($mensaje === 'revok') {
-    $alert = "<div class='alert alert-success my-3'>✅ Reversión aplicada correctamente.</div>";
+  $alert = "<div class='alert alert-success my-3'>✅ Reversión aplicada correctamente.</div>";
 } elseif ($mensaje === 'err') {
-    $err = htmlspecialchars($_GET['errdetail'] ?? 'Ocurrió un error.');
-    $alert = "<div class='alert alert-danger my-3'>❌ $err</div>";
+  $err = h($_GET['errdetail'] ?? 'Ocurrió un error.');
+  $alert = "<div class='alert alert-danger my-3'>❌ $err</div>";
 }
 
-// ===== Búsqueda libre en disponibles de Eulalia =====
+// ===== Búsqueda en disponibles de Eulalia =====
 $f_q = trim($_GET['q'] ?? '');
-
 $params = [];
 $sql = "
-    SELECT inv.id AS id_inventario, inv.id_sucursal, inv.id_producto, inv.estatus,
-           p.marca, p.modelo, p.color, p.capacidad, p.imei1, p.imei2, p.tipo_producto, p.codigo_producto
-    FROM inventario inv
-    INNER JOIN productos p ON p.id = inv.id_producto
-    WHERE inv.estatus = 'Disponible'
-      AND inv.id_sucursal = ?
+  SELECT inv.id AS id_inventario, inv.id_sucursal, inv.id_producto, inv.estatus,
+         p.marca, p.modelo, p.color, p.capacidad, p.imei1, p.imei2, p.tipo_producto, p.codigo_producto
+  FROM inventario inv
+  INNER JOIN productos p ON p.id = inv.id_producto
+  WHERE inv.estatus = 'Disponible' AND inv.id_sucursal = ?
 ";
 $params[] = ['i', $idEulalia];
-
 if ($f_q !== '') {
-    $sql .= " AND (p.marca LIKE ? OR p.modelo LIKE ? OR p.color LIKE ? OR p.capacidad LIKE ? OR p.imei1 LIKE ? OR p.codigo_producto LIKE ?) ";
-    $like = "%$f_q%";
-    $params[] = ['s', $like];
-    $params[] = ['s', $like];
-    $params[] = ['s', $like];
-    $params[] = ['s', $like];
-    $params[] = ['s', $like];
-    $params[] = ['s', $like];
+  $sql .= " AND (p.marca LIKE ? OR p.modelo LIKE ? OR p.color LIKE ? OR p.capacidad LIKE ? OR p.imei1 LIKE ? OR p.codigo_producto LIKE ?) ";
+  $like = "%$f_q%";
+  $params[] = ['s', $like]; $params[] = ['s', $like]; $params[] = ['s', $like];
+  $params[] = ['s', $like]; $params[] = ['s', $like]; $params[] = ['s', $like];
 }
 $sql .= " ORDER BY p.marca, p.modelo, p.capacidad, p.color, inv.id ASC ";
-
-$itemsDisponibles = [];
 $types = ''; $binds = [];
 foreach ($params as $p) { $types .= $p[0]; $binds[] = $p[1]; }
 $stmt = $conn->prepare($sql);
@@ -72,42 +62,28 @@ $stmt->execute();
 $itemsDisponibles = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
 $stmt->close();
 
-// ===== Historial (solo retiros de Eulalia) =====
+// ===== Historial (últimos 200 de Eulalia) =====
 $h_motivo = $_GET['h_motivo'] ?? '';
 $h_qfolio = trim($_GET['h_folio'] ?? '');
 $h_estado = $_GET['h_estado'] ?? ''; // '', 'vigente', 'revertido'
 
 $histSql = "
-    SELECT r.id, r.folio, r.fecha, r.motivo, r.destino, r.nota,
-           r.id_sucursal, s.nombre AS sucursal_nombre, u.nombre AS usuario_nombre,
-           r.revertido, r.fecha_reversion, r.nota_reversion,
-           COUNT(d.id) AS cantidad
-    FROM inventario_retiros r
-    LEFT JOIN inventario_retiros_detalle d ON d.retiro_id = r.id
-    LEFT JOIN sucursales s ON s.id = r.id_sucursal
-    LEFT JOIN usuarios   u ON u.id = r.id_usuario
-    WHERE r.id_sucursal = ?
+  SELECT r.id, r.folio, r.fecha, r.motivo, r.destino, r.nota,
+         r.id_sucursal, s.nombre AS sucursal_nombre, u.nombre AS usuario_nombre,
+         r.revertido, r.fecha_reversion, r.nota_reversion,
+         COUNT(d.id) AS cantidad
+  FROM inventario_retiros r
+  LEFT JOIN inventario_retiros_detalle d ON d.retiro_id = r.id
+  LEFT JOIN sucursales s ON s.id = r.id_sucursal
+  LEFT JOIN usuarios   u ON u.id = r.id_usuario
+  WHERE r.id_sucursal = ?
 ";
 $histParams = [['i', $idEulalia]];
-
-if ($h_motivo !== '') {
-    $histSql .= " AND r.motivo = ? ";
-    $histParams[] = ['s', $h_motivo];
-}
-if ($h_qfolio !== '') {
-    $histSql .= " AND r.folio LIKE ? ";
-    $histParams[] = ['s', "%$h_qfolio%"];
-}
-if ($h_estado === 'vigente') {
-    $histSql .= " AND r.revertido = 0 ";
-} elseif ($h_estado === 'revertido') {
-    $histSql .= " AND r.revertido = 1 ";
-}
-
-$histSql .= " GROUP BY r.id
-              ORDER BY r.fecha DESC
-              LIMIT 200";
-
+if ($h_motivo !== '') { $histSql .= " AND r.motivo = ? "; $histParams[] = ['s', $h_motivo]; }
+if ($h_qfolio !== '') { $histSql .= " AND r.folio LIKE ? "; $histParams[] = ['s', "%$h_qfolio%"]; }
+if     ($h_estado === 'vigente')   { $histSql .= " AND r.revertido = 0 "; }
+elseif ($h_estado === 'revertido') { $histSql .= " AND r.revertido = 1 "; }
+$histSql .= " GROUP BY r.id ORDER BY r.fecha DESC LIMIT 200";
 $types = ''; $binds = [];
 foreach ($histParams as $p) { $types .= $p[0]; $binds[] = $p[1]; }
 $stmt = $conn->prepare($histSql);
@@ -115,38 +91,157 @@ $stmt->bind_param($types, ...$binds);
 $stmt->execute();
 $historial = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
 $stmt->close();
-?>
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 
-<div class="container-fluid my-3">
-  <h3 class="mb-2">Retiros de Inventario (Eulalia)</h3>
-  <p class="text-muted">Operación restringida a la sucursal <strong><?= htmlspecialchars($nombreEulalia) ?></strong>. Solo Admin.</p>
+// ===== KPIs =====
+$disponibles = count($itemsDisponibles);
+$vigentes = 0; $revertidos = 0; $totalRetirados = 0; $ultimo = '';
+foreach ($historial as $h) {
+  $totalRetirados += (int)$h['cantidad'];
+  if ((int)$h['revertido'] === 1) $revertidos++; else $vigentes++;
+  if ($ultimo === '' && !empty($h['fecha'])) $ultimo = $h['fecha'];
+}
+
+// ===== Preparar templates de detalle (fuera de la tabla) =====
+$detailTemplates = [];
+foreach ($historial as $h) {
+  ob_start();
+  $did = (int)$h['id'];
+  $qdet = $conn->prepare("
+    SELECT d.id_inventario, d.id_producto, d.imei1,
+           p.marca, p.modelo, p.capacidad, p.color, p.codigo_producto
+    FROM inventario_retiros_detalle d
+    LEFT JOIN productos p ON p.id = d.id_producto
+    WHERE d.retiro_id = ?
+    ORDER BY d.id ASC
+  ");
+  $qdet->bind_param('i', $did);
+  $qdet->execute();
+  $detallito = $qdet->get_result()->fetch_all(MYSQLI_ASSOC);
+  $qdet->close();
+  ?>
+  <div id="tpl-det-<?= (int)$h['id'] ?>" class="d-none">
+    <div class="table-responsive">
+      <table class="table table-sm mb-0">
+        <thead>
+          <tr>
+            <th>ID Inv.</th><th>Marca</th><th>Modelo</th><th>Cap.</th><th>Color</th><th>IMEI</th><th>Código</th>
+          </tr>
+        </thead>
+        <tbody>
+          <?php foreach ($detallito as $d): ?>
+            <tr>
+              <td><?= (int)$d['id_inventario'] ?></td>
+              <td><?= h($d['marca']) ?></td>
+              <td><?= h($d['modelo']) ?></td>
+              <td><?= h($d['capacidad']) ?></td>
+              <td><?= h($d['color']) ?></td>
+              <td><?= h($d['imei1']) ?></td>
+              <td><?= h($d['codigo_producto']) ?></td>
+            </tr>
+          <?php endforeach; ?>
+        </tbody>
+      </table>
+      <?php if (!empty($h['nota'])): ?>
+        <div class="mt-2"><strong>Nota:</strong> <?= h($h['nota']) ?></div>
+      <?php endif; ?>
+      <?php if ((int)$h['revertido'] === 1 && !empty($h['nota_reversion'])): ?>
+        <div class="mt-2"><strong>Nota de reversión:</strong> <?= h($h['nota_reversion']) ?></div>
+      <?php endif; ?>
+    </div>
+  </div>
+  <?php
+  $detailTemplates[] = ob_get_clean();
+}
+?>
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Retiros de Inventario — Eulalia</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="/img/favicon.ico?v=7" sizes="any">
+
+  <!-- Bootstrap & Icons -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet" />
+
+  <!-- DataTables -->
+  <link href="https://cdn.datatables.net/1.13.8/css/dataTables.bootstrap5.min.css" rel="stylesheet">
+  <link href="https://cdn.datatables.net/fixedheader/3.4.0/css/fixedHeader.bootstrap5.min.css" rel="stylesheet">
+  <link href="https://cdn.datatables.net/responsive/2.5.1/css/responsive.bootstrap5.min.css" rel="stylesheet">
+  <link href="https://cdn.datatables.net/buttons/2.4.2/css/buttons.bootstrap5.min.css" rel="stylesheet">
+
+  <style>
+    body { background:#f6f7fb; }
+    .page-head{ display:flex; align-items:center; justify-content:space-between; gap:16px; margin:18px auto 8px; padding:6px 4px; }
+    .page-title{ font-weight:700; letter-spacing:.2px; margin:0; }
+    .role-chip{ font-size:.8rem; padding:.2rem .55rem; border-radius:999px; background:#eef2ff; color:#3743a5; border:1px solid #d9e0ff; }
+    .toolbar{ display:flex; gap:8px; align-items:center; }
+    .filters-card{ border:1px solid #e9ecf1; box-shadow:0 1px 6px rgba(16,24,40,.06); border-radius:16px; }
+    .kpi{ border:1px solid #e9ecf1; border-radius:16px; background:#fff; box-shadow:0 2px 8px rgba(16,24,40,.06); padding:16px; }
+    .kpi h6{ margin:0; font-size:.9rem; color:#6b7280; } .kpi .metric{ font-weight:800; font-size:1.4rem; margin-top:4px; }
+    .badge-soft{ border:1px solid transparent; }
+    .badge-soft.success{ background:#e9f9ee; color:#0b7a3a; border-color:#b9ebc9; }
+    .badge-soft.warning{ background:#fff6e6; color:#955f00; border-color:#ffe2ad; }
+    .badge-soft.secondary{ background:#f1f5f9; color:#0f172a; border-color:#e2e8f0; }
+    .chip{ display:inline-flex; align-items:center; gap:6px; padding:2px 10px; border-radius:999px; background:#f1f5f9; color:#0f172a; font-size:.8rem; border:1px solid #e2e8f0; }
+    .status-dot{ width:8px; height:8px; border-radius:50%; display:inline-block; }
+    .dot-green{ background:#16a34a; } .dot-gray{ background:#94a3b8; }
+    .table-wrap{ background:#fff; border:1px solid #e9ecf1; border-radius:16px; padding:8px 8px 16px; box-shadow:0 2px 10px rgba(16,24,40,.06); }
+    .copy-btn{ border:0; background:transparent; cursor:pointer; }
+    .copy-btn:hover{ opacity:.85; }
+  </style>
+</head>
+<body>
+<div class="container-fluid px-3 px-lg-4">
+
+  <!-- Encabezado -->
+  <div class="page-head">
+    <div>
+      <h2 class="page-title">📤 Retiros de Inventario — Eulalia</h2>
+      <div class="mt-1"><span class="role-chip">Admin</span></div>
+    </div>
+    <div class="toolbar">
+      <button class="btn btn-outline-secondary btn-sm rounded-pill" data-bs-toggle="collapse" data-bs-target="#filtrosHist"><i class="bi bi-sliders me-1"></i> Filtros historial</button>
+      <a href="exportar_retiros_eulalia.php?<?= http_build_query($_GET) ?>" class="btn btn-success btn-sm rounded-pill">
+        <i class="bi bi-file-earmark-spreadsheet me-1"></i> Exportar historial
+      </a>
+      <a href="inventario_retiros.php" class="btn btn-light btn-sm rounded-pill border"><i class="bi bi-arrow-counterclockwise me-1"></i> Limpiar</a>
+    </div>
+  </div>
 
   <?= $alert ?>
 
-  <!-- === Form de BÚSQUEDA separado para evitar que dispare el submit del retiro === -->
+  <!-- KPIs -->
+  <div class="row g-3 mb-3">
+    <div class="col-6 col-md-4 col-lg-2"><div class="kpi"><h6>Disponibles</h6><div class="metric"><span class="badge badge-soft success"><?= number_format($disponibles) ?></span></div></div></div>
+    <div class="col-6 col-md-4 col-lg-2"><div class="kpi"><h6>Retiros vigentes</h6><div class="metric"><span class="badge badge-soft warning"><?= number_format($vigentes) ?></span></div></div></div>
+    <div class="col-6 col-md-4 col-lg-2"><div class="kpi"><h6>Retiros revertidos</h6><div class="metric"><span class="badge badge-soft secondary"><?= number_format($revertidos) ?></span></div></div></div>
+    <div class="col-6 col-md-4 col-lg-3"><div class="kpi"><h6>Último retiro</h6><div class="metric"><?= $ultimo ? h($ultimo) : '—' ?></div></div></div>
+    <div class="col-6 col-md-4 col-lg-3"><div class="kpi"><h6>Total equipos retirados</h6><div class="metric"><?= number_format($totalRetirados) ?></div></div></div>
+  </div>
+
+  <!-- === Form de BÚSQUEDA separado para evitar submit del retiro === -->
   <form id="searchForm" method="GET"></form>
 
   <!-- ===== Nuevo retiro (Eulalia fija) ===== -->
-  <div class="card mb-4">
-    <div class="card-header">Nuevo retiro</div>
+  <div class="card mb-4 filters-card">
+    <div class="card-header bg-white fw-semibold">Nuevo retiro</div>
     <div class="card-body">
       <form id="formRetiro" action="procesar_retiro.php" method="POST">
         <input type="hidden" name="id_sucursal" value="<?= $idEulalia ?>">
         <div class="row g-3">
           <div class="col-md-3">
             <label class="form-label">Sucursal</label>
-            <input type="text" class="form-control" value="<?= htmlspecialchars($nombreEulalia) ?>" readonly>
+            <input type="text" class="form-control" value="<?= h($nombreEulalia) ?>" readonly>
           </div>
           <div class="col-md-3">
             <label class="form-label">Motivo</label>
             <select id="motivo" name="motivo" class="form-select" required>
               <option value="">— Selecciona —</option>
-              <option>Venta a distribuidor</option>
-              <option>Garantía</option>
-              <option>Merma</option>
-              <option>Utilitario</option>
-              <option>Otro</option>
+              <?php foreach (['Venta a distribuidor','Garantía','Merma','Utilitario','Otro'] as $m): ?>
+                <option <?= (($_GET['motivo']??'')===$m)?'selected':'' ?>><?= h($m) ?></option>
+              <?php endforeach; ?>
             </select>
           </div>
           <div class="col-md-3">
@@ -161,21 +256,20 @@ $stmt->close();
 
         <hr>
 
-        <!-- Búsqueda (asociada al form GET separado) -->
+        <!-- Búsqueda -->
         <div class="row g-2 align-items-end">
-          <div class="col-md-6">
+          <div class="col-md-8">
             <label class="form-label">Búsqueda</label>
             <div class="d-flex gap-2">
-              <input id="qsearch" type="text" name="q" form="searchForm"
-                     class="form-control"
-                     value="<?= htmlspecialchars($f_q) ?>"
-                     placeholder="Marca, modelo, color, IMEI, código…">
-              <button type="submit" class="btn btn-outline-secondary" form="searchForm">Buscar</button>
+              <input id="qsearch" type="text" name="q" form="searchForm" class="form-control"
+                     value="<?= h($f_q) ?>" placeholder="Marca, modelo, color, IMEI, código…">
+              <button type="submit" class="btn btn-outline-secondary" form="searchForm"><i class="bi bi-search me-1"></i>Buscar</button>
             </div>
           </div>
-          <div class="col-md-6 text-end">
-            <!-- Este botón ya NO envía directo; ahora abre el modal de resumen -->
-            <button type="button" id="btnResumen" class="btn btn-danger">Retirar seleccionados</button>
+          <div class="col-md-4 text-end">
+            <button type="button" id="btnResumen" class="btn btn-danger rounded-pill">
+              <i class="bi bi-box-arrow-up me-1"></i> Retirar seleccionados
+            </button>
           </div>
         </div>
 
@@ -183,7 +277,7 @@ $stmt->close();
           <table class="table table-sm table-hover align-middle" id="tablaInventario">
             <thead class="table-light">
               <tr>
-                <th><input type="checkbox" id="chkAll"></th>
+                <th style="width:32px;"><input type="checkbox" id="chkAll"></th>
                 <th>Marca</th>
                 <th>Modelo</th>
                 <th>Cap.</th>
@@ -194,46 +288,48 @@ $stmt->close();
               </tr>
             </thead>
             <tbody>
-            <?php if (empty($itemsDisponibles)): ?>
-              <tr><td colspan="8" class="text-center text-muted py-4">Sin resultados</td></tr>
-            <?php else: foreach ($itemsDisponibles as $it): ?>
-              <tr>
-                <td><input type="checkbox" name="items[]" value="<?= $it['id_inventario'] ?>"></td>
-                <td><?= htmlspecialchars($it['marca']) ?></td>
-                <td><?= htmlspecialchars($it['modelo']) ?></td>
-                <td><?= htmlspecialchars($it['capacidad']) ?></td>
-                <td><?= htmlspecialchars($it['color']) ?></td>
-                <td><?= htmlspecialchars($it['imei1']) ?></td>
-                <td><?= htmlspecialchars($it['codigo_producto']) ?></td>
-                <td><?= htmlspecialchars($it['tipo_producto']) ?></td>
-              </tr>
-            <?php endforeach; endif; ?>
+              <?php if (empty($itemsDisponibles)): ?>
+                <tr><td colspan="8" class="text-center text-muted py-4">Sin resultados</td></tr>
+              <?php else: foreach ($itemsDisponibles as $it): ?>
+                <tr>
+                  <td><input type="checkbox" name="items[]" value="<?= (int)$it['id_inventario'] ?>"></td>
+                  <td><?= h($it['marca']) ?></td>
+                  <td><?= h($it['modelo']) ?></td>
+                  <td><?= h($it['capacidad']) ?></td>
+                  <td><?= h($it['color']) ?></td>
+                  <td>
+                    <span><?= h($it['imei1']) ?></span>
+                    <?php if(!empty($it['imei1'])): ?>
+                      <button class="copy-btn ms-1" type="button" title="Copiar IMEI" onclick="copyText('<?= h($it['imei1']) ?>')"><i class="bi bi-clipboard"></i></button>
+                    <?php endif; ?>
+                  </td>
+                  <td><?= h($it['codigo_producto']) ?></td>
+                  <td><?= h($it['tipo_producto']) ?></td>
+                </tr>
+              <?php endforeach; endif; ?>
             </tbody>
           </table>
         </div>
-
       </form>
     </div>
   </div>
 
-  <!-- ===== Historial (Eulalia) con opción de revertir ===== -->
-  <div class="card">
-    <div class="card-header d-flex justify-content-between align-items-center">
-      <span>Historial de retiros (últimos 200) — Eulalia</span>
+  <!-- ===== Historial ===== -->
+  <div class="table-wrap">
+    <div class="d-flex justify-content-between align-items-center p-2">
+      <h6 class="m-0">Historial de retiros (últimos 200) — Eulalia</h6>
+      <button class="btn btn-outline-secondary btn-sm rounded-pill" data-bs-toggle="collapse" data-bs-target="#filtrosHist"><i class="bi bi-funnel me-1"></i>Filtros</button>
     </div>
-    <div class="card-body">
+
+    <div id="filtrosHist" class="collapse px-2">
       <form method="GET" class="row g-2 mb-3">
         <div class="col-md-3">
           <label class="form-label">Motivo</label>
           <select name="h_motivo" class="form-select" onchange="this.form.submit()">
             <option value="">— Todos —</option>
-            <?php
-              $motivos = ['Venta a distribuidor','Garantía','Merma','Utilitario','Otro'];
-              foreach ($motivos as $m) {
-                $sel = ($h_motivo === $m) ? 'selected' : '';
-                echo "<option $sel>".htmlspecialchars($m)."</option>";
-              }
-            ?>
+            <?php foreach (['Venta a distribuidor','Garantía','Merma','Utilitario','Otro'] as $m): ?>
+              <option value="<?= h($m) ?>" <?= $h_motivo===$m?'selected':'' ?>><?= h($m) ?></option>
+            <?php endforeach; ?>
           </select>
         </div>
         <div class="col-md-3">
@@ -246,113 +342,70 @@ $stmt->close();
         </div>
         <div class="col-md-3">
           <label class="form-label">Folio</label>
-          <input type="text" name="h_folio" class="form-control" value="<?= htmlspecialchars($h_qfolio) ?>" placeholder="Buscar folio…">
+          <input type="text" name="h_folio" class="form-control" value="<?= h($h_qfolio) ?>" placeholder="Buscar folio…">
         </div>
         <div class="col-md-3 d-flex align-items-end">
-          <button class="btn btn-outline-secondary w-100">Filtrar</button>
+          <button class="btn btn-outline-secondary w-100">Aplicar</button>
         </div>
       </form>
+    </div>
 
-      <div class="table-responsive">
-        <table class="table table-sm table-striped align-middle">
-          <thead class="table-light">
-            <tr>
-              <th>Folio</th>
-              <th>Fecha</th>
-              <th>Usuario</th>
-              <th>Motivo</th>
-              <th>Destino</th>
-              <th>Cantidad</th>
-              <th>Estado</th>
-              <th>Acciones</th>
-            </tr>
-          </thead>
-          <tbody>
-            <?php if (empty($historial)): ?>
-              <tr><td colspan="8" class="text-center text-muted py-4">Sin retiros registrados</td></tr>
-            <?php else: foreach ($historial as $h): ?>
-              <tr>
-                <td><span class="badge bg-dark"><?= htmlspecialchars($h['folio']) ?></span></td>
-                <td><?= htmlspecialchars($h['fecha']) ?></td>
-                <td><?= htmlspecialchars($h['usuario_nombre'] ?? 'N/D') ?></td>
-                <td><?= htmlspecialchars($h['motivo']) ?></td>
-                <td><?= htmlspecialchars($h['destino'] ?? '') ?></td>
-                <td><strong><?= (int)$h['cantidad'] ?></strong></td>
-                <td>
-                  <?php if ((int)$h['revertido'] === 1): ?>
-                    <span class="badge bg-secondary">Revertido</span><br>
-                    <small class="text-muted"><?= htmlspecialchars($h['fecha_reversion']) ?></small>
-                  <?php else: ?>
-                    <span class="badge bg-success">Vigente</span>
-                  <?php endif; ?>
-                </td>
-                <td class="d-flex gap-2">
-                  <!-- Ver detalle -->
-                  <button class="btn btn-outline-primary btn-sm" type="button" data-bs-toggle="collapse" data-bs-target="#det<?= $h['id'] ?>">Detalle</button>
+    <div class="px-2 pb-2">
+      <table id="tablaHistorial" class="table table-striped table-hover align-middle nowrap" style="width:100%;">
+        <thead class="table-light">
+          <tr>
+            <th>Folio</th>
+            <th>Fecha</th>
+            <th>Usuario</th>
+            <th>Motivo</th>
+            <th>Destino</th>
+            <th>Cantidad</th>
+            <th>Estado</th>
+            <th>Acciones</th>
+          </tr>
+        </thead>
+        <tbody>
+        <?php if (empty($historial)): ?>
+          <tr><td colspan="8" class="text-center text-muted py-4">Sin retiros registrados</td></tr>
+        <?php else: foreach ($historial as $h): ?>
+          <tr>
+            <td><span class="badge bg-dark"><?= h($h['folio']) ?></span></td>
+            <td><?= h($h['fecha']) ?></td>
+            <td><?= h($h['usuario_nombre'] ?? 'N/D') ?></td>
+            <td><?= h($h['motivo']) ?></td>
+            <td><?= h($h['destino'] ?? '') ?></td>
+            <td><strong><?= (int)$h['cantidad'] ?></strong></td>
+            <td>
+              <?php if ((int)$h['revertido'] === 1): ?>
+                <span class="chip"><span class="status-dot dot-gray"></span>Revertido</span><br>
+                <small class="text-muted"><?= h($h['fecha_reversion']) ?></small>
+              <?php else: ?>
+                <span class="chip"><span class="status-dot dot-green"></span>Vigente</span>
+              <?php endif; ?>
+            </td>
+            <td class="d-flex gap-2">
+              <button class="btn btn-outline-primary btn-sm btn-detalle" type="button"
+                      data-id="<?= (int)$h['id'] ?>" data-folio="<?= h($h['folio']) ?>">Detalle</button>
 
-                  <!-- Revertir -->
-                  <?php if ((int)$h['revertido'] === 0): ?>
-                    <form action="revertir_retiro.php" method="POST" onsubmit="return confirmarReversion();">
-                      <input type="hidden" name="id_retiro" value="<?= (int)$h['id'] ?>">
-                      <input type="hidden" name="id_sucursal" value="<?= $idEulalia ?>">
-                      <input type="text" name="nota_reversion" class="form-control form-control-sm d-inline-block" style="width: 180px;" placeholder="Nota de reversión (opcional)">
-                      <button class="btn btn-warning btn-sm ms-1">Revertir</button>
-                    </form>
-                  <?php endif; ?>
-                </td>
-              </tr>
-              <tr class="collapse" id="det<?= $h['id'] ?>">
-                <td colspan="8">
-                  <?php
-                    $did = (int)$h['id'];
-                    $qdet = $conn->prepare("
-                      SELECT d.id_inventario, d.id_producto, d.imei1, p.marca, p.modelo, p.capacidad, p.color, p.codigo_producto
-                      FROM inventario_retiros_detalle d
-                      LEFT JOIN productos p ON p.id = d.id_producto
-                      WHERE d.retiro_id = ?
-                      ORDER BY d.id ASC
-                    ");
-                    $qdet->bind_param("i", $did);
-                    $qdet->execute();
-                    $detallito = $qdet->get_result()->fetch_all(MYSQLI_ASSOC);
-                    $qdet->close();
-                  ?>
-                  <div class="table-responsive">
-                    <table class="table table-sm mb-0">
-                      <thead>
-                        <tr>
-                          <th>ID Inv.</th>
-                          <th>Marca</th>
-                          <th>Modelo</th>
-                          <th>Cap.</th>
-                          <th>Color</th>
-                          <th>IMEI</th>
-                          <th>Código</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        <?php foreach ($detallito as $d): ?>
-                          <tr>
-                            <td><?= (int)$d['id_inventario'] ?></td>
-                            <td><?= htmlspecialchars($d['marca']) ?></td>
-                            <td><?= htmlspecialchars($d['modelo']) ?></td>
-                            <td><?= htmlspecialchars($d['capacidad']) ?></td>
-                            <td><?= htmlspecialchars($d['color']) ?></td>
-                            <td><?= htmlspecialchars($d['imei1']) ?></td>
-                            <td><?= htmlspecialchars($d['codigo_producto']) ?></td>
-                          </tr>
-                        <?php endforeach; ?>
-                      </tbody>
-                    </table>
-                  </div>
-                </td>
-              </tr>
-            <?php endforeach; endif; ?>
-          </tbody>
-        </table>
-      </div>
+              <?php if ((int)$h['revertido'] === 0): ?>
+                <form action="revertir_retiro.php" method="POST" onsubmit="return confirmarReversion();" class="d-flex gap-1">
+                  <input type="hidden" name="id_retiro" value="<?= (int)$h['id'] ?>">
+                  <input type="hidden" name="id_sucursal" value="<?= $idEulalia ?>">
+                  <input type="text" name="nota_reversion" class="form-control form-control-sm" style="width: 180px;" placeholder="Nota de reversión (opcional)">
+                  <button class="btn btn-warning btn-sm">Revertir</button>
+                </form>
+              <?php endif; ?>
+            </td>
+          </tr>
+        <?php endforeach; endif; ?>
+        </tbody>
+      </table>
     </div>
   </div>
+
+  <!-- ===== Aquí fuera de la tabla imprimimos TODOS los templates de detalle ===== -->
+  <?php foreach ($detailTemplates as $tpl) { echo $tpl; } ?>
+
 </div>
 
 <!-- ===== Modal de resumen ===== -->
@@ -365,7 +418,7 @@ $stmt->close();
       </div>
       <div class="modal-body">
         <div class="mb-3">
-          <strong>Sucursal:</strong> <?= htmlspecialchars($nombreEulalia) ?><br>
+          <strong>Sucursal:</strong> <?= h($nombreEulalia) ?><br>
           <strong>Motivo:</strong> <span id="resMotivo"></span><br>
           <strong>Destino:</strong> <span id="resDestino"></span><br>
           <strong>Nota:</strong> <span id="resNota"></span>
@@ -386,9 +439,7 @@ $stmt->close();
                 <th>Código</th>
               </tr>
             </thead>
-            <tbody id="resumenBody">
-              <!-- Se llena por JS -->
-            </tbody>
+            <tbody id="resumenBody"></tbody>
           </table>
         </div>
         <small class="text-muted">Si necesitas quitar alguno, cierra este diálogo y desmarca el equipo en la tabla.</small>
@@ -401,68 +452,135 @@ $stmt->close();
   </div>
 </div>
 
-<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script> -->
+<!-- Modal: Detalle de retiro -->
+<div class="modal fade" id="detalleModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Detalle del retiro <span id="detFolio" class="text-muted"></span></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+      </div>
+      <div class="modal-body" id="detalleBody">
+        <!-- Se llena por JS desde #tpl-det-{id} -->
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cerrar</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- JS -->
+<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
+
+<!-- DataTables core + addons -->
+<script src="https://cdn.datatables.net/1.13.8/js/jquery.dataTables.min.js"></script>
+<script src="https://cdn.datatables.net/1.13.8/js/dataTables.bootstrap5.min.js"></script>
+<script src="https://cdn.datatables.net/fixedheader/3.4.0/js/dataTables.fixedHeader.min.js"></script>
+<script src="https://cdn.datatables.net/responsive/2.5.1/js/dataTables.responsive.min.js"></script>
+<script src="https://cdn.datatables.net/responsive/2.5.1/js/responsive.bootstrap5.min.js"></script>
+<script src="https://cdn.datatables.net/buttons/2.4.2/js/dataTables.buttons.min.js"></script>
+<script src="https://cdn.datatables.net/buttons/2.4.2/js/buttons.bootstrap5.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdn.datatables.net/buttons/2.4.2/js/buttons.html5.min.js"></script>
+
 <script>
-// Toggle "seleccionar todo"
-document.getElementById('chkAll')?.addEventListener('change', e => {
-  document.querySelectorAll("input[name='items[]']").forEach(c => c.checked = e.target.checked);
-});
+  // Copiar IMEI
+  function copyText(t){
+    navigator.clipboard.writeText(t).then(()=>{
+      const toast = document.createElement('div');
+      toast.className = 'position-fixed top-0 start-50 translate-middle-x p-2';
+      toast.style.zIndex = 1080;
+      toast.innerHTML = '<span class="badge text-bg-success rounded-pill">IMEI copiado</span>';
+      document.body.appendChild(toast);
+      setTimeout(()=> toast.remove(), 1200);
+    });
+  }
 
-// Búsqueda con Enter sin disparar el form de retiro
-document.getElementById('qsearch')?.addEventListener('keydown', e => {
-  if (e.key === 'Enter') { e.preventDefault(); document.getElementById('searchForm').submit(); }
-});
-
-// Mostrar modal de resumen
-const btnResumen = document.getElementById('btnResumen');
-const formRetiro = document.getElementById('formRetiro');
-const confirmModalEl = document.getElementById('confirmModal');
-const confirmModal = new bootstrap.Modal(confirmModalEl);
-
-btnResumen?.addEventListener('click', () => {
-  const seleccionados = Array.from(document.querySelectorAll("input[name='items[]']:checked"));
-  if (seleccionados.length === 0) { alert("Selecciona al menos un equipo para retirar."); return; }
-
-  // Llenar encabezado de resumen (motivo/destino/nota)
-  document.getElementById('resMotivo').textContent  = document.getElementById('motivo').value || '—';
-  document.getElementById('resDestino').textContent = document.getElementById('destino').value || '—';
-  document.getElementById('resNota').textContent    = document.getElementById('nota').value || '—';
-  document.getElementById('resCantidad').textContent = seleccionados.length;
-
-  // Construir cuerpo de tabla
-  const tbody = document.getElementById('resumenBody');
-  tbody.innerHTML = '';
-  seleccionados.forEach((chk, idx) => {
-    const tr = chk.closest('tr');
-    const celdas = tr.querySelectorAll('td');
-    // celdas: [0]=chk, [1]=marca, [2]=modelo, [3]=cap, [4]=color, [5]=imei, [6]=codigo
-    const row = document.createElement('tr');
-    row.innerHTML = `
-      <td>${idx+1}</td>
-      <td>${celdas[1]?.textContent ?? ''}</td>
-      <td>${celdas[2]?.textContent ?? ''}</td>
-      <td>${celdas[3]?.textContent ?? ''}</td>
-      <td>${celdas[4]?.textContent ?? ''}</td>
-      <td>${celdas[5]?.textContent ?? ''}</td>
-      <td>${celdas[6]?.textContent ?? ''}</td>
-    `;
-    tbody.appendChild(row);
+  // Toggle seleccionar todo
+  document.getElementById('chkAll')?.addEventListener('change', e => {
+    document.querySelectorAll("input[name='items[]']").forEach(c => c.checked = e.target.checked);
   });
 
-  // Mostrar modal
-  confirmModal.show();
-});
+  // Búsqueda con Enter sin disparar el form de retiro
+  document.getElementById('qsearch')?.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); document.getElementById('searchForm').submit(); }
+  });
 
-// Confirmar y enviar
-document.getElementById('btnConfirmarEnviar')?.addEventListener('click', () => {
-  // Verificación final por seguridad
-  const any = document.querySelector("input[name='items[]']:checked");
-  if (!any) { alert("No hay equipos seleccionados."); return; }
-  formRetiro.submit();
-});
+  // Modal resumen (retiro)
+  const formRetiro = document.getElementById('formRetiro');
+  const confirmModal = new bootstrap.Modal(document.getElementById('confirmModal'));
+  document.getElementById('btnResumen')?.addEventListener('click', () => {
+    const seleccionados = Array.from(document.querySelectorAll("input[name='items[]']:checked"));
+    if (seleccionados.length === 0) { alert("Selecciona al menos un equipo para retirar."); return; }
 
-// Confirmación para revertir
-function confirmarReversion(){
-  return confirm("¿Revertir el retiro? Se restaurará el estatus a 'Disponible' para todos los equipos del folio.");
-}
+    document.getElementById('resMotivo').textContent  = document.getElementById('motivo').value || '—';
+    document.getElementById('resDestino').textContent = document.getElementById('destino').value || '—';
+    document.getElementById('resNota').textContent    = document.getElementById('nota').value || '—';
+    document.getElementById('resCantidad').textContent = seleccionados.length;
+
+    const tbody = document.getElementById('resumenBody'); tbody.innerHTML = '';
+    seleccionados.forEach((chk, idx) => {
+      const tr = chk.closest('tr'); const c = tr.querySelectorAll('td');
+      const row = document.createElement('tr');
+      row.innerHTML = `
+        <td>${idx+1}</td>
+        <td>${c[1]?.textContent ?? ''}</td>
+        <td>${c[2]?.textContent ?? ''}</td>
+        <td>${c[3]?.textContent ?? ''}</td>
+        <td>${c[4]?.textContent ?? ''}</td>
+        <td>${c[5]?.textContent ?? ''}</td>
+        <td>${c[6]?.textContent ?? ''}</td>
+      `;
+      tbody.appendChild(row);
+    });
+
+    confirmModal.show();
+  });
+  document.getElementById('btnConfirmarEnviar')?.addEventListener('click', () => {
+    const any = document.querySelector("input[name='items[]']:checked");
+    if (!any) { alert("No hay equipos seleccionados."); return; }
+    formRetiro.submit();
+  });
+
+  // Confirmación de reversión
+  function confirmarReversion(){ return confirm("¿Revertir el retiro? Se restaurará el estatus a 'Disponible' para todos los equipos del folio."); }
+
+  // DataTable Historial
+  $(function(){
+    $('#tablaHistorial').DataTable({
+      pageLength: 25,
+      order: [[ 1, 'desc' ]],
+      fixedHeader: true,
+      responsive: true,
+      language: { url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/es-ES.json' },
+      dom: "<'row align-items-center mb-2'<'col-sm-12 col-md-6'B><'col-sm-12 col-md-6'f>>" +
+           "tr" +
+           "<'row mt-2'<'col-sm-12 col-md-5'i><'col-sm-12 col-md-7'p>>",
+      buttons: [
+        { extend: 'csvHtml5',   className: 'btn btn-light btn-sm rounded-pill border', text: '<i class="bi bi-filetype-csv me-1"></i>CSV' },
+        { extend: 'excelHtml5', className: 'btn btn-light btn-sm rounded-pill border', text: '<i class="bi bi-file-earmark-excel me-1"></i>Excel' },
+        { extend: 'colvis',     className: 'btn btn-light btn-sm rounded-pill border', text: '<i class="bi bi-view-list me-1"></i>Columnas' }
+      ],
+      columnDefs: [
+        { targets: [0,1,5,6,7], className: 'text-nowrap' }
+      ]
+    });
+  });
+
+  // Modal Detalle (historial)
+  const detalleModal = new bootstrap.Modal(document.getElementById('detalleModal'));
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.btn-detalle'); if (!btn) return;
+    const id = btn.getAttribute('data-id'); const folio = btn.getAttribute('data-folio') || '';
+    const tpl = document.getElementById('tpl-det-' + id);
+    if (tpl) {
+      document.getElementById('detFolio').textContent = folio ? `(${folio})` : '';
+      document.getElementById('detalleBody').innerHTML = tpl.innerHTML;
+      detalleModal.show();
+    }
+  });
 </script>
+</body>
+</html>
