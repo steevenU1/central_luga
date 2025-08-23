@@ -1,5 +1,5 @@
 <?php
-// navbar.php (LUGA) — versión compacta + "Gestionar usuarios" habilitado para Gerente en Operación
+// navbar.php (LUGA) — con cambio de sucursal para usuarios con múltiples sucursales permitidas
 
 if (session_status() === PHP_SESSION_NONE) {
   session_start();
@@ -14,65 +14,46 @@ $idSucursal    = (int)($_SESSION['id_sucursal'] ?? 0);
 
 // Helpers
 if (!function_exists('str_starts_with')) {
-  function str_starts_with($h, $n)
-  {
-    return (string)$n !== '' && strncmp($h, $n, strlen($n)) === 0;
-  }
+  function str_starts_with($h, $n){ return (string)$n !== '' && strncmp($h, $n, strlen($n)) === 0; }
 }
-function e($s)
-{
-  return htmlspecialchars($s ?? '', ENT_QUOTES, 'UTF-8');
-}
-function initials($name)
-{
-  $name = trim((string)$name);
-  if ($name === '') return 'U';
+function e($s){ return htmlspecialchars($s ?? '', ENT_QUOTES, 'UTF-8'); }
+function initials($name){
+  $name = trim((string)$name); if ($name === '') return 'U';
   $parts = preg_split('/\s+/', $name);
   $first = mb_substr($parts[0] ?? '', 0, 1, 'UTF-8');
   $last  = mb_substr($parts[count($parts) - 1] ?? '', 0, 1, 'UTF-8');
   $ini = mb_strtoupper($first . $last, 'UTF-8');
   return $ini ?: 'U';
 }
-function first_name($name)
-{
-  $name = trim((string)$name);
-  if ($name === '') return 'Usuario';
+function first_name($name){
+  $name = trim((string)$name); if ($name === '') return 'Usuario';
   $parts = preg_split('/\s+/', $name);
   return $parts[0] ?? $name;
 }
 
 /** Convierte usuarios_expediente.foto a una URL servible */
-function resolveAvatarUrl(?string $fotoBD): ?string
-{
-  $f = trim((string)$fotoBD);
-  if ($f === '') return null;
+function resolveAvatarUrl(?string $fotoBD): ?string{
+  $f = trim((string)$fotoBD); if ($f === '') return null;
   if (preg_match('#^(https?://|data:image/)#i', $f)) return $f;
   $f = str_replace('\\', '/', $f);
-
   $docroot = isset($_SERVER['DOCUMENT_ROOT']) ? rtrim(str_replace('\\', '/', $_SERVER['DOCUMENT_ROOT']), '/') : '';
   $appDir  = rtrim(str_replace('\\', '/', __DIR__), '/');
   $baseUri = '';
-  if ($docroot && str_starts_with($appDir, $docroot)) {
-    $baseUri = substr($appDir, strlen($docroot));
-  }
-
+  if ($docroot && str_starts_with($appDir, $docroot)) { $baseUri = substr($appDir, strlen($docroot)); }
   if (preg_match('#^[A-Za-z]:/|^/#', $f)) {
     if ($docroot && str_starts_with($f, $docroot . '/')) return substr($f, strlen($docroot));
     $base = basename($f);
-    foreach (['uploads/expedientes', 'expedientes', 'uploads', 'uploads/usuarios', 'usuarios', 'uploads/perfiles', 'perfiles'] as $d) {
+    foreach (['uploads/expedientes','expedientes','uploads','uploads/usuarios','usuarios','uploads/perfiles','perfiles'] as $d) {
       $abs = $appDir . '/' . $d . '/' . $base;
       if (is_file($abs)) return $baseUri . '/' . $d . '/' . $base;
     }
     return null;
   }
-  if (str_starts_with($f, '/')) {
-    if ($docroot && is_file($docroot . $f)) return $f;
-    return $f;
-  }
+  if (str_starts_with($f, '/')) { if ($docroot && is_file($docroot . $f)) return $f; return $f; }
   if (is_file($appDir . '/' . $f)) return $baseUri . '/' . ltrim($f, '/');
   if ($docroot && is_file($docroot . '/' . $f)) return '/' . ltrim($f, '/');
   $base = basename($f);
-  foreach (['uploads/expedientes', 'expedientes', 'uploads', 'uploads/usuarios', 'usuarios', 'uploads/perfiles', 'perfiles'] as $d) {
+  foreach (['uploads/expedientes','expedientes','uploads','uploads/usuarios','usuarios','uploads/perfiles','perfiles'] as $d) {
     $abs = $appDir . '/' . $d . '/' . $base;
     if (is_file($abs)) return $baseUri . '/' . $d . '/' . $base;
   }
@@ -86,13 +67,11 @@ if ($idUsuario > 0) {
   $st->bind_param("i", $idUsuario);
   $st->execute();
   $st->bind_result($fotoBD);
-  if ($st->fetch()) {
-    $avatarUrl = resolveAvatarUrl($fotoBD);
-  }
+  if ($st->fetch()) { $avatarUrl = resolveAvatarUrl($fotoBD); }
   $st->close();
 }
 
-// Sucursal (solo en desplegable)
+// Sucursal actual (solo para mostrar)
 $sucursalNombre = '';
 if ($idSucursal > 0) {
   $stmt = $conn->prepare("SELECT nombre FROM sucursales WHERE id=?");
@@ -102,6 +81,26 @@ if ($idSucursal > 0) {
   $stmt->fetch();
   $stmt->close();
 }
+
+// Sucursales permitidas para el usuario (para cambiar)
+$misSucursales = [];
+if ($idUsuario > 0) {
+  $stmt = $conn->prepare("
+    SELECT s.id, s.nombre
+    FROM usuario_sucursales us
+    JOIN sucursales s ON s.id = us.sucursal_id
+    WHERE us.usuario_id=?
+    ORDER BY s.nombre
+  ");
+  $stmt->bind_param('i', $idUsuario);
+  $stmt->execute();
+  $res = $stmt->get_result();
+  while ($row = $res->fetch_assoc()) { $misSucursales[] = $row; }
+  $stmt->close();
+}
+
+// CSRF
+if (empty($_SESSION['csrf'])) { $_SESSION['csrf'] = bin2hex(random_bytes(16)); }
 
 // Badge traspasos
 $badgeTraspasos = 0;
@@ -114,134 +113,65 @@ if ($idSucursal > 0) {
   $stmt->close();
 }
 
-$esAdmin       = in_array($rolUsuario, ['Admin', 'Super']);
+$esAdmin       = in_array($rolUsuario, ['Admin','Super'], true);
 $primerNombre  = first_name($nombreUsuario);
 
 // ============ ACTIVO POR URL ============
 $current = basename(parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH));
 
-$grpDashboard  = ['productividad_dia.php', 'dashboard_unificado.php', 'dashboard_mensual.php'];
-$grpVentas     = ['nueva_venta.php', 'venta_sim_prepago.php', 'venta_sim_pospago.php', 'historial_ventas.php', 'historial_ventas_sims.php'];
-$grpInventario = ['panel.php', 'inventario_subdistribuidor.php', 'inventario_global.php', 'inventario_resumen.php', 'inventario_eulalia.php', 'inventario_retiros.php', 'inventario_historico.php'];
-$grpCompras    = ['compras_nueva.php', 'compras_resumen.php', 'modelos.php', 'proveedores.php', 'compras_ingreso.php'];
-$grpTraspasos  = ['generar_traspaso.php', 'generar_traspaso_sims.php', 'traspasos_sims_pendientes.php', 'traspasos_sims_salientes.php', 'traspasos_pendientes.php', 'traspasos_salientes.php', 'traspaso_nuevo.php'];
-$grpEfectivo   = ['cobros.php', 'cortes_caja.php', 'generar_corte.php', 'depositos_sucursal.php', 'depositos.php', 'recoleccion_comisiones.php'];
-$grpOperacion  = [
-  'lista_precios.php',
-  'prospectos.php',
-  'insumos_pedido.php',
-  'insumos_admin.php',
-  'mantenimiento_solicitar.php',
-  'mantenimiento_admin.php',
-  'gestionar_usuarios.php'
-];
-$grpRH         = ['reporte_nomina.php', 'reporte_nomina_gerentes_zona.php', 'admin_expedientes.php'];
-$grpOperativos = ['insumos_catalogo.php', 'actualizar_precios_modelo.php', 'cuotas_mensuales.php', 'cuotas_mensuales_ejecutivos.php', 'cuotas_sucursales.php', 'cargar_cuotas_semanales.php', 'esquemas_comisiones_ejecutivos.php', 'esquemas_comisiones_gerentes.php', 'esquemas_comisiones_pospago.php', 'comisiones_especiales_equipos.php', 'carga_masiva_productos.php', 'carga_masiva_sims.php', 'alta_usuario.php', 'alta_sucursal.php'];
+$grpDashboard  = ['productividad_dia.php','dashboard_unificado.php','dashboard_mensual.php'];
+$grpVentas     = ['nueva_venta.php','venta_sim_prepago.php','venta_sim_pospago.php','historial_ventas.php','historial_ventas_sims.php'];
+$grpInventario = ['panel.php','inventario_subdistribuidor.php','inventario_global.php','inventario_resumen.php','inventario_eulalia.php','inventario_retiros.php','inventario_historico.php'];
+$grpCompras    = ['compras_nueva.php','compras_resumen.php','modelos.php','proveedores.php','compras_ingreso.php'];
+$grpTraspasos  = ['generar_traspaso.php','generar_traspaso_sims.php','traspasos_sims_pendientes.php','traspasos_sims_salientes.php','traspasos_pendientes.php','traspasos_salientes.php','traspaso_nuevo.php'];
+$grpEfectivo   = ['cobros.php','cortes_caja.php','generar_corte.php','depositos_sucursal.php','depositos.php','recoleccion_comisiones.php'];
+$grpOperacion  = ['lista_precios.php','prospectos.php','insumos_pedido.php','insumos_admin.php','mantenimiento_solicitar.php','mantenimiento_admin.php','gestionar_usuarios.php'];
+$grpRH         = ['reporte_nomina.php','reporte_nomina_gerentes_zona.php','admin_expedientes.php'];
+$grpOperativos = ['insumos_catalogo.php','actualizar_precios_modelo.php','cuotas_mensuales.php','cuotas_mensuales_ejecutivos.php','cuotas_sucursales.php','cargar_cuotas_semanales.php','esquemas_comisiones_ejecutivos.php','esquemas_comisiones_gerentes.php','esquemas_comisiones_pospago.php','comisiones_especiales_equipos.php','carga_masiva_productos.php','carga_masiva_sims.php','alta_usuario.php','alta_sucursal.php'];
 $grpCeleb      = ['cumples_aniversarios.php'];
 
-function parent_active(array $group, string $current): bool
-{
-  return in_array($current, $group, true);
-}
-function item_active(string $file, string $current): string
-{
-  return $current === $file ? 'active' : '';
-}
+function parent_active(array $group, string $current): bool { return in_array($current, $group, true); }
+function item_active(string $file, string $current): string { return $current === $file ? 'active' : ''; }
 ?>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 
 <style>
-  /* ========== Escalas compactas (fáciles de ajustar) ========== */
-  :root {
-    --brand-font: .88rem;
-    --nav-font: .84rem;
-    --drop-font: .86rem;
-    --icon-em: .90em;
-    --pad-y: .32rem;
-    --pad-x: .48rem;
+  :root{ --brand-font:.88rem; --nav-font:.84rem; --drop-font:.86rem; --icon-em:.90em; --pad-y:.32rem; --pad-x:.48rem; }
+  .navbar-luga{
+    background: radial-gradient(1200px 600px at 10% -20%, rgba(255,255,255,.18), rgba(255,255,255,0)),
+                linear-gradient(90deg,#0b0f14,#0f141a 60%,#121922);
+    border-bottom:1px solid rgba(255,255,255,.08); backdrop-filter: blur(6px);
   }
-
-  .navbar-luga {
-    background: radial-gradient(1200px 600px at 10% -20%, rgba(255, 255, 255, .18), rgba(255, 255, 255, 0)),
-      linear-gradient(90deg, #0b0f14, #0f141a 60%, #121922);
-    border-bottom: 1px solid rgba(255, 255, 255, .08);
-    backdrop-filter: blur(6px);
+  .brand-title{ font-weight:900; letter-spacing:.1px; line-height:1; font-size:var(--brand-font);
+    background:linear-gradient(92deg,#eaf2ff 0%,#cfe0ff 45%,#9ec5ff 100%); -webkit-background-clip:text; background-clip:text; color:transparent;
+    text-shadow:0 1px 0 rgba(0,0,0,.25); white-space:nowrap; }
+  .navbar-brand img{ width:26px; height:26px; }
+  .navbar-luga .nav-link{ padding:var(--pad-y) var(--pad-x); font-size:var(--nav-font); border-radius:.6rem; color:#e7eef7 !important; line-height:1.1; }
+  .navbar-luga .nav-link i{ font-size:var(--icon-em); margin-right:.35rem; }
+  .navbar-luga .nav-link:hover{ background:rgba(255,255,255,.06); }
+  .navbar-luga .dropdown-menu{
+    --bs-dropdown-bg:#0f141a; --bs-dropdown-color:#e7eef7; --bs-dropdown-link-color:#e7eef7;
+    --bs-dropdown-link-hover-color:#fff; --bs-dropdown-link-hover-bg:rgba(255,255,255,.06);
+    --bs-dropdown-link-active-bg:rgba(255,255,255,.12); --bs-dropdown-border-color:rgba(255,255,255,.08);
+    --bs-dropdown-header-color:#aab8c7; --bs-dropdown-divider-bg:rgba(255,255,255,.12);
+    border:1px solid rgba(255,255,255,.08); border-radius:14px; box-shadow:0 16px 40px rgba(0,0,0,.35);
+    overflow:hidden; font-size:var(--drop-font);
   }
-
-  .brand-title {
-    font-weight: 900;
-    letter-spacing: .1px;
-    line-height: 1;
-    font-size: var(--brand-font);
-    background: linear-gradient(92deg, #eaf2ff 0%, #cfe0ff 45%, #9ec5ff 100%);
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
-    text-shadow: 0 1px 0 rgba(0, 0, 0, .25);
-    white-space: nowrap;
-  }
-
-  .navbar-brand img { width: 26px; height: 26px; }
-
-  .navbar-luga .nav-link {
-    padding: var(--pad-y) var(--pad-x);
-    font-size: var(--nav-font);
-    border-radius: .6rem;
-    color: #e7eef7 !important;
-    line-height: 1.1;
-  }
-
-  .navbar-luga .nav-link i { font-size: var(--icon-em); margin-right: .35rem; }
-  .navbar-luga .nav-link:hover { background: rgba(255, 255, 255, .06); }
-
-  .navbar-luga .dropdown-menu {
-    --bs-dropdown-bg: #0f141a;
-    --bs-dropdown-color: #e7eef7;
-    --bs-dropdown-link-color: #e7eef7;
-    --bs-dropdown-link-hover-color: #ffffff;
-    --bs-dropdown-link-hover-bg: rgba(255, 255, 255, .06);
-    --bs-dropdown-link-active-bg: rgba(255, 255, 255, .12);
-    --bs-dropdown-border-color: rgba(255, 255, 255, .08);
-    --bs-dropdown-header-color: #aab8c7;
-    --bs-dropdown-divider-bg: rgba(255, 255, 255, .12);
-    border: 1px solid rgba(255, 255, 255, .08);
-    border-radius: 14px;
-    box-shadow: 0 16px 40px rgba(0, 0, 0, .35);
-    overflow: hidden;
-    font-size: var(--drop-font);
-  }
-
-  .navbar-luga .dropdown-item { padding: .48rem .76rem; line-height: 1.15; }
-
-  .navbar-luga .nav-link.active-parent {
-    background: rgba(255, 255, 255, .10);
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .12);
-  }
-  .navbar-luga .dropdown-item.active { background: rgba(255, 255, 255, .18); font-weight: 600; }
-
-  .nav-avatar, .nav-initials {
-    width: 32px; height: 32px; border-radius: 50%;
-    display: inline-flex; align-items: center; justify-content: center;
-    font-weight: 700; font-size: .92rem; object-fit: cover;
-  }
-  .nav-initials { background: #25303a; color: #e8f0f8; }
-
-  .dropdown-avatar, .dropdown-initials {
-    width: 54px; height: 54px; border-radius: 16px; object-fit: cover;
-  }
-  .dropdown-initials {
-    background: #25303a; color: #e8f0f8; display: inline-flex; align-items: center; justify-content: center; font-weight: 800;
-  }
-  .user-chip { color: #e7eef7; font-weight: 600; }
-  .user-chip small { color: #a7b4c2; font-weight: 500; }
-
-  .badge-soft-danger { background: rgba(220,53,69,.18); color: #ffadb7; border: 1px solid rgba(220,53,69,.35); }
-
-  @media (min-width:1200px) and (max-width:1440px) {
-    :root { --brand-font:.84rem; --nav-font:.82rem; --drop-font:.84rem; --pad-y:.30rem; --pad-x:.44rem; --icon-em:.88em; }
-    .navbar-brand img { width: 24px; height: 24px; }
+  .navbar-luga .dropdown-item{ padding:.48rem .76rem; line-height:1.15; }
+  .navbar-luga .nav-link.active-parent{ background:rgba(255,255,255,.10); box-shadow:inset 0 0 0 1px rgba(255,255,255,.12); }
+  .navbar-luga .dropdown-item.active{ background:rgba(255,255,255,.18); font-weight:600; }
+  .nav-avatar,.nav-initials{ width:32px; height:32px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; font-weight:700; font-size:.92rem; object-fit:cover; }
+  .nav-initials{ background:#25303a; color:#e8f0f8; }
+  .dropdown-avatar,.dropdown-initials{ width:54px; height:54px; border-radius:16px; object-fit:cover; }
+  .dropdown-initials{ background:#25303a; color:#e8f0f8; display:inline-flex; align-items:center; justify-content:center; font-weight:800; }
+  .user-chip{ color:#e7eef7; font-weight:600; }
+  .user-chip small{ color:#a7b4c2; font-weight:500; }
+  .badge-soft-danger{ background:rgba(220,53,69,.18); color:#ffadb7; border:1px solid rgba(220,53,69,.35); }
+  @media (min-width:1200px) and (max-width:1440px){
+    :root{ --brand-font:.84rem; --nav-font:.82rem; --drop-font:.84rem; --pad-y:.30rem; --pad-x:.44rem; --icon-em:.88em; }
+    .navbar-brand img{ width:24px; height:24px; }
   }
 </style>
 
@@ -306,16 +236,16 @@ function item_active(string $file, string $current): string
               <li><a class="dropdown-item <?= item_active('inventario_global.php', $current) ?>" href="inventario_global.php">Inventario global</a></li>
               <li><a class="dropdown-item <?= item_active('inventario_historico.php', $current) ?>" href="inventario_historico.php">Inventario histórico</a></li>
             <?php else: ?>
-              <?php if (in_array($rolUsuario, ['Ejecutivo', 'Gerente'])): ?>
+              <?php if (in_array($rolUsuario, ['Ejecutivo','Gerente'])): ?>
                 <li><a class="dropdown-item <?= item_active('panel.php', $current) ?>" href="panel.php">Inventario sucursal</a></li>
               <?php endif; ?>
-              <?php if (in_array($rolUsuario, ['Admin', 'Subdistribuidor', 'Super'])): ?>
+              <?php if (in_array($rolUsuario, ['Admin','Subdistribuidor','Super'])): ?>
                 <li><a class="dropdown-item <?= item_active('inventario_subdistribuidor.php', $current) ?>" href="inventario_subdistribuidor.php">Inventario subdistribuidor</a></li>
               <?php endif; ?>
-              <?php if (in_array($rolUsuario, ['Admin', 'GerenteZona', 'Super'])): ?>
+              <?php if (in_array($rolUsuario, ['Admin','GerenteZona','Super'])): ?>
                 <li><a class="dropdown-item <?= item_active('inventario_global.php', $current) ?>" href="inventario_global.php">Inventario global</a></li>
               <?php endif; ?>
-              <?php if (in_array($rolUsuario, ['Admin', 'Super'])): ?>
+              <?php if (in_array($rolUsuario, ['Admin','Super'])): ?>
                 <li><hr class="dropdown-divider"></li>
                 <li class="dropdown-header">Administrador</li>
                 <li><a class="dropdown-item <?= item_active('inventario_resumen.php', $current) ?>" href="inventario_resumen.php">Resumen Global</a></li>
@@ -327,7 +257,7 @@ function item_active(string $file, string $current): string
         </li>
 
         <!-- COMPRAS -->
-        <?php if (in_array($rolUsuario, ['Admin', 'Super', 'Logistica'])): ?>
+        <?php if (in_array($rolUsuario, ['Admin','Super','Logistica'])): ?>
           <?php $pActive = parent_active($grpCompras, $current); ?>
           <li class="nav-item dropdown">
             <a class="nav-link dropdown-toggle<?= $pActive ? ' active-parent' : '' ?>" href="#" role="button" data-bs-toggle="dropdown">
@@ -346,7 +276,7 @@ function item_active(string $file, string $current): string
         <?php endif; ?>
 
         <!-- TRASPASOS -->
-        <?php if (in_array($rolUsuario, ['Gerente', 'Admin', 'Super'])): ?>
+        <?php if (in_array($rolUsuario, ['Gerente','Admin','Super'])): ?>
           <?php $pActive = parent_active($grpTraspasos, $current); ?>
           <li class="nav-item dropdown">
             <a class="nav-link dropdown-toggle<?= $pActive ? ' active-parent' : '' ?>" href="#" role="button" data-bs-toggle="dropdown">
@@ -356,7 +286,7 @@ function item_active(string $file, string $current): string
               <?php endif; ?>
             </a>
             <ul class="dropdown-menu">
-              <?php if (in_array($rolUsuario, ['Admin', 'Super'])): ?>
+              <?php if (in_array($rolUsuario, ['Admin','Super'])): ?>
                 <li><a class="dropdown-item <?= item_active('generar_traspaso.php', $current) ?>" href="generar_traspaso.php">Generar traspaso desde Eulalia</a></li>
               <?php endif; ?>
               <li><a class="dropdown-item <?= item_active('generar_traspaso_sims.php', $current) ?>" href="generar_traspaso_sims.php">Generar traspaso SIMs</a></li>
@@ -409,7 +339,7 @@ function item_active(string $file, string $current): string
           <ul class="dropdown-menu">
             <li><a class="dropdown-item <?= item_active('lista_precios.php', $current) ?>" href="lista_precios.php">Lista de precios</a></li>
 
-            <?php if (in_array($rolUsuario, ['Ejecutivo', 'Gerente'])): ?>
+            <?php if (in_array($rolUsuario, ['Ejecutivo','Gerente'])): ?>
               <li><a class="dropdown-item <?= item_active('prospectos.php', $current) ?>" href="prospectos.php">Prospectos</a></li>
             <?php endif; ?>
 
@@ -417,18 +347,17 @@ function item_active(string $file, string $current): string
               <li><a class="dropdown-item <?= item_active('insumos_pedido.php', $current) ?>" href="insumos_pedido.php">Pedido de insumos</a></li>
             <?php endif; ?>
 
-            <!-- 🔧 Cambio: Gestionar usuarios visible para Admin, Super y Gerente -->
-            <?php if (in_array($rolUsuario, ['Admin', 'Super', 'Gerente'])): ?>
+            <?php if (in_array($rolUsuario, ['Admin','Super','Gerente'])): ?>
               <?php if ($esAdmin): ?>
                 <li><a class="dropdown-item <?= item_active('insumos_admin.php', $current) ?>" href="insumos_admin.php">Administrar insumos</a></li>
               <?php endif; ?>
               <li><a class="dropdown-item <?= item_active('gestionar_usuarios.php', $current) ?>" href="gestionar_usuarios.php">Gestionar usuarios</a></li>
             <?php endif; ?>
 
-            <?php if (in_array($rolUsuario, ['Gerente', 'GerenteZona', 'GerenteSucursal', 'Admin', 'Super'])): ?>
+            <?php if (in_array($rolUsuario, ['Gerente','GerenteZona','GerenteSucursal','Admin','Super'])): ?>
               <li><hr class="dropdown-divider"></li>
               <li class="dropdown-header">Mantenimiento</li>
-              <?php if (in_array($rolUsuario, ['Gerente', 'GerenteZona', 'GerenteSucursal'])): ?>
+              <?php if (in_array($rolUsuario, ['Gerente','GerenteZona','GerenteSucursal'])): ?>
                 <li><a class="dropdown-item <?= item_active('mantenimiento_solicitar.php', $current) ?>" href="mantenimiento_solicitar.php">Solicitar mantenimiento</a></li>
               <?php endif; ?>
               <?php if ($esAdmin): ?>
@@ -481,7 +410,7 @@ function item_active(string $file, string $current): string
           </li>
         <?php endif; ?>
 
-        <!-- CELEBRACIONES (oculto para Logística) -->
+        <!-- CELEBRACIONES -->
         <?php if ($rolUsuario !== 'Logistica'): ?>
           <?php $pActive = parent_active(array_merge($grpCeleb, ['cuadro_honor.php']), $current); ?>
           <li class="nav-item dropdown">
@@ -489,30 +418,22 @@ function item_active(string $file, string $current): string
               <i class="bi bi-balloon-heart"></i>Celebraciones
             </a>
             <ul class="dropdown-menu">
-              <li>
-                <a class="dropdown-item <?= item_active('cumples_aniversarios.php', $current) ?>" href="cumples_aniversarios.php">
-                  🎉 Cumpleaños & Aniversarios
-                </a>
-              </li>
-              <li>
-                <a class="dropdown-item <?= item_active('cuadro_honor.php', $current) ?>" href="cuadro_honor.php">
-                  🏅 Cuadro de Honor
-                </a>
-              </li>
+              <li><a class="dropdown-item <?= item_active('cumples_aniversarios.php', $current) ?>" href="cumples_aniversarios.php">🎉 Cumpleaños & Aniversarios</a></li>
+              <li><a class="dropdown-item <?= item_active('cuadro_honor.php', $current) ?>" href="cuadro_honor.php">🏅 Cuadro de Honor</a></li>
             </ul>
           </li>
         <?php endif; ?>
 
       </ul>
 
-      <!-- DERECHA: Perfil -->
+      <!-- DERECHA: Perfil + Cambio de Sucursal -->
       <ul class="navbar-nav ms-auto">
         <li class="nav-item dropdown">
           <a class="nav-link dropdown-toggle d-flex align-items-center" href="#" role="button" data-bs-toggle="dropdown">
             <span class="me-2 position-relative">
               <?php if ($avatarUrl): ?>
                 <img src="<?= e($avatarUrl) ?>" alt="avatar" class="nav-avatar"
-                  onerror="this.style.display='none'; this.nextElementSibling.style.display='inline-flex';">
+                     onerror="this.style.display='none'; this.nextElementSibling.style.display='inline-flex';">
                 <span class="nav-initials" style="display:none;"><?= e(initials($nombreUsuario)) ?></span>
               <?php else: ?>
                 <span class="nav-initials"><?= e(initials($nombreUsuario)) ?></span>
@@ -524,7 +445,7 @@ function item_active(string $file, string $current): string
             <li class="px-3 py-3">
               <?php if ($avatarUrl): ?>
                 <img src="<?= e($avatarUrl) ?>" class="dropdown-avatar me-3"
-                  onerror="this.style.display='none'; this.nextElementSibling.style.display='inline-flex';">
+                     onerror="this.style.display='none'; this.nextElementSibling.style.display='inline-flex';">
                 <span class="dropdown-initials me-3" style="display:none;"><?= e(initials($nombreUsuario)) ?></span>
               <?php else: ?>
                 <span class="dropdown-initials me-3"><?= e(initials($nombreUsuario)) ?></span>
@@ -537,6 +458,44 @@ function item_active(string $file, string $current): string
                 <div class="text-secondary small"><i class="bi bi-person-badge me-1"></i><?= e($rolUsuario) ?></div>
               </div>
             </li>
+
+            <?php if (count($misSucursales) > 1): ?>
+              <li><hr class="dropdown-divider"></li>
+              <li class="px-3 pb-2 text-secondary small"><i class="bi bi-arrow-repeat me-1"></i>Cambiar de sucursal</li>
+
+              <?php if (count($misSucursales) === 2): ?>
+                <?php
+                  // Toggle rápido si son exactamente dos
+                  $actual = (int)$idSucursal;
+                  $otra = ($misSucursales[0]['id'] == $actual) ? $misSucursales[1] : $misSucursales[0];
+                ?>
+                <li class="px-3 pb-2">
+                  <form action="cambiar_sucursal.php" method="post" class="d-flex gap-2">
+                    <input type="hidden" name="csrf" value="<?= e($_SESSION['csrf']) ?>">
+                    <input type="hidden" name="sucursal_id" value="<?= (int)$otra['id'] ?>">
+                    <button type="submit" class="btn btn-outline-light btn-sm w-100">
+                      Cambiar a: <?= e($otra['nombre']) ?>
+                    </button>
+                  </form>
+                </li>
+              <?php else: ?>
+                <!-- Selector si hay 3 o más -->
+                <li class="px-3 pb-3">
+                  <form action="cambiar_sucursal.php" method="post" class="d-flex gap-2">
+                    <input type="hidden" name="csrf" value="<?= e($_SESSION['csrf']) ?>">
+                    <select name="sucursal_id" class="form-select form-select-sm">
+                      <?php foreach ($misSucursales as $s): ?>
+                        <option value="<?= (int)$s['id'] ?>" <?= ($s['id']==$idSucursal?'selected':'') ?>>
+                          <?= e($s['nombre']) ?>
+                        </option>
+                      <?php endforeach; ?>
+                    </select>
+                    <button type="submit" class="btn btn-secondary btn-sm">Cambiar</button>
+                  </form>
+                </li>
+              <?php endif; ?>
+            <?php endif; ?>
+
             <li><hr class="dropdown-divider"></li>
             <li><a class="dropdown-item" href="mi_expediente.php"><i class="bi bi-folder-person me-2"></i>Mi expediente</a></li>
             <li><a class="dropdown-item" href="documentos_historial.php"><i class="bi bi-files me-2"></i>Mis documentos</a></li>

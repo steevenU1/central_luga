@@ -48,6 +48,7 @@ $pct = $totalReq ? floor(($uploadedReq/$totalReq)*100) : 0;
 function puede_subir(string $rol, int $mi_id, int $usuario_id): bool {
   return in_array($rol, ['Admin','Gerente'], true) || ($mi_id === $usuario_id);
 }
+$esAdmin = in_array($mi_rol, ['Admin','Super'], true);
 
 /* Mensajes */
 $ok       = !empty($_GET['ok']) || !empty($_GET['ok_doc']);
@@ -111,6 +112,8 @@ $placeholder = 'https://ui-avatars.com/api/?name='.urlencode($usuario_nombre ?: 
     .btn-primary{background:var(--pri);border-color:var(--pri);color:#fff}
     .btn-success{background:var(--ok);border-color:var(--ok);color:#fff}
     .btn-secondary{background:#475569;border-color:#475569;color:#fff}
+    .btn-danger{background:#dc2626;border-color:#dc2626;color:#fff}
+    .btn-danger:hover{filter:brightness(0.95)}
     .btn:disabled{opacity:.6;cursor:not-allowed}
 
     /* uploader */
@@ -140,7 +143,7 @@ $placeholder = 'https://ui-avatars.com/api/?name='.urlencode($usuario_nombre ?: 
     Usuario #<?= (int)$usuario_id ?> · Requeridos: <strong><?= $uploadedReq ?>/<?= $totalReq ?></strong>
   </p>
 
-  <?php if ($ok): ?><div class="alert alert-ok">Documento subido correctamente.</div><?php endif; ?>
+  <?php if ($ok): ?><div class="alert alert-ok">Documento subido/borrado correctamente.</div><?php endif; ?>
   <?php if ($err || $errDoc): ?><div class="alert alert-err"><?= htmlspecialchars($err ?: $errDoc) ?></div><?php endif; ?>
   <?php if ($ok_foto): ?><div class="alert alert-ok">Foto actualizada correctamente.</div><?php endif; ?>
   <?php if ($err_foto): ?><div class="alert alert-err"><?= htmlspecialchars($err_foto) ?></div><?php endif; ?>
@@ -202,7 +205,18 @@ $placeholder = 'https://ui-avatars.com/api/?name='.urlencode($usuario_nombre ?: 
 
         <div class="doc-right">
           <?php if ($docVigente && $puedeVer): ?>
-            <a class="btn btn-primary" target="_blank" href="documento_descargar.php?id=<?= $docVigente ?>">Ver</a>
+            <a class="btn btn-primary" target="_blank"
+               href="documento_descargar.php?id=<?= $docVigente ?>">Ver</a>
+          <?php endif; ?>
+
+          <?php if ($docVigente && $esAdmin): ?>
+            <form action="documento_borrar.php" method="post"
+                  onsubmit="return confirm('¿Seguro que deseas borrar este documento?');"
+                  style="display:inline">
+              <input type="hidden" name="doc_id" value="<?= $docVigente ?>">
+              <input type="hidden" name="return_to" value="<?= htmlspecialchars($return_to) ?>">
+              <button type="submit" class="btn btn-danger">Borrar</button>
+            </form>
           <?php endif; ?>
 
           <?php if ($puedeSubir): ?>
