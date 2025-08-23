@@ -29,6 +29,7 @@ function obtenerSemanaPorIndice($offset = 0) {
 
     return [$inicio, $fin];
 }
+function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 
 /* ========================
    FILTROS
@@ -38,7 +39,7 @@ list($inicioSemanaObj, $finSemanaObj) = obtenerSemanaPorIndice($semanaSelecciona
 $inicioSemana = $inicioSemanaObj->format('Y-m-d');
 $finSemana    = $finSemanaObj->format('Y-m-d');
 
-$id_sucursal = (int)$_SESSION['id_sucursal'];
+$id_sucursal = (int)($_SESSION['id_sucursal'] ?? 0);
 $rol         = $_SESSION['rol'] ?? 'Ejecutivo';
 
 // Obtener usuarios de la sucursal para filtro
@@ -105,146 +106,315 @@ $sqlVentas = "
     $where
     ORDER BY vs.fecha_venta DESC
 ";
-
 $stmt = $conn->prepare($sqlVentas);
 $stmt->bind_param($types, ...$params);
 $stmt->execute();
-$ventas = $stmt->get_result();
+$res = $stmt->get_result();
+$ventas = $res->fetch_all(MYSQLI_ASSOC);
 $stmt->close();
+
+/* ========================
+   RESÚMENES (solo front, sin tocar DB)
+======================== */
+$totalVentas   = count($ventas);
+$sumPrecio     = 0.0;
+$sumComEje     = 0.0;
+$sumComGer     = 0.0;
+$cntEsim       = 0;
+$cntFisicas    = 0;
+$tipoCounts    = ['Nueva'=>0,'Portabilidad'=>0,'Regalo'=>0,'Pospago'=>0];
+
+foreach ($ventas as $v) {
+  $sumPrecio += (float)$v['precio_total'];
+  $sumComEje += (float)$v['comision_ejecutivo'];
+  $sumComGer += (float)$v['comision_gerente'];
+  if ((int)($v['es_esim'] ?? 0) === 1) $cntEsim++; else $cntFisicas++;
+  $tipo = $v['tipo_venta'] ?? '';
+  if (isset($tipoCounts[$tipo])) $tipoCounts[$tipo]++;
+}
 ?>
 <!DOCTYPE html>
-<html lang="es">
+<html lang="es" data-bs-theme="light">
 <head>
-    <meta charset="UTF-8">
-    <title>Historial de Ventas SIM</title>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
+  <meta charset="UTF-8">
+  <title>Historial de Ventas SIM</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+  <style>
+    :root{ --surface:#ffffff; --muted:#6b7280; }
+    body{ background:#f6f7fb; }
+    .page-header{ display:flex; align-items:center; justify-content:space-between; gap:1rem; margin-top:1rem; }
+    .page-title{ font-weight:700; letter-spacing:.2px; margin:0; }
+    .small-muted{ color:var(--muted); font-size:.92rem; }
+    .card-surface{ background:var(--surface); border:1px solid rgba(0,0,0,.05); box-shadow:0 6px 16px rgba(16,24,40,.06); border-radius:18px; }
+    .stat{ display:flex; align-items:center; gap:.75rem; }
+    .stat .icon{ width:40px; height:40px; border-radius:12px; display:grid; place-items:center; background:#eef2ff; }
+    .chip{ display:inline-flex; align-items:center; gap:.4rem; padding:.25rem .6rem; border-radius:999px; font-weight:600; font-size:.85rem; border:1px solid transparent; }
+    .chip-info{ background:#e8f0fe; color:#1a56db; border-color:#cbd8ff; }
+    .chip-success{ background:#e7f8ef; color:#0f7a3d; border-color:#b7f1cf; }
+    .chip-warn{ background:#fff6e6; color:#9a6200; border-color:#ffe1a8; }
+    .chip-purple{ background:#f3e8ff; color:#6d28d9; border-color:#e9d5ff; }
+    .filters .form-control, .filters .form-select{ height:42px; }
+    .btn-soft{ border:1px solid rgba(0,0,0,.08); background:#fff; }
+    .btn-soft:hover{ background:#f9fafb; }
+    .tbl-wrap{ overflow:auto; border-radius:14px; }
+    .table thead th{ position:sticky; top:0; z-index:1; }
+  </style>
 </head>
-<body class="bg-light">
-
+<body>
 <?php include 'navbar.php'; ?>
 
-<div class="container mt-4">
-    <h2>Historial de Ventas SIM - <?= htmlspecialchars($_SESSION['nombre']) ?></h2>
-    <a href="panel.php" class="btn btn-secondary mb-3">← Volver al Panel</a>
+<div class="container py-3">
+  <!-- Encabezado -->
+  <div class="page-header">
+    <div>
+      <h1 class="page-title">📶 Historial de Ventas SIM</h1>
+      <div class="small-muted">
+        Usuario: <strong><?= h($_SESSION['nombre']) ?></strong> · Semana
+        <strong><?= $inicioSemanaObj->format('d/m/Y') ?> – <?= $finSemanaObj->format('d/m/Y') ?></strong>
+      </div>
+    </div>
+    <div class="d-flex align-items-center gap-2 flex-wrap">
+      <span class="chip chip-info"><i class="bi bi-receipt"></i> Ventas: <?= (int)$totalVentas ?></span>
+      <span class="chip chip-success"><i class="bi bi-currency-dollar"></i> Monto: $<?= number_format($sumPrecio,2) ?></span>
+      <span class="chip chip-purple"><i class="bi bi-sim"></i> eSIM: <?= (int)$cntEsim ?></span>
+      <span class="chip chip-purple"><i class="bi bi-sim-fill"></i> Físicas: <?= (int)$cntFisicas ?></span>
+    </div>
+  </div>
 
-    <?php if (!empty($_GET['msg'])): ?>
-        <div class="alert alert-info"><?= htmlspecialchars($_GET['msg']) ?></div>
-    <?php endif; ?>
-
-    <!-- 🔹 Filtros -->
-    <form method="GET" class="card p-3 mb-4 shadow-sm bg-white">
-        <div class="row g-3">
-            <div class="col-md-3">
-                <label class="form-label">Semana</label>
-                <select name="semana" class="form-select" onchange="this.form.submit()">
-                    <?php for ($i=0; $i<8; $i++): 
-                        list($ini, $fin) = obtenerSemanaPorIndice($i);
-                        $texto = "Del {$ini->format('d/m/Y')} al {$fin->format('d/m/Y')}";
-                    ?>
-                        <option value="<?= $i ?>" <?= $i==$semanaSeleccionada?'selected':'' ?>><?= $texto ?></option>
-                    <?php endfor; ?>
-                </select>
-            </div>
-            <div class="col-md-3">
-                <label class="form-label">Tipo de Venta</label>
-                <select name="tipo_venta" class="form-select">
-                    <option value="">Todas</option>
-                    <option value="Nueva"         <?= (($_GET['tipo_venta'] ?? '')=='Nueva')?'selected':'' ?>>Nueva</option>
-                    <option value="Portabilidad"  <?= (($_GET['tipo_venta'] ?? '')=='Portabilidad')?'selected':'' ?>>Portabilidad</option>
-                    <option value="Regalo"        <?= (($_GET['tipo_venta'] ?? '')=='Regalo')?'selected':'' ?>>Regalo</option>
-                    <option value="Pospago"       <?= (($_GET['tipo_venta'] ?? '')=='Pospago')?'selected':'' ?>>Pospago</option>
-                </select>
-            </div>
-            <div class="col-md-3">
-                <label class="form-label">Usuario</label>
-                <select name="usuario" class="form-select">
-                    <option value="">Todos</option>
-                    <?php while($u = $usuarios->fetch_assoc()): ?>
-                        <option value="<?= (int)$u['id'] ?>" <?= (($_GET['usuario'] ?? '')==$u['id'])?'selected':'' ?>>
-                            <?= htmlspecialchars($u['nombre']) ?>
-                        </option>
-                    <?php endwhile; ?>
-                </select>
-            </div>
+  <!-- Tarjetas resumen -->
+  <div class="row g-3 mt-1">
+    <div class="col-12 col-md-4">
+      <div class="card card-surface p-3 h-100">
+        <div class="stat">
+          <div class="icon"><i class="bi bi-currency-dollar"></i></div>
+          <div>
+            <div class="small-muted">Monto vendido (semana)</div>
+            <div class="h4 m-0">$<?= number_format($sumPrecio,2) ?></div>
+          </div>
         </div>
-
-        <div class="mt-3 text-end">
-            <button class="btn btn-primary">Filtrar</button>
-            <a href="historial_ventas_sims.php" class="btn btn-secondary">Limpiar</a>
-
-            <!-- ✅ Exportar con los mismos filtros -->
-            <button
-                type="submit"
-                class="btn btn-success"
-                formaction="exportar_excel_sims.php"
-                formmethod="GET"
-                formtarget="_blank"
-                title="Exporta con los filtros actuales"
-            >
-                ⬇️ Exportar a Excel
-            </button>
+      </div>
+    </div>
+    <div class="col-12 col-md-4">
+      <div class="card card-surface p-3 h-100">
+        <div class="stat">
+          <div class="icon"><i class="bi bi-person-badge"></i></div>
+          <div>
+            <div class="small-muted">Comisión ejecutivos</div>
+            <div class="h4 m-0">$<?= number_format($sumComEje,2) ?></div>
+          </div>
         </div>
-    </form>
+      </div>
+    </div>
+    <div class="col-12 col-md-4">
+      <div class="card card-surface p-3 h-100">
+        <div class="stat">
+          <div class="icon"><i class="bi bi-people"></i></div>
+          <div>
+            <div class="small-muted">Comisión gerentes</div>
+            <div class="h4 m-0">$<?= number_format($sumComGer,2) ?></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 
-    <!-- 🔹 Historial -->
-    <div class="table-responsive">
-      <table class="table table-striped table-bordered align-middle">
-          <thead class="table-dark">
-              <tr>
-                  <th>ID</th>
-                  <th>Fecha</th>
-                  <th>Sucursal</th>
-                  <th>Usuario</th>
-                  <th>Cliente</th>
-                  <th>ICCID / Tipo</th>
-                  <th>Tipo Venta</th>
-                  <th>Modalidad</th>
-                  <th>Precio</th>
-                  <th>Com. Ejecutivo</th>
-                  <th>Com. Gerente</th>
-                  <th>Comentarios</th>
-                  <th>Acciones</th>
-              </tr>
+  <!-- Chips por tipo de venta -->
+  <div class="d-flex flex-wrap gap-2 mt-2">
+    <span class="chip chip-info"><i class="bi bi-cash-coin"></i> Nueva: <?= (int)$tipoCounts['Nueva'] ?></span>
+    <span class="chip chip-info"><i class="bi bi-arrow-left-right"></i> Portabilidad: <?= (int)$tipoCounts['Portabilidad'] ?></span>
+    <span class="chip chip-info"><i class="bi bi-gift"></i> Regalo: <?= (int)$tipoCounts['Regalo'] ?></span>
+    <span class="chip chip-info"><i class="bi bi-bank"></i> Pospago: <?= (int)$tipoCounts['Pospago'] ?></span>
+  </div>
+
+  <!-- Filtros -->
+  <form method="GET" class="card card-surface p-3 mt-3">
+    <div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
+      <h5 class="m-0"><i class="bi bi-funnel me-2"></i>Filtros</h5>
+      <div class="d-flex gap-2">
+        <?php
+          $prev = max(0, $semanaSeleccionada - 1);
+          $next = $semanaSeleccionada + 1;
+          $qsPrev = $_GET; $qsPrev['semana'] = $prev;
+          $qsNext = $_GET; $qsNext['semana'] = $next;
+        ?>
+        <a class="btn btn-soft btn-sm" href="?<?= http_build_query($qsPrev) ?>"><i class="bi bi-arrow-left"></i> Semana previa</a>
+        <a class="btn btn-soft btn-sm" href="?<?= http_build_query($qsNext) ?>">Siguiente semana <i class="bi bi-arrow-right"></i></a>
+      </div>
+    </div>
+
+    <div class="row g-3 mt-1 filters">
+      <div class="col-md-3">
+        <label class="small-muted">Semana</label>
+        <select name="semana" class="form-select" onchange="this.form.submit()">
+          <?php for ($i=0; $i<8; $i++):
+            list($ini, $fin) = obtenerSemanaPorIndice($i);
+            $texto = "Del {$ini->format('d/m/Y')} al {$fin->format('d/m/Y')}";
+          ?>
+            <option value="<?= $i ?>" <?= $i==$semanaSeleccionada?'selected':'' ?>><?= $texto ?></option>
+          <?php endfor; ?>
+        </select>
+      </div>
+      <div class="col-md-3">
+        <label class="small-muted">Tipo de venta</label>
+        <select name="tipo_venta" class="form-select">
+          <option value="">Todas</option>
+          <option value="Nueva"         <?= (($_GET['tipo_venta'] ?? '')=='Nueva')?'selected':'' ?>>Nueva</option>
+          <option value="Portabilidad"  <?= (($_GET['tipo_venta'] ?? '')=='Portabilidad')?'selected':'' ?>>Portabilidad</option>
+          <option value="Regalo"        <?= (($_GET['tipo_venta'] ?? '')=='Regalo')?'selected':'' ?>>Regalo</option>
+          <option value="Pospago"       <?= (($_GET['tipo_venta'] ?? '')=='Pospago')?'selected':'' ?>>Pospago</option>
+        </select>
+      </div>
+      <div class="col-md-3">
+        <label class="small-muted">Usuario</label>
+        <select name="usuario" class="form-select">
+          <option value="">Todos</option>
+          <?php while($u = $usuarios->fetch_assoc()): ?>
+            <option value="<?= (int)$u['id'] ?>" <?= (($_GET['usuario'] ?? '')==$u['id'])?'selected':'' ?>><?= h($u['nombre']) ?></option>
+          <?php endwhile; ?>
+        </select>
+      </div>
+      <div class="col-md-3">
+        <label class="small-muted">Búsqueda rápida (front)</label>
+        <input id="searchInput" type="text" class="form-control" placeholder="Filtra por cualquier campo de la tabla…">
+      </div>
+    </div>
+
+    <div class="mt-3 d-flex justify-content-end gap-2">
+      <button class="btn btn-primary"><i class="bi bi-funnel"></i> Filtrar</button>
+      <a href="historial_ventas_sims.php" class="btn btn-secondary">Limpiar</a>
+      <button
+        type="submit"
+        class="btn btn-success"
+        formaction="exportar_excel_sims.php"
+        formmethod="GET"
+        formtarget="_blank"
+        title="Exporta con los filtros actuales"
+      >
+        <i class="bi bi-file-earmark-excel"></i> Exportar a Excel
+      </button>
+    </div>
+  </form>
+
+  <!-- Historial -->
+  <?php if ($totalVentas === 0): ?>
+    <div class="alert alert-info card-surface mt-3 mb-0">
+      <i class="bi bi-info-circle me-1"></i>No hay ventas de SIM para los filtros seleccionados.
+    </div>
+  <?php else: ?>
+    <div class="card card-surface mt-3">
+      <div class="p-3 pb-0 d-flex align-items-center justify-content-between flex-wrap gap-2">
+        <h5 class="m-0"><i class="bi bi-table me-2"></i>Listado</h5>
+        <div class="small-muted">Tip: usa la búsqueda rápida para filtrar en vivo.</div>
+      </div>
+      <div class="p-3 pt-2 tbl-wrap">
+        <table id="tablaSims" class="table table-hover align-middle mb-0">
+          <thead class="table-light">
+            <tr>
+              <th>ID</th>
+              <th>Fecha</th>
+              <th>Sucursal</th>
+              <th>Usuario</th>
+              <th>Cliente</th>
+              <th>ICCID / Tipo</th>
+              <th>Tipo Venta</th>
+              <th>Modalidad</th>
+              <th>Precio</th>
+              <th>Com. Ejecutivo</th>
+              <th>Com. Gerente</th>
+              <th>Comentarios</th>
+              <th>Acciones</th>
+            </tr>
           </thead>
           <tbody>
-              <?php while($v = $ventas->fetch_assoc()): ?>
+            <?php foreach ($ventas as $v): ?>
+              <?php
+                $puedeEliminar = in_array($_SESSION['rol'], ['Ejecutivo','Gerente','Admin'], true)
+                                 && (int)$_SESSION['id_usuario'] === (int)$v['id_usuario'];
+                $isEsim = (int)($v['es_esim'] ?? 0) === 1;
+                $tipoIcon = $isEsim ? 'bi-sim' : 'bi-sim-fill';
+              ?>
               <tr>
-                  <td><?= (int)$v['id'] ?></td>
-                  <td><?= htmlspecialchars($v['fecha_venta']) ?></td>
-                  <td><?= htmlspecialchars($v['sucursal']) ?></td>
-                  <td><?= htmlspecialchars($v['usuario']) ?></td>
-                  <td><?= htmlspecialchars($v['nombre_cliente'] ?? '') ?></td>
-
-                  <!-- Muestra 'eSIM' si es_esim=1; de lo contrario, el ICCID físico -->
-                  <td><?= ($v['es_esim'] ?? 0) ? 'eSIM' : htmlspecialchars($v['iccid']) ?></td>
-
-                  <td><?= htmlspecialchars($v['tipo_venta']) ?></td>
-                  <td><?= ($v['tipo_venta'] === 'Pospago') ? htmlspecialchars($v['modalidad']) : '' ?></td>
-                  <td>$<?= number_format((float)$v['precio_total'],2) ?></td>
-                  <td>$<?= number_format((float)$v['comision_ejecutivo'],2) ?></td>
-                  <td>$<?= number_format((float)$v['comision_gerente'],2) ?></td>
-                  <td><?= htmlspecialchars($v['comentarios'] ?? '') ?></td>
-                  <td>
-                      <?php if(
-                          in_array($_SESSION['rol'], ['Ejecutivo','Gerente','Admin'], true)
-                          && (int)$_SESSION['id_usuario'] === (int)$v['id_usuario']
-                      ): ?>
-                          <form action="eliminar_venta_sim.php" method="POST" style="display:inline;">
-                              <input type="hidden" name="id_venta" value="<?= (int)$v['id'] ?>">
-                              <button type="submit" 
-                                      class="btn btn-sm btn-danger"
-                                      onclick="return confirm('¿Seguro que deseas eliminar esta venta de SIM?\nEsto devolverá la SIM al inventario (si aplica) y quitará la comisión.')">
-                                  🗑 Eliminar
-                              </button>
-                          </form>
-                      <?php endif; ?>
-                  </td>
+                <td><span class="badge text-bg-secondary">#<?= (int)$v['id'] ?></span></td>
+                <td><?= h($v['fecha_venta']) ?></td>
+                <td><?= h($v['sucursal']) ?></td>
+                <td><?= h($v['usuario']) ?></td>
+                <td><?= h($v['nombre_cliente'] ?? '') ?></td>
+                <td>
+                  <span class="chip chip-purple"><i class="bi <?= $tipoIcon ?>"></i> <?= $isEsim ? 'eSIM' : h($v['iccid']) ?></span>
+                </td>
+                <td><?= h($v['tipo_venta']) ?></td>
+                <td><?= ($v['tipo_venta']==='Pospago') ? h($v['modalidad']) : '' ?></td>
+                <td class="fw-semibold">$<?= number_format((float)$v['precio_total'],2) ?></td>
+                <td>$<?= number_format((float)$v['comision_ejecutivo'],2) ?></td>
+                <td>$<?= number_format((float)$v['comision_gerente'],2) ?></td>
+                <td><?= h($v['comentarios'] ?? '') ?></td>
+                <td class="text-nowrap">
+                  <?php if ($puedeEliminar): ?>
+                    <button
+                      class="btn btn-outline-danger btn-sm"
+                      data-bs-toggle="modal"
+                      data-bs-target="#confirmEliminarSim"
+                      data-idventa="<?= (int)$v['id'] ?>">
+                      <i class="bi bi-trash"></i> Eliminar
+                    </button>
+                  <?php endif; ?>
+                </td>
               </tr>
-              <?php endwhile; ?>
+            <?php endforeach; ?>
           </tbody>
-      </table>
+        </table>
+      </div>
     </div>
+  <?php endif; ?>
+
 </div>
 
+<!-- Modal de confirmación de eliminación -->
+<div class="modal fade" id="confirmEliminarSim" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <form action="eliminar_venta_sim.php" method="POST" class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-exclamation-triangle me-2"></i>Confirmar eliminación</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" name="id_venta" id="modalIdVentaSim">
+        <p class="mb-0">¿Seguro que deseas eliminar esta venta de SIM?<br>
+        <small class="text-muted">Esto devolverá la SIM al inventario (si aplica) y quitará la comisión asociada.</small></p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
+        <button type="submit" class="btn btn-danger">Eliminar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script> -->
+<script>
+// Modal: setear id_venta
+const modalSim = document.getElementById('confirmEliminarSim');
+modalSim?.addEventListener('show.bs.modal', (ev) => {
+  const id = ev.relatedTarget?.getAttribute('data-idventa') || '';
+  document.getElementById('modalIdVentaSim').value = id;
+});
+
+// Búsqueda rápida (front)
+(function(){
+  const input = document.getElementById('searchInput');
+  const rows  = Array.from(document.querySelectorAll('#tablaSims tbody tr'));
+  const norm  = s => (s||'').toString().toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu,'');
+  function filtra(){
+    const q = norm(input.value);
+    rows.forEach(tr => {
+      const ok = !q || norm(tr.innerText).includes(q);
+      tr.style.display = ok ? '' : 'none';
+    });
+  }
+  input?.addEventListener('input', filtra);
+})();
+</script>
 </body>
 </html>
