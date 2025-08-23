@@ -319,7 +319,7 @@ function item_active(string $file, string $current): string { return $current ==
                 <li><a class="dropdown-item <?= item_active('recoleccion_comisiones.php', $current) ?>" href="recoleccion_comisiones.php">Recolección comisiones</a></li>
               <?php else: ?>
                 <li><a class="dropdown-item <?= item_active('cobros.php', $current) ?>" href="cobros.php">Generar cobro</a></li>
-                <li><a class="dropdown-item <?= item_active('cortes_caja.php', $current) ?>" href="cortes_caja.php">Corte de caja</a></li>
+                <li><a class="dropdown-item <?= item_active('cortes_caja.php', $current) ?>" href="cortes_caja.php">Historial Cortes</a></li>
                 <li><a class="dropdown-item <?= item_active('generar_corte.php', $current) ?>" href="generar_corte.php">Generar corte sucursal</a></li>
                 <li><a class="dropdown-item <?= item_active('depositos_sucursal.php', $current) ?>" href="depositos_sucursal.php">Depósitos sucursal</a></li>
                 <?php if ($esAdmin): ?>

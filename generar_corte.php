@@ -139,6 +139,41 @@ $stmt->close();
 $hayCobros   = count($cobrosFecha) > 0;
 $btnDisabled = $hayCobros ? '' : 'disabled';
 
+/* Totales del día (para tarjetas y modal) */
+$totalEf = 0.0; $totalTar = 0.0; $totalTot = 0.0; $totalComEsp = 0.0;
+foreach ($cobrosFecha as $r) {
+  $totalEf     += (float)$r['monto_efectivo'];
+  $totalTar    += (float)$r['monto_tarjeta'];
+  $totalTot    += (float)$r['monto_total'];
+  $totalComEsp += (float)$r['comision_especial'];
+}
+/* A depositar (LUGA: depósito = efectivo) */
+$aDepositar = $totalEf;
+
+/* Resumen por rubro (con separación efectivo/tarjeta) */
+$resumenRubros = [];
+$sumEfCnt=0; $sumEfTot=0.0; $sumTarCnt=0; $sumTarTot=0.0;
+foreach ($cobrosFecha as $r) {
+  $motivo = trim($r['motivo'] ?? '') ?: 'Sin motivo';
+  if (!isset($resumenRubros[$motivo])) {
+    $resumenRubros[$motivo] = ['cnt'=>0,'tot'=>0.0,'ef_cnt'=>0,'ef_tot'=>0.0,'tar_cnt'=>0,'tar_tot'=>0.0];
+  }
+  $resumenRubros[$motivo]['cnt']++;
+  $resumenRubros[$motivo]['tot'] += (float)$r['monto_total'];
+
+  if ((float)$r['monto_efectivo'] > 0) {
+    $resumenRubros[$motivo]['ef_cnt']++;
+    $resumenRubros[$motivo]['ef_tot'] += (float)$r['monto_efectivo'];
+    $sumEfCnt++; $sumEfTot += (float)$r['monto_efectivo'];
+  }
+  if ((float)$r['monto_tarjeta'] > 0) {
+    $resumenRubros[$motivo]['tar_cnt']++;
+    $resumenRubros[$motivo]['tar_tot'] += (float)$r['monto_tarjeta'];
+    $sumTarCnt++; $sumTarTot += (float)$r['monto_tarjeta'];
+  }
+}
+uasort($resumenRubros, function($a,$b){ return $b['tot'] <=> $a['tot']; });
+
 $desde = $_GET['desde'] ?? date('Y-m-01');
 $hasta = $_GET['hasta'] ?? date('Y-m-d');
 
@@ -167,123 +202,322 @@ if (!empty($_SESSION['flash_msg'])) {
 <head>
   <meta charset="UTF-8">
   <title>Generar Corte de Caja</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+  <style>
+    .page-head { display:flex; align-items:center; justify-content:space-between; gap:1rem; }
+    .controls-compact { display:flex; align-items:end; gap:.5rem; }
+    .controls-compact .form-control { min-width: 210px; }
+    .pill-days .btn { margin:.25rem .25rem; }
+    .card-metric { border:0; box-shadow:0 8px 24px rgba(0,0,0,.06); border-radius:1rem; }
+    .card-metric .card-body { padding:1rem 1.1rem; }
+    .metric-value { font-size: clamp(1.25rem,1.5rem,1.8rem); font-weight:800; }
+    .metric-label { color:#6b7280; font-size:.9rem; letter-spacing:.2px; }
+    .muted-sm { font-size:.85rem; color:#6b7280; }
+    .shadow-soft { box-shadow:0 8px 24px rgba(0,0,0,.06); }
+    .badge-soft { background:#f1f5f9; color:#0f172a; }
+    .table thead th { white-space:nowrap; }
+    .table td { vertical-align:middle; }
+    #confirmModal .table th, #confirmModal .table td { padding:.35rem .5rem; font-size:.9rem; }
+  </style>
 </head>
 <body class="bg-light">
-<div class="container mt-4">
+<div class="container py-4">
 
-  <h2>🧾 Generar Corte de Caja</h2>
+  <!-- Encabezado + controles compactos a la derecha -->
+  <div class="page-head mb-3">
+    <h2 class="m-0">🧾 Generar Corte de Caja</h2>
+
+    <form id="formCorte" class="controls-compact" method="POST" action="generar_corte.php">
+      <div class="w-auto">
+        <label class="form-label mb-1 small">Fecha de operación</label>
+        <input id="inpFecha" type="date" name="fecha_operacion"
+               class="form-control form-control-sm"
+               value="<?= h($fechaSeleccionada) ?>" max="<?= h($fechaHoy) ?>" required>
+      </div>
+      <button type="submit" class="btn btn-outline-secondary btn-sm"
+              formmethod="get" title="Ver cobros">
+        <i class="bi bi-eye"></i> Ver
+      </button>
+      <button type="button" class="btn btn-primary btn-sm"
+              <?= $btnDisabled ?>
+              title="<?= $hayCobros ? 'Generar corte' : 'No hay cobros en esta fecha' ?>"
+              data-bs-toggle="modal" data-bs-target="#confirmModal">
+        <i class="bi bi-clipboard-check"></i> Generar
+      </button>
+    </form>
+  </div>
+
   <?= $msg ?>
 
+  <!-- Días pendientes -->
   <div class="mb-3">
-    <h5>Días pendientes de corte:</h5>
+    <div class="d-flex align-items-center gap-2 mb-2">
+      <h6 class="m-0">Días pendientes de corte</h6>
+      <?php if (!empty($pendientes)): ?>
+        <span class="badge rounded-pill text-bg-warning"><?= count($pendientes) ?> día(s)</span>
+      <?php endif; ?>
+    </div>
     <?php if (empty($pendientes)): ?>
-      <div class="alert alert-info">No hay días pendientes.</div>
+      <div class="alert alert-info shadow-soft m-0">No hay días pendientes.</div>
     <?php else: ?>
-      <ul>
+      <div class="pill-days">
         <?php foreach ($pendientes as $f => $total): ?>
-          <li><?= h($f) ?> → <?= (int)$total ?> cobros</li>
+          <a class="btn btn-sm <?= $f===$fechaSeleccionada ? 'btn-primary' : 'btn-outline-primary' ?>"
+             href="?fecha_operacion=<?= h($f) ?>">
+            <?= h($f) ?> <span class="badge text-bg-light ms-1"><?= (int)$total ?></span>
+          </a>
         <?php endforeach; ?>
-      </ul>
+      </div>
     <?php endif; ?>
   </div>
 
-  <form class="card p-3 shadow mb-4" method="POST" action="generar_corte.php">
-    <label class="form-label">Fecha de operación</label>
-    <input type="date" name="fecha_operacion" class="form-control"
-           value="<?= h($fechaSeleccionada) ?>" max="<?= h($fechaHoy) ?>" required>
-    <div class="d-flex gap-2 mt-3">
-      <button type="submit" class="btn btn-outline-secondary w-50" formmethod="get">
-        Ver cobros
-      </button>
-      <button type="submit" class="btn btn-primary w-50"
-              <?= $btnDisabled ?>
-              title="<?= $hayCobros ? 'Generar corte' : 'No hay cobros en esta fecha' ?>"
-              onclick="return confirm('¿Confirmas generar el corte de caja para la fecha seleccionada?');">
-        📤 Generar Corte
-      </button>
+  <!-- Tarjetas de totales -->
+  <div class="row g-3 mb-4">
+    <div class="col-12 col-md-4">
+      <div class="card card-metric">
+        <div class="card-body d-flex justify-content-between align-items-center">
+          <div>
+            <div class="metric-label">Efectivo cobrado</div>
+            <div class="metric-value">$<?= number_format($totalEf, 2) ?></div>
+            <div class="muted-sm">Fecha: <?= h($fechaSeleccionada) ?></div>
+          </div>
+          <i class="bi bi-cash-coin fs-2 text-success"></i>
+        </div>
+      </div>
     </div>
-    <?php if (!$hayCobros): ?>
-      <p class="text-muted mt-2 mb-0">No hay cobros pendientes para esta fecha.</p>
-    <?php endif; ?>
-  </form>
+    <div class="col-12 col-md-4">
+      <div class="card card-metric">
+        <div class="card-body d-flex justify-content-between align-items-center">
+          <div>
+            <div class="metric-label">Tarjeta cobrada</div>
+            <div class="metric-value">$<?= number_format($totalTar, 2) ?></div>
+            <div class="muted-sm">TPV / banco</div>
+          </div>
+          <i class="bi bi-credit-card-2-front fs-2 text-primary"></i>
+        </div>
+      </div>
+    </div>
+    <div class="col-12 col-md-4">
+      <div class="card card-metric">
+        <div class="card-body d-flex justify-content-between align-items-center">
+          <div>
+            <div class="metric-label">A depositar (efectivo)</div>
+            <div class="metric-value">$<?= number_format($aDepositar, 2) ?></div>
+            <div class="muted-sm">Día siguiente</div>
+          </div>
+          <i class="bi bi-bank fs-2"></i>
+        </div>
+      </div>
+    </div>
+  </div>
 
-  <h4>Cobros pendientes para la fecha seleccionada</h4>
-  <?php if (!$hayCobros): ?>
-    <div class="alert alert-info">No hay cobros pendientes para la fecha <?= h($fechaSeleccionada) ?>.</div>
-  <?php else: ?>
-    <table class="table table-sm table-bordered">
-      <thead class="table-dark">
-        <tr>
-          <th>Fecha</th><th>Usuario</th><th>Motivo</th><th>Tipo Pago</th>
-          <th>Total</th><th>Efectivo</th><th>Tarjeta</th><th>Comisión Esp.</th><th>Eliminar</th>
-        </tr>
-      </thead>
-      <tbody>
-        <?php foreach ($cobrosFecha as $p): ?>
-          <tr>
-            <td><?= h($p['fecha_cobro']) ?></td>
-            <td><?= h($p['usuario']) ?></td>
-            <td><?= h($p['motivo']) ?></td>
-            <td><?= h($p['tipo_pago']) ?></td>
-            <td>$<?= number_format((float)$p['monto_total'], 2) ?></td>
-            <td>$<?= number_format((float)$p['monto_efectivo'], 2) ?></td>
-            <td>$<?= number_format((float)$p['monto_tarjeta'], 2) ?></td>
-            <td>$<?= number_format((float)$p['comision_especial'], 2) ?></td>
-            <td>
-              <a href="eliminar_cobro.php?id=<?= (int)$p['id'] ?>"
-                 class="btn btn-danger btn-sm"
-                 onclick="return confirm('¿Seguro de eliminar este cobro?');">🗑</a>
-            </td>
-          </tr>
-        <?php endforeach; ?>
-      </tbody>
-    </table>
-  <?php endif; ?>
+  <!-- Tabla Cobros -->
+  <div class="card shadow-soft mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <h5 class="m-0">Cobros pendientes para: <?= h($fechaSeleccionada) ?></h5>
+      <?php if ($hayCobros): ?>
+        <span class="badge badge-soft rounded-pill"><?= count($cobrosFecha) ?> registro(s)</span>
+      <?php endif; ?>
+    </div>
+    <div class="table-responsive">
+      <?php if (!$hayCobros): ?>
+        <div class="p-3">
+          <div class="alert alert-info m-0">No hay cobros pendientes para la fecha <?= h($fechaSeleccionada) ?>.</div>
+        </div>
+      <?php else: ?>
+        <table class="table table-hover table-sm align-middle">
+          <thead class="table-dark">
+            <tr>
+              <th>Fecha</th><th>Usuario</th><th>Motivo</th><th>Tipo Pago</th>
+              <th class="text-end">Total</th><th class="text-end">Efectivo</th>
+              <th class="text-end">Tarjeta</th><th class="text-end">Comisión Esp.</th><th class="text-center">Eliminar</th>
+            </tr>
+          </thead>
+          <tbody>
+            <?php foreach ($cobrosFecha as $p): ?>
+              <tr>
+                <td><?= h($p['fecha_cobro']) ?></td>
+                <td><?= h($p['usuario']) ?></td>
+                <td><?= h($p['motivo']) ?></td>
+                <td><span class="badge text-bg-secondary"><?= h($p['tipo_pago']) ?></span></td>
+                <td class="text-end">$<?= number_format((float)$p['monto_total'], 2) ?></td>
+                <td class="text-end">$<?= number_format((float)$p['monto_efectivo'], 2) ?></td>
+                <td class="text-end">$<?= number_format((float)$p['monto_tarjeta'], 2) ?></td>
+                <td class="text-end">$<?= number_format((float)$p['comision_especial'], 2) ?></td>
+                <td class="text-center">
+                  <a href="eliminar_cobro.php?id=<?= (int)$p['id'] ?>"
+                     class="btn btn-outline-danger btn-sm"
+                     onclick="return confirm('¿Seguro de eliminar este cobro?');">🗑</a>
+                </td>
+              </tr>
+            <?php endforeach; ?>
+          </tbody>
+          <tfoot>
+            <tr class="table-light fw-semibold">
+              <td colspan="4" class="text-end">Totales del día:</td>
+              <td class="text-end">$<?= number_format($totalTot, 2) ?></td>
+              <td class="text-end">$<?= number_format($totalEf, 2) ?></td>
+              <td class="text-end">$<?= number_format($totalTar, 2) ?></td>
+              <td class="text-end">$<?= number_format($totalComEsp, 2) ?></td>
+              <td></td>
+            </tr>
+          </tfoot>
+        </table>
+      <?php endif; ?>
+    </div>
+  </div>
 
-  <h3 class="mt-5">📜 Historial de Cortes</h3>
-  <form method="GET" class="row g-2 mb-3">
-    <div class="col-md-4">
-      <label class="form-label">Desde</label>
-      <input type="date" name="desde" class="form-control" value="<?= h($desde) ?>">
+  <!-- Historial de Cortes -->
+  <div class="card shadow-soft">
+    <div class="card-header">
+      <h3 class="m-0">📜 Historial de Cortes</h3>
     </div>
-    <div class="col-md-4">
-      <label class="form-label">Hasta</label>
-      <input type="date" name="hasta" class="form-control" value="<?= h($hasta) ?>">
-    </div>
-    <div class="col-md-4 d-flex align-items-end">
-      <input type="hidden" name="fecha_operacion" value="<?= h($fechaSeleccionada) ?>">
-      <button class="btn btn-primary w-100">Filtrar</button>
-    </div>
-  </form>
+    <div class="card-body">
+      <form method="GET" class="row g-2 mb-3">
+        <div class="col-md-4">
+          <label class="form-label">Desde</label>
+          <input type="date" name="desde" class="form-control" value="<?= h($desde) ?>">
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">Hasta</label>
+          <input type="date" name="hasta" class="form-control" value="<?= h($hasta) ?>">
+        </div>
+        <div class="col-md-4 d-flex align-items-end">
+          <input type="hidden" name="fecha_operacion" value="<?= h($fechaSeleccionada) ?>">
+          <button class="btn btn-primary w-100"><i class="bi bi-funnel"></i> Filtrar</button>
+        </div>
+      </form>
 
-  <?php if (empty($histCortes)): ?>
-    <div class="alert alert-info">No hay cortes en el rango seleccionado.</div>
-  <?php else: ?>
-    <table class="table table-bordered table-sm">
-      <thead class="table-dark">
-        <tr>
-          <th>ID Corte</th><th>Fecha Corte</th><th>Usuario</th>
-          <th>Efectivo</th><th>Tarjeta</th><th>Total</th><th>Estado</th><th>Monto Depositado</th>
-        </tr>
-      </thead>
-      <tbody>
-        <?php foreach ($histCortes as $c): ?>
-          <tr class="<?= $c['estado']==='Cerrado' ? 'table-success' : 'table-warning' ?>">
-            <td><?= (int)$c['id'] ?></td>
-            <td><?= h($c['fecha_corte']) ?></td>
-            <td><?= h($c['usuario']) ?></td>
-            <td>$<?= number_format((float)$c['total_efectivo'], 2) ?></td>
-            <td>$<?= number_format((float)$c['total_tarjeta'], 2) ?></td>
-            <td>$<?= number_format((float)$c['total_general'], 2) ?></td>
-            <td><?= h($c['estado']) ?></td>
-            <td>$<?= number_format((float)$c['monto_depositado'], 2) ?></td>
-          </tr>
-        <?php endforeach; ?>
-      </tbody>
-    </table>
-  <?php endif; ?>
+      <?php if (empty($histCortes)): ?>
+        <div class="alert alert-info">No hay cortes en el rango seleccionado.</div>
+      <?php else: ?>
+        <div class="table-responsive">
+          <table class="table table-bordered table-sm">
+            <thead class="table-dark">
+              <tr>
+                <th>ID Corte</th><th>Fecha Corte</th><th>Usuario</th>
+                <th class="text-end">Efectivo</th><th class="text-end">Tarjeta</th>
+                <th class="text-end">Total</th><th>Estado</th><th class="text-end">Monto Depositado</th>
+              </tr>
+            </thead>
+            <tbody>
+              <?php foreach ($histCortes as $c): ?>
+                <tr class="<?= $c['estado']==='Cerrado' ? 'table-success' : 'table-warning' ?>">
+                  <td><?= (int)$c['id'] ?></td>
+                  <td><?= h($c['fecha_corte']) ?></td>
+                  <td><?= h($c['usuario']) ?></td>
+                  <td class="text-end">$<?= number_format((float)$c['total_efectivo'], 2) ?></td>
+                  <td class="text-end">$<?= number_format((float)$c['total_tarjeta'], 2) ?></td>
+                  <td class="text-end">$<?= number_format((float)$c['total_general'], 2) ?></td>
+                  <td><?= h($c['estado']) ?></td>
+                  <td class="text-end">$<?= number_format((float)$c['monto_depositado'], 2) ?></td>
+                </tr>
+              <?php endforeach; ?>
+            </tbody>
+          </table>
+        </div>
+      <?php endif; ?>
+    </div>
+  </div>
 
 </div>
+
+<!-- Modal de confirmación -->
+<div class="modal fade" id="confirmModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header border-0">
+        <h5 class="modal-title"><i class="bi bi-shield-check me-1"></i> Confirmar generación de corte</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+      </div>
+      <div class="modal-body">
+        <div class="alert alert-light border mb-3">
+          <div class="d-flex justify-content-between"><span>Fecha de operación:</span><strong id="m-fecha"><?= h($fechaSeleccionada) ?></strong></div>
+          <div class="d-flex justify-content-between"><span>Registros de cobro:</span><strong id="m-count"><?= (int)count($cobrosFecha) ?></strong></div>
+          <hr class="my-2">
+          <div class="d-flex justify-content-between"><span>Efectivo:</span><strong>$<?= number_format($totalEf, 2) ?></strong></div>
+          <div class="d-flex justify-content-between"><span>Tarjeta:</span><strong>$<?= number_format($totalTar, 2) ?></strong></div>
+          <div class="d-flex justify-content-between"><span class="fw-semibold">A depositar (efectivo):</span><strong class="fw-semibold">$<?= number_format($aDepositar, 2) ?></strong></div>
+        </div>
+
+        <?php if (!empty($resumenRubros)): ?>
+          <div class="table-responsive">
+            <table class="table table-sm table-striped align-middle">
+              <thead>
+                <tr>
+                  <th>Rubro</th>
+                  <th class="text-end">Efectivo ($)</th>
+                  <th class="text-end"># Efec.</th>
+                  <th class="text-end">Tarjeta ($)</th>
+                  <th class="text-end"># Tarj.</th>
+                  <th class="text-end">Total ($)</th>
+                  <th class="text-end"># Cobros</th>
+                </tr>
+              </thead>
+              <tbody>
+                <?php foreach ($resumenRubros as $rubro => $dat): ?>
+                  <tr>
+                    <td><?= h($rubro) ?></td>
+                    <td class="text-end">$<?= number_format($dat['ef_tot'], 2) ?></td>
+                    <td class="text-end"><?= (int)$dat['ef_cnt'] ?></td>
+                    <td class="text-end">$<?= number_format($dat['tar_tot'], 2) ?></td>
+                    <td class="text-end"><?= (int)$dat['tar_cnt'] ?></td>
+                    <td class="text-end">$<?= number_format($dat['tot'], 2) ?></td>
+                    <td class="text-end"><?= (int)$dat['cnt'] ?></td>
+                  </tr>
+                <?php endforeach; ?>
+              </tbody>
+              <tfoot>
+                <tr class="table-light fw-semibold">
+                  <td class="text-end">Totales:</td>
+                  <td class="text-end">$<?= number_format($sumEfTot, 2) ?></td>
+                  <td class="text-end"><?= (int)$sumEfCnt ?></td>
+                  <td class="text-end">$<?= number_format($sumTarTot, 2) ?></td>
+                  <td class="text-end"><?= (int)$sumTarCnt ?></td>
+                  <td class="text-end">$<?= number_format($totalTot, 2) ?></td>
+                  <td class="text-end"><?= (int)count($cobrosFecha) ?></td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        <?php endif; ?>
+
+        <!-- Indicador informativo: Comisiones especiales del día -->
+        <div class="mt-2 d-flex justify-content-between align-items-center">
+          <span class="text-muted">Comisiones especiales del día</span>
+          <strong>$<?= number_format($totalComEsp, 2) ?></strong>
+        </div>
+
+        <p class="text-muted mb-0 mt-2"><i class="bi bi-info-circle"></i> El resumen corresponde a los cobros listados en pantalla para la fecha cargada.</p>
+      </div>
+      <div class="modal-footer border-0">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
+        <button type="button" class="btn btn-primary" id="btnConfirmarEnvio">
+          <i class="bi bi-rocket-takeoff"></i> Confirmar y generar
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
+<script>
+  // Actualiza la fecha mostrada en el modal si cambian el input
+  document.getElementById('inpFecha')?.addEventListener('change', function(){
+    const x = document.getElementById('m-fecha');
+    if (x) x.textContent = this.value || x.textContent;
+  });
+
+  // Enviar el formulario tras confirmar en el modal
+  document.getElementById('btnConfirmarEnvio')?.addEventListener('click', function(){
+    const f = document.getElementById('formCorte');
+    if (!f) return;
+    f.removeAttribute('formmethod'); // aseguramos POST
+    f.method = 'POST';
+    f.submit();
+  });
+</script>
 </body>
 </html>
