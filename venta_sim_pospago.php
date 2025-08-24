@@ -81,6 +81,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $mensaje = '<div class="alert alert-danger">Selecciona un plan válido.</div>';
     }
 
+    // 🔒 Validar nombre y teléfono obligatorios (backend)
+    if ($mensaje === '' && ($nombreCliente === '' || $numeroCliente === '')) {
+        $mensaje = '<div class="alert alert-danger">El nombre y el número del cliente son obligatorios.</div>';
+    }
+
+    // 🔒 Validar formato exacto de teléfono a 10 dígitos (solo si hay valor)
+    if ($mensaje === '' && !preg_match('/^\d{10}$/', $numeroCliente)) {
+        $mensaje = '<div class="alert alert-danger">El número del cliente debe tener exactamente 10 dígitos.</div>';
+    }
+
     // Validar SIM física si corresponde (opcional si no eligieron otra)
     if ($mensaje === '' && !$esEsim && $idSim) {
         $sql = "SELECT id, iccid FROM inventario_sims
@@ -462,6 +472,7 @@ $stmt->close();
 </div>
 
 <!-- JS: Bootstrap bundle + jQuery + Select2 -->
+<!-- Nota: Si no cargas Bootstrap JS en navbar.php, descomenta la siguiente línea -->
 <!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
 <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
@@ -498,7 +509,7 @@ $(function(){
   toggleEquipo();
   setPrecio();
 
-  // Validación ligera (no cambia tu backend)
+  // ✅ Validación reforzada (frontend)
   function validar(){
     const errs = [];
     const plan = $plan.val();
@@ -507,12 +518,19 @@ $(function(){
     if (!plan) errs.push('Selecciona un plan.');
     if (isNaN(precio) || precio <= 0) errs.push('El precio/plan es inválido o 0.');
 
-    // Si NO es eSIM, la SIM física es opcional (tu backend lo permite). No forzamos required.
-    // Validar número 10 dígitos (opcional pero útil)
-    const num = ($numero.val() || '').trim();
-    if (num && !/^\d{10}$/.test(num)) errs.push('El número del cliente debe tener 10 dígitos.');
+    // Nombre obligatorio
+    const nom = ($nombre.val() || '').trim();
+    if (!nom) errs.push('El nombre del cliente es obligatorio.');
 
-    // Modalidad con equipo: la relación de venta es opcional según tu backend → no validamos requerido.
+    // Número obligatorio y 10 dígitos
+    const num = ($numero.val() || '').trim();
+    if (!num) {
+      errs.push('El número del cliente es obligatorio.');
+    } else if (!/^\d{10}$/.test(num)) {
+      errs.push('El número del cliente debe tener 10 dígitos.');
+    }
+
+    // Modalidad con equipo: relación opcional según backend (no se fuerza)
     return errs;
   }
 
