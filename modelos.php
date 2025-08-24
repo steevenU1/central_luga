@@ -1,11 +1,12 @@
 <?php
-// modelos.php - Catálogo de modelos (fuente para Compras → Productos)
-// Ahora con formulario en modal para no estorbar la tabla principal.
+// modelos.php — Catálogo de modelos (UI Pro)
+// Fuente para Compras → Productos. Mantiene POST/GET existentes y agrega DataTables + UI moderna.
 
-session_start();
+if (session_status() === PHP_SESSION_NONE) { session_start(); }
 if (!isset($_SESSION['id_usuario'])) { header("Location: index.php"); exit(); }
-include 'db.php';
-include 'navbar.php';
+
+require_once __DIR__.'/db.php';
+require_once __DIR__.'/navbar.php';
 
 $ROL = $_SESSION['rol'] ?? 'Ejecutivo';
 $permEscritura = in_array($ROL, ['Admin','Gerente']);
@@ -155,35 +156,71 @@ $where = count($w) ? "WHERE ".implode(" AND ",$w) : "";
 
 $list = $conn->query("SELECT * FROM catalogo_modelos $where ORDER BY marca, modelo, color, ram, capacidad");
 ?>
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-<style>
-  /* tabla protagonista */
-  .tableFixHead { max-height: 70vh; overflow:auto; }
-  .tableFixHead thead th { position: sticky; top: 0; z-index: 2; background: #fff; }
-  .table-hover tbody tr:hover { background: #f8fafc; }
-  .cell-tight { white-space: nowrap; }
-</style>
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Catálogo · Modelos — Central 2.0</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="/img/favicon.ico?v=7" sizes="any">
 
-<div class="container my-4">
-  <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
-    <h3 class="m-0">Catálogo de Modelos</h3>
-    <div class="btn-group">
+  <!-- Bootstrap & Icons -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet" />
+
+  <!-- DataTables -->
+  <link href="https://cdn.datatables.net/1.13.8/css/dataTables.bootstrap5.min.css" rel="stylesheet">
+  <link href="https://cdn.datatables.net/fixedheader/3.4.0/css/fixedHeader.bootstrap5.min.css" rel="stylesheet">
+  <link href="https://cdn.datatables.net/responsive/2.5.1/css/responsive.bootstrap5.min.css" rel="stylesheet">
+  <link href="https://cdn.datatables.net/buttons/2.4.2/css/buttons.bootstrap5.min.css" rel="stylesheet">
+
+  <style>
+    body{ background:#f6f7fb; }
+    .page-head{ display:flex; align-items:center; justify-content:space-between; gap:16px; margin:18px auto 8px; padding:6px 4px; }
+    .page-title{ font-weight:700; letter-spacing:.2px; margin:0; }
+    .role-chip{ font-size:.8rem; padding:.2rem .55rem; border-radius:999px; background:#eef2ff; color:#3743a5; border:1px solid #d9e0ff; }
+    .card-soft{ border:1px solid #e9ecf1; border-radius:16px; box-shadow:0 2px 12px rgba(16,24,40,.06); }
+    .table-wrap{ background:#fff; border:1px solid #e9ecf1; border-radius:16px; padding:8px 8px 16px; box-shadow:0 2px 10px rgba(16,24,40,.06); }
+    .chip{ display:inline-flex; align-items:center; gap:6px; padding:2px 10px; border-radius:999px; background:#f1f5f9; color:#0f172a; font-size:.8rem; border:1px solid #e2e8f0; }
+    .cell-tight{ white-space:nowrap; }
+    .name-secondary{ font-size:.8rem; color:#6b7280; }
+    .sku{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size:.85rem; }
+  </style>
+</head>
+<body>
+<div class="container-fluid px-3 px-lg-4">
+
+  <!-- Encabezado -->
+  <div class="page-head">
+    <div>
+      <h2 class="page-title">📚 Catálogo de Modelos</h2>
+      <div class="mt-1"><span class="role-chip"><?= esc($ROL) ?></span></div>
+    </div>
+    <div class="d-flex gap-2">
       <?php if ($permEscritura): ?>
-        <button class="btn btn-success btn-sm" data-bs-toggle="modal" data-bs-target="#mdlModelo" id="btnNuevo">
-          ➕ Nuevo
+        <button class="btn btn-success btn-sm rounded-pill" data-bs-toggle="modal" data-bs-target="#mdlModelo" id="btnNuevo">
+          <i class="bi bi-plus-circle me-1"></i>Nuevo
         </button>
-        <a href="modelos_carga.php" class="btn btn-outline-primary btn-sm">Carga masiva CSV</a>
+        <a href="modelos_carga.php" class="btn btn-outline-primary btn-sm rounded-pill">
+          <i class="bi bi-upload me-1"></i>Carga masiva CSV
+        </a>
       <?php endif; ?>
-      <a href="compras_nueva.php" class="btn btn-outline-secondary btn-sm">Ir a compras</a>
+      <a href="compras_nueva.php" class="btn btn-light btn-sm rounded-pill border">
+        <i class="bi bi-bag-plus me-1"></i>Ir a compras
+      </a>
     </div>
   </div>
 
-  <?= $mensaje ?>
-
-  <div class="card shadow-sm">
-    <div class="card-header">
+  <!-- Filtros -->
+  <div class="card card-soft mb-3">
+    <div class="card-header bg-white d-flex justify-content-between align-items-center">
+      <span class="fw-semibold"><i class="bi bi-sliders me-1"></i>Filtros</span>
+      <button class="btn btn-sm btn-outline-secondary rounded-pill" type="button" data-bs-toggle="collapse" data-bs-target="#filtrosBody">Mostrar/Ocultar</button>
+    </div>
+    <div id="filtrosBody" class="card-body collapse show">
       <form class="row g-2 align-items-center">
         <div class="col-md-3">
+          <label class="form-label">Estatus</label>
           <select name="estado" class="form-select form-select-sm" onchange="this.form.submit()">
             <option value="activos"   <?= $estado==='activos'?'selected':'' ?>>Activos</option>
             <option value="inactivos" <?= $estado==='inactivos'?'selected':'' ?>>Inactivos</option>
@@ -191,45 +228,78 @@ $list = $conn->query("SELECT * FROM catalogo_modelos $where ORDER BY marca, mode
           </select>
         </div>
         <div class="col-md-7">
-          <input name="q" class="form-control form-control-sm" placeholder="Buscar marca, modelo, código, compañía, financiera u operador"
-                 value="<?= esc($q) ?>">
+          <label class="form-label">Búsqueda</label>
+          <input name="q" class="form-control form-control-sm" placeholder="Marca, modelo, código, compañía, financiera u operador" value="<?= esc($q) ?>">
         </div>
-        <div class="col-md-2"><button class="btn btn-primary btn-sm w-100">Buscar</button></div>
+        <div class="col-md-2 d-flex align-items-end">
+          <button class="btn btn-outline-primary btn-sm w-100"><i class="bi bi-search me-1"></i>Buscar</button>
+        </div>
       </form>
     </div>
-    <div class="card-body p-0">
-      <div class="table-responsive tableFixHead">
-        <table class="table table-sm table-hover align-middle m-0">
-          <thead class="table-light">
-            <tr>
-              <th class="cell-tight">Marca</th>
-              <th>Modelo</th>
-              <th class="cell-tight">Color</th>
-              <th class="cell-tight">RAM</th>
-              <th class="cell-tight">Cap.</th>
-              <th class="cell-tight">Código</th>
-              <th class="cell-tight">Tipo</th>
-              <th class="text-end cell-tight">$ Lista</th>
-              <th class="text-center cell-tight">Estatus</th>
-              <th class="text-end cell-tight">Acciones</th>
-            </tr>
-          </thead>
-          <tbody>
+  </div>
+
+  <?= $mensaje ?>
+
+  <!-- Tabla -->
+  <div class="table-wrap">
+    <div class="d-flex justify-content-between align-items-center p-2">
+      <h6 class="m-0">Modelos</h6>
+      <div class="d-flex gap-2">
+        <button id="btnExportExcel" class="btn btn-success btn-sm rounded-pill"><i class="bi bi-file-earmark-excel me-1"></i>Exportar Excel</button>
+        <button id="btnExportCSV" class="btn btn-light btn-sm rounded-pill border"><i class="bi bi-filetype-csv me-1"></i>CSV</button>
+        <button id="btnColVis" class="btn btn-light btn-sm rounded-pill border"><i class="bi bi-view-list me-1"></i>Columnas</button>
+      </div>
+    </div>
+
+    <div class="table-responsive px-2 pb-2">
+      <table id="tablaModelos" class="table table-hover align-middle nowrap" style="width:100%;">
+        <thead class="table-light">
+          <tr>
+            <th class="cell-tight">Marca</th>
+            <th>Modelo</th>
+            <th class="cell-tight">Color</th>
+            <th class="cell-tight">RAM</th>
+            <th class="cell-tight">Cap.</th>
+            <th class="cell-tight">Código</th>
+            <th class="cell-tight">Tipo</th>
+            <th class="cell-tight">Gama</th>
+            <th class="text-end cell-tight">$ Lista</th>
+            <th class="cell-tight">Compañía</th>
+            <th class="cell-tight">Financiera</th>
+            <th class="text-center cell-tight">Estatus</th>
+            <th class="text-end cell-tight">Acciones</th>
+          </tr>
+        </thead>
+        <tbody>
           <?php if($list && $list->num_rows): while($r=$list->fetch_assoc()): ?>
             <tr>
               <td class="cell-tight"><?= esc($r['marca']) ?></td>
               <td style="min-width:220px">
-                <div><?= esc($r['modelo']) ?></div>
+                <div class="fw-semibold"><?= esc($r['modelo']) ?></div>
                 <?php if(!empty($r['nombre_comercial'])): ?>
-                  <div class="small text-muted"><?= esc($r['nombre_comercial']) ?></div>
+                  <div class="name-secondary"><?= esc($r['nombre_comercial']) ?></div>
                 <?php endif; ?>
               </td>
               <td class="cell-tight"><?= esc($r['color']) ?></td>
               <td class="cell-tight"><?= esc($r['ram']) ?></td>
               <td class="cell-tight"><?= esc($r['capacidad']) ?></td>
-              <td class="cell-tight"><?= esc($r['codigo_producto']) ?></td>
-              <td class="cell-tight"><?= esc($r['tipo_producto'] ?? '') ?></td>
+              <td class="cell-tight">
+                <?php if(!empty($r['codigo_producto'])): ?>
+                  <span class="sku"><?= esc($r['codigo_producto']) ?></span>
+                  <button class="btn btn-link btn-sm py-0 px-1" title="Copiar" onclick="copyText('<?= esc($r['codigo_producto']) ?>');return false;">
+                    <i class="bi bi-clipboard"></i>
+                  </button>
+                <?php endif; ?>
+              </td>
+              <td class="cell-tight">
+                <?php if (!empty($r['tipo_producto'])): ?>
+                  <span class="chip"><i class="bi bi-tag"></i>&nbsp;<?= esc($r['tipo_producto']) ?></span>
+                <?php endif; ?>
+              </td>
+              <td class="cell-tight"><?= esc($r['gama'] ?? '') ?></td>
               <td class="text-end cell-tight"><?= $r['precio_lista']!==null ? number_format((float)$r['precio_lista'],2) : '' ?></td>
+              <td class="cell-tight"><?= esc($r['compania'] ?? '') ?></td>
+              <td class="cell-tight"><?= esc($r['financiera'] ?? '') ?></td>
               <td class="text-center cell-tight">
                 <?= ((int)$r['activo'] === 1)
                       ? '<span class="badge bg-success">Activo</span>'
@@ -237,24 +307,24 @@ $list = $conn->query("SELECT * FROM catalogo_modelos $where ORDER BY marca, mode
               </td>
               <td class="text-end cell-tight">
                 <div class="btn-group">
-                  <a class="btn btn-outline-primary btn-sm"
-                     href="modelos.php?editar=<?= (int)$r['id'] ?>">Editar</a>
-                  <?php if($permEscritura): ?>
-                  <a class="btn btn-outline-<?= ((int)$r['activo']===1)?'danger':'success' ?> btn-sm"
-                     href="modelos.php?accion=toggle&id=<?= (int)$r['id'] ?>"
-                     onclick="return confirm('¿Seguro que deseas <?= ((int)$r['activo']===1)?'inactivar':'activar' ?> este modelo?');">
-                     <?= ((int)$r['activo']===1)?'Inactivar':'Activar' ?>
+                  <a class="btn btn-outline-primary btn-sm" href="modelos.php?editar=<?= (int)$r['id'] ?>">
+                    <i class="bi bi-pencil-square"></i> Editar
                   </a>
+                  <?php if($permEscritura): ?>
+                    <a class="btn btn-outline-<?= ((int)$r['activo']===1)?'danger':'success' ?> btn-sm"
+                       href="modelos.php?accion=toggle&id=<?= (int)$r['id'] ?>"
+                       onclick="return confirm('¿Seguro que deseas <?= ((int)$r['activo']===1)?'inactivar':'activar' ?> este modelo?');">
+                       <?= ((int)$r['activo']===1)?'<i class="bi bi-slash-circle"></i> Inactivar':'<i class="bi bi-check-circle"></i> Activar' ?>
+                    </a>
                   <?php endif; ?>
                 </div>
               </td>
             </tr>
           <?php endwhile; else: ?>
-            <tr><td colspan="10" class="text-center text-muted py-4">Sin modelos</td></tr>
+            <tr><td colspan="13" class="text-center text-muted py-4">Sin modelos</td></tr>
           <?php endif; ?>
-          </tbody>
-        </table>
-      </div>
+        </tbody>
+      </table>
     </div>
   </div>
 </div>
@@ -401,15 +471,75 @@ $list = $conn->query("SELECT * FROM catalogo_modelos $where ORDER BY marca, mode
   </div>
 </div>
 
-<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script> -->
-<script>
-  (function () {
-    try { document.title = 'Catálogo · Equipos — Central2.0'; } catch(e) {}
+<!-- JS -->
+<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
 
-    // Si venimos con ?editar=ID o hubo errores/éxitos, abre el modal automáticamente
+<!-- DataTables core + addons -->
+<script src="https://cdn.datatables.net/1.13.8/js/jquery.dataTables.min.js"></script>
+script src="https://cdn.datatables.net/1.13.8/js/dataTables.bootstrap5.min.js"></script>
+<script src="https://cdn.datatables.net/fixedheader/3.4.0/js/dataTables.fixedHeader.min.js"></script>
+<script src="https://cdn.datatables.net/responsive/2.5.1/js/dataTables.responsive.min.js"></script>
+<script src="https://cdn.datatables.net/responsive/2.5.1/js/responsive.bootstrap5.min.js"></script>
+<script src="https://cdn.datatables.net/buttons/2.4.2/js/dataTables.buttons.min.js"></script>
+<script src="https://cdn.datatables.net/buttons/2.4.2/js/buttons.bootstrap5.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdn.datatables.net/buttons/2.4.2/js/buttons.html5.min.js"></script>
+
+<script>
+  // Título
+  try { document.title = 'Catálogo · Modelos — Central 2.0'; } catch(e){}
+
+  // Copiar al portapapeles
+  function copyText(txt) {
+    navigator.clipboard?.writeText(txt).then(()=> {
+      // toast ligero
+      const el = document.createElement('div');
+      el.textContent = 'Copiado: ' + txt;
+      el.className = 'position-fixed top-0 start-50 translate-middle-x bg-dark text-white px-3 py-1 rounded-3 mt-2';
+      el.style.zIndex = 9999;
+      document.body.appendChild(el);
+      setTimeout(()=>el.remove(), 1500);
+    });
+  }
+  window.copyText = copyText;
+
+  // DataTable
+  let dt = null;
+  $(function(){
+    dt = $('#tablaModelos').DataTable({
+      pageLength: 25,
+      order: [[ 0, 'asc' ], [1, 'asc'] ],
+      fixedHeader: true,
+      responsive: true,
+      language: { url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/es-ES.json' },
+      dom: "<'row align-items-center mb-2'<'col-sm-12 col-md-6'B><'col-sm-12 col-md-6'f>>" +
+           "tr" +
+           "<'row mt-2'<'col-sm-12 col-md-5'i><'col-sm-12 col-md-7'p>>",
+      buttons: [
+        { extend: 'csvHtml5',   className: 'btn btn-light btn-sm rounded-pill border buttons-csv',   text: '<i class="bi bi-filetype-csv me-1"></i>CSV' },
+        { extend: 'excelHtml5', className: 'btn btn-light btn-sm rounded-pill border buttons-excel', text: '<i class="bi bi-file-earmark-excel me-1"></i>Excel' },
+        { extend: 'colvis',     className: 'btn btn-light btn-sm rounded-pill border buttons-colvis', text: '<i class="bi bi-view-list me-1"></i>Columnas' }
+      ],
+      columnDefs: [
+        { targets: [8], render: $.fn.dataTable.render.number('.', ',', 2, '$') },
+        { targets: [0,2,3,4,5,6,7,8,9,10,11,12], className: 'cell-tight' }
+      ]
+    });
+
+    // Botones externos (toolbar)
+    $('#btnExportExcel').on('click', ()=> dt.button('.buttons-excel').trigger());
+    $('#btnExportCSV').on('click',   ()=> dt.button('.buttons-csv').trigger());
+    $('#btnColVis').on('click',      ()=> dt.button('.buttons-colvis').trigger());
+  });
+
+  // Auto abrir modal si venimos con editar o tras POST
+  (function () {
     <?php if ($permEscritura && ($edit || ($_SERVER['REQUEST_METHOD']==='POST'))): ?>
       const mdl = new bootstrap.Modal(document.getElementById('mdlModelo'));
       mdl.show();
     <?php endif; ?>
   })();
 </script>
+</body>
+</html>

@@ -8,7 +8,7 @@ if (!isset($_SESSION['id_usuario']) || $_SESSION['rol'] != 'Admin') {
 include 'db.php';
 
 /* ========================
-   FUNCIONES AUXILIARES
+   FUNCIONES AUXILIARES (UI de semana)
 ======================== */
 function obtenerSemanaPorIndice($offset = 0) {
     $hoy = new DateTime();
@@ -65,29 +65,30 @@ if ($resultHist->num_rows > 0) {
     while ($row = $resultHist->fetch_assoc()) {
         $totalPago = $row['sueldo'] + $row['comision_total'];
         $datos[] = [
-            'gerente' => $row['gerente'],
-            'zona' => $row['zona'],
-            'sueldo' => $row['sueldo'],
-            'com_equipos' => $row['comision_equipos'],
-            'com_sims' => $row['comision_sims'],
-            'com_pospago' => $row['comision_pospago'],
-            'com_total' => $row['comision_total'],
-            'total_pago' => $totalPago
+            'gerente'      => $row['gerente'],
+            'zona'         => $row['zona'],
+            'sueldo'       => (float)$row['sueldo'],
+            'cumplimiento' => (float)$row['porcentaje_cumplimiento'], // ← usar valor histórico
+            'com_equipos'  => (float)$row['comision_equipos'],
+            'com_sims'     => (float)$row['comision_sims'],
+            'com_pospago'  => (float)$row['comision_pospago'],
+            'com_total'    => (float)$row['comision_total'],
+            'total_pago'   => (float)$totalPago
         ];
     }
 }
 
 /* ========================
-   SI NO EXISTE REGISTRO → CALCULAR AUTOMÁTICO
+   SI NO EXISTE REGISTRO → CALCULAR AUTOMÁTICO (misma lógica)
 ======================== */
 if ($resultHist->num_rows == 0) {
     while ($g = $gerentes->fetch_assoc()) {
-        $idGerente = $g['id'];
-        $zona = $g['zona'];
-        $sueldo = (float)$g['sueldo'];
+        $idGerente     = $g['id'];
+        $zona          = $g['zona'];
+        $sueldo        = (float)$g['sueldo'];
         $nombreGerente = $g['nombre'];
 
-        // 1️⃣ Calcular ventas de equipos
+        // 1️⃣ Equipos
         $stmtEq = $conn->prepare("
             SELECT COUNT(dv.id) AS total_equipos, IFNULL(SUM(v.precio_venta),0) AS monto
             FROM detalle_venta dv
@@ -103,7 +104,7 @@ if ($resultHist->num_rows == 0) {
         $totalEquipos = (int)$rowEq['total_equipos'];
         $montoEquipos = (float)$rowEq['monto'];
 
-        // 2️⃣ Calcular ventas SIMs
+        // 2️⃣ SIMs
         $stmtSims = $conn->prepare("
             SELECT COUNT(dvs.id) AS total_sims, IFNULL(SUM(vs.precio_total),0) AS monto
             FROM detalle_venta_sims dvs
@@ -116,10 +117,10 @@ if ($resultHist->num_rows == 0) {
         $rowSims = $stmtSims->get_result()->fetch_assoc();
         $stmtSims->close();
 
-        $totalSims = (int)$rowSims['total_sims'];
-        $montoSims = (float)$rowSims['monto'];
+        $totalSims  = (int)$rowSims['total_sims'];
+        $montoSims  = (float)$rowSims['monto'];
 
-        // 3️⃣ Cuota total de la zona
+        // 3️⃣ Cuota total zona
         $stmtSucursales = $conn->prepare("SELECT id FROM sucursales WHERE zona = ?");
         $stmtSucursales->bind_param("s", $zona);
         $stmtSucursales->execute();
@@ -144,22 +145,22 @@ if ($resultHist->num_rows == 0) {
         $stmtSucursales->close();
 
         // 4️⃣ % Cumplimiento
-        $ventasZona = $montoEquipos + $montoSims;
+        $ventasZona   = $montoEquipos + $montoSims;
         $cumplimiento = $cuotaZona > 0 ? ($ventasZona / $cuotaZona) * 100 : 0;
 
-        // 5️⃣ Comisión según esquema
+        // 5️⃣ Comisión (mismo esquema)
         if ($cumplimiento < 80) {
             $comEquipos = $totalEquipos * 10;
-            $comSims = 0;
+            $comSims    = 0;
         } elseif ($cumplimiento < 100) {
             $comEquipos = $totalEquipos * 10;
-            $comSims = $totalSims * 5;
+            $comSims    = $totalSims * 5;
         } else {
             $comEquipos = $totalEquipos * 20;
-            $comSims = $totalSims * 10;
+            $comSims    = $totalSims * 10;
         }
 
-        // 6️⃣ Comisión pospago
+        // 6️⃣ Pospago
         $comPospago = 0;
         $stmtPos = $conn->prepare("
             SELECT vs.precio_total, vs.modalidad
@@ -172,25 +173,21 @@ if ($resultHist->num_rows == 0) {
         $stmtPos->bind_param("sss", $zona, $fechaInicio, $fechaFin);
         $stmtPos->execute();
         $resPos = $stmtPos->get_result();
-
         while ($row = $resPos->fetch_assoc()) {
-            $plan = (int)$row['precio_total'];
+            $plan      = (int)$row['precio_total'];
             $conEquipo = ($row['modalidad'] === 'Con equipo');
-
-            if ($plan >= 339) $comPospago += $conEquipo ? 30 : 25;
+            if     ($plan >= 339) $comPospago += $conEquipo ? 30 : 25;
             elseif ($plan >= 289) $comPospago += $conEquipo ? 25 : 20;
             elseif ($plan >= 249) $comPospago += $conEquipo ? 20 : 15;
             elseif ($plan >= 199) $comPospago += $conEquipo ? 15 : 10;
         }
         $stmtPos->close();
 
-        $comTotal = $comEquipos + $comSims + $comPospago;
+        $comTotal  = $comEquipos + $comSims + $comPospago;
         $totalPago = $sueldo + $comTotal;
+        $comModems = 0.0; // por ahora 0
 
-        // 🔹 Variable para modems (por ahora 0)
-        $comModems = 0.0;
-
-        // 🔹 Guardar en tabla histórica
+        // Guardar histórico (igual que antes)
         $stmtInsert = $conn->prepare("
             INSERT INTO comisiones_gerentes_zona
             (id_gerente, fecha_inicio, zona, cuota_zona, ventas_zona, porcentaje_cumplimiento,
@@ -206,121 +203,282 @@ if ($resultHist->num_rows == 0) {
         $stmtInsert->close();
 
         $datos[] = [
-            'gerente' => $nombreGerente,
-            'zona' => $zona,
-            'sueldo' => $sueldo,
-            'com_equipos' => $comEquipos,
-            'com_sims' => $comSims,
-            'com_pospago' => $comPospago,
-            'com_total' => $comTotal,
-            'total_pago' => $totalPago
+            'gerente'      => $nombreGerente,
+            'zona'         => $zona,
+            'sueldo'       => $sueldo,
+            'cumplimiento' => $cumplimiento,           // ← añadimos para UI
+            'com_equipos'  => $comEquipos,
+            'com_sims'     => $comSims,
+            'com_pospago'  => $comPospago,
+            'com_total'    => $comTotal,
+            'total_pago'   => $totalPago
         ];
     }
 }
 
-$total_sueldos = array_sum(array_column($datos, 'sueldo'));
-$total_com_equipos = array_sum(array_column($datos, 'com_equipos'));
-$total_com_sims = array_sum(array_column($datos, 'com_sims'));
-$total_com_pospago = array_sum(array_column($datos, 'com_pospago'));
-$total_comisiones = array_sum(array_column($datos, 'com_total'));
-$total_global = array_sum(array_column($datos, 'total_pago'));
+/* ========================
+   Totales & promedio cumplimiento
+======================== */
+$total_sueldos       = array_sum(array_column($datos, 'sueldo'));
+$total_com_equipos   = array_sum(array_column($datos, 'com_equipos'));
+$total_com_sims      = array_sum(array_column($datos, 'com_sims'));
+$total_com_pospago   = array_sum(array_column($datos, 'com_pospago'));
+$total_comisiones    = array_sum(array_column($datos, 'com_total'));
+$total_global        = array_sum(array_column($datos, 'total_pago'));
+$prom_cumplimiento   = count($datos) ? array_sum(array_map(fn($d)=> (float)$d['cumplimiento'], $datos)) / count($datos) : 0.0;
+
+// Opciones de filtro zona (UI)
+$zonas = [];
+foreach ($datos as $d) { $zonas[$d['zona']] = true; }
+ksort($zonas, SORT_NATURAL | SORT_FLAG_CASE);
 ?>
 <!DOCTYPE html>
 <html lang="es">
 <head>
-    <meta charset="UTF-8">
-    <title>Nómina Gerentes de Zona</title>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+  <meta charset="UTF-8">
+  <title>Nómina Gerentes de Zona</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css">
+  <style>
+    :root{ --card-bg:#fff; --chip:#f1f5f9; }
+    body{ background:#f7f7fb; }
+    .page-header{ display:flex; gap:1rem; align-items:center; justify-content:space-between; flex-wrap:wrap; }
+    .page-title{ display:flex; gap:.75rem; align-items:center; }
+    .page-title .emoji{ font-size:1.6rem; }
+    .card-soft{ background:var(--card-bg); border:1px solid #eef2f7; border-radius:1rem; box-shadow:0 6px 18px rgba(16,24,40,.06); }
+    .summary-cards .card-soft{ min-width:220px; }
+    .chip{ display:inline-flex; gap:.5rem; align-items:center; background:var(--chip); border-radius:999px; padding:.4rem .7rem; font-size:.9rem; }
+    .controls-right{ display:flex; gap:.5rem; flex-wrap:wrap; }
+    .table thead th{ position:sticky; top:0; z-index:5; background:#fff; border-bottom:1px solid #e5e7eb; }
+    .th-sort{ cursor:pointer; white-space:nowrap; }
+    /* Badges de % cumplimiento */
+    .badge-cump-low{   background:#fee2e2; color:#991b1b; border:1px solid #fecaca; }
+    .badge-cump-mid{   background:#fff7ed; color:#9a3412; border:1px solid #fed7aa; }
+    .badge-cump-high{  background:#ecfdf5; color:#065f46; border:1px solid #a7f3d0; }
+    @media print{
+      .no-print{ display:none !important; }
+      body{ background:#fff; }
+      .card-soft{ border:0; box-shadow:none; }
+      .table thead th{ position:static; }
+    }
+  </style>
 </head>
-<body class="bg-light">
+<body>
 
 <?php include 'navbar.php'; ?>
 
-<div class="container mt-4">
-    <h2>Reporte Nómina - Gerentes de Zona</h2>
-    <p class="text-muted">Semana: <?= $fechaInicio ?> al <?= $fechaFin ?></p>
-
-    <?php if (!empty($_GET['msg'])): ?>
-    <div class="alert alert-success alert-dismissible fade show" role="alert">
-        <?= htmlspecialchars($_GET['msg']) ?>
-        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+<div class="container py-4">
+  <!-- Header -->
+  <div class="page-header mb-3">
+    <div class="page-title">
+      <span class="emoji">🧭</span>
+      <div>
+        <h3 class="mb-0">Nómina — Gerentes de Zona</h3>
+        <div class="text-muted small">Semana del <strong><?= $inicioSemana->format('d/m/Y') ?></strong> al <strong><?= $finSemana->format('d/m/Y') ?></strong></div>
+      </div>
     </div>
-<?php endif; ?>
 
-    <!-- Selector de semana -->
-    <form method="GET" class="mb-4 card card-body shadow-sm">
-        <div class="row g-3 align-items-end">
-            <div class="col-md-3">
-                <label for="semana">Seleccionar Semana</label>
-                <select name="semana" id="semana" class="form-select" onchange="this.form.submit()">
-                    <?php for($i=0;$i<8;$i++):
-                        list($ini,$fin) = obtenerSemanaPorIndice($i);
-                        $txt = "Del {$ini->format('d/m/Y')} al {$fin->format('d/m/Y')}";
-                    ?>
-                    <option value="<?= $i ?>" <?= $i==$semanaSeleccionada?'selected':'' ?>>
-                        <?= $txt ?>
-                    </option>
-                    <?php endfor; ?>
-                </select>
-            </div>
+    <div class="controls-right no-print">
+      <form method="GET" class="d-flex align-items-center gap-2">
+        <label class="form-label mb-0 small text-muted">Semana</label>
+        <select name="semana" class="form-select form-select-sm w-auto" onchange="this.form.submit()">
+          <?php for($i=0;$i<8;$i++):
+            list($ini,$fin) = obtenerSemanaPorIndice($i);
+            $txt = "Del {$ini->format('d/m/Y')} al {$fin->format('d/m/Y')}";
+          ?>
+          <option value="<?= $i ?>" <?= $i==$semanaSeleccionada?'selected':'' ?>><?= $txt ?></option>
+          <?php endfor; ?>
+        </select>
+        <button class="btn btn-outline-secondary btn-sm" type="button" onclick="window.print()">
+          <i class="bi bi-printer me-1"></i> Imprimir
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Summary cards -->
+  <div class="summary-cards d-flex flex-wrap gap-3 mb-3">
+    <div class="card-soft p-3">
+      <div class="text-muted small mb-1">Gerentes</div>
+      <div class="h4 mb-0"><?= count($datos) ?></div>
+    </div>
+    <div class="card-soft p-3">
+      <div class="text-muted small mb-1">Promedio Cumplimiento</div>
+      <div class="h5 mb-0"><?= number_format($prom_cumplimiento,1) ?>%</div>
+    </div>
+    <div class="card-soft p-3">
+      <div class="text-muted small mb-1">Total Sueldos</div>
+      <div class="h5 mb-0">$<?= number_format($total_sueldos,2) ?></div>
+    </div>
+    <div class="card-soft p-3">
+      <div class="text-muted small mb-1">Total Comisiones</div>
+      <div class="h5 mb-0">$<?= number_format($total_comisiones,2) ?></div>
+    </div>
+    <div class="card-soft p-3">
+      <div class="text-muted small mb-1">Total a Pagar</div>
+      <div class="h5 mb-0">$<?= number_format($total_global,2) ?></div>
+    </div>
+
+    <div class="card-soft p-3 no-print" style="flex:1">
+      <div class="row g-2 align-items-end">
+        <div class="col-12 col-md-6">
+          <label class="form-label mb-1 small text-muted">Filtrar por zona</label>
+          <select id="fZona" class="form-select form-select-sm">
+            <option value="">Todas</option>
+            <?php foreach(array_keys($zonas) as $z): ?>
+              <option value="<?= htmlspecialchars($z, ENT_QUOTES, 'UTF-8') ?>"><?= htmlspecialchars($z, ENT_QUOTES, 'UTF-8') ?></option>
+            <?php endforeach; ?>
+          </select>
         </div>
-    </form>
+        <div class="col-12 col-md-6">
+          <label class="form-label mb-1 small text-muted">Buscar</label>
+          <input id="fSearch" type="search" class="form-control form-control-sm" placeholder="Gerente, zona…">
+        </div>
+        <div class="col-12">
+          <div class="d-flex gap-2">
+            <button id="btnExport" class="btn btn-outline-primary btn-sm"><i class="bi bi-filetype-csv me-1"></i> Exportar CSV</button>
+            <form action="recalcular_comisiones_gerentes_zona.php" method="POST" class="d-inline">
+              <input type="hidden" name="fecha_inicio" value="<?= $fechaInicio ?>">
+              <input type="hidden" name="semana" value="<?= $semanaSeleccionada ?>">
+              <button type="submit" class="btn btn-warning btn-sm"
+                onclick="return confirm('¿Seguro que deseas recalcular las comisiones de esta semana?');">
+                <i class="bi bi-arrow-repeat me-1"></i> Recalcular semana
+              </button>
+            </form>
+            <a href="exportar_nomina_gerentes_excel.php?semana=<?= $fechaInicio ?>" class="btn btn-success btn-sm">
+              <i class="bi bi-file-earmark-excel me-1"></i> Exportar Excel
+            </a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 
-    <table class="table table-striped table-bordered text-center align-middle">
-        <thead class="table-dark">
-            <tr>
-                <th>Gerente</th>
-                <th>Zona</th>
-                <th>Sueldo Base</th>
-                <th>Com. Equipos</th>
-                <th>Com. SIMs</th>
-                <th>Com. Pospago</th>
-                <th>Total Comisión</th>
-                <th>Total a Pagar</th>
-            </tr>
+  <!-- Tabla -->
+  <div class="card-soft p-0">
+    <div class="table-responsive">
+      <table id="tablaZona" class="table table-hover align-middle mb-0">
+        <thead>
+          <tr>
+            <th class="th-sort" data-key="gerente">Gerente <i class="bi bi-arrow-down-up ms-1"></i></th>
+            <th class="th-sort" data-key="zona">Zona <i class="bi bi-arrow-down-up ms-1"></i></th>
+            <th class="text-center th-sort" data-key="cump">Cumplimiento <i class="bi bi-arrow-down-up ms-1"></i></th>
+            <th class="text-end th-sort" data-key="sueldo">Sueldo Base <i class="bi bi-arrow-down-up ms-1"></i></th>
+            <th class="text-end th-sort" data-key="eq">Com. Equipos <i class="bi bi-arrow-down-up ms-1"></i></th>
+            <th class="text-end th-sort" data-key="sims">Com. SIMs <i class="bi bi-arrow-down-up ms-1"></i></th>
+            <th class="text-end th-sort" data-key="pos">Com. Pospago <i class="bi bi-arrow-down-up ms-1"></i></th>
+            <th class="text-end th-sort" data-key="com">Total Comisión <i class="bi bi-arrow-down-up ms-1"></i></th>
+            <th class="text-end th-sort" data-key="tot">Total a Pagar <i class="bi bi-arrow-down-up ms-1"></i></th>
+          </tr>
         </thead>
         <tbody>
-            <?php foreach($datos as $d): ?>
-            <tr>
-                <td><?= $d['gerente'] ?></td>
-                <td><?= $d['zona'] ?></td>
-                <td>$<?= number_format($d['sueldo'],2) ?></td>
-                <td>$<?= number_format($d['com_equipos'],2) ?></td>
-                <td>$<?= number_format($d['com_sims'],2) ?></td>
-                <td>$<?= number_format($d['com_pospago'],2) ?></td>
-                <td>$<?= number_format($d['com_total'],2) ?></td>
-                <td><strong>$<?= number_format($d['total_pago'],2) ?></strong></td>
+          <?php foreach($datos as $d): 
+            $cump = (float)$d['cumplimiento'];
+            $cl   = $cump >= 100 ? 'badge-cump-high' : ($cump >= 80 ? 'badge-cump-mid' : 'badge-cump-low');
+          ?>
+            <tr
+              data-gerente="<?= htmlspecialchars($d['gerente'], ENT_QUOTES, 'UTF-8') ?>"
+              data-zona="<?= htmlspecialchars($d['zona'], ENT_QUOTES, 'UTF-8') ?>"
+              data-cump="<?= $cump ?>"
+              data-sueldo="<?= (float)$d['sueldo'] ?>"
+              data-eq="<?= (float)$d['com_equipos'] ?>"
+              data-sims="<?= (float)$d['com_sims'] ?>"
+              data-pos="<?= (float)$d['com_pospago'] ?>"
+              data-com="<?= (float)$d['com_total'] ?>"
+              data-tot="<?= (float)$d['total_pago'] ?>"
+            >
+              <td class="fw-semibold"><?= htmlspecialchars($d['gerente'], ENT_QUOTES, 'UTF-8') ?></td>
+              <td><span class="chip"><?= htmlspecialchars($d['zona'], ENT_QUOTES, 'UTF-8') ?></span></td>
+              <td class="text-center">
+                <span class="badge rounded-pill <?= $cl ?>"><?= number_format($cump,1) ?>%</span>
+              </td>
+              <td class="text-end">$<?= number_format($d['sueldo'],2) ?></td>
+              <td class="text-end">$<?= number_format($d['com_equipos'],2) ?></td>
+              <td class="text-end">$<?= number_format($d['com_sims'],2) ?></td>
+              <td class="text-end">$<?= number_format($d['com_pospago'],2) ?></td>
+              <td class="text-end">$<?= number_format($d['com_total'],2) ?></td>
+              <td class="text-end fw-semibold">$<?= number_format($d['total_pago'],2) ?></td>
             </tr>
-            <?php endforeach; ?>
+          <?php endforeach; ?>
         </tbody>
-        <tfoot class="table-secondary">
-            <tr>
-                <th colspan="2">Totales</th>
-                <th>$<?= number_format($total_sueldos,2) ?></th>
-                <th>$<?= number_format($total_com_equipos,2) ?></th>
-                <th>$<?= number_format($total_com_sims,2) ?></th>
-                <th>$<?= number_format($total_com_pospago,2) ?></th>
-                <th>$<?= number_format($total_comisiones,2) ?></th>
-                <th>$<?= number_format($total_global,2) ?></th>
-            </tr>
+        <tfoot class="table-light">
+          <tr>
+            <th colspan="3">Totales</th>
+            <th class="text-end">$<?= number_format($total_sueldos,2) ?></th>
+            <th class="text-end">$<?= number_format($total_com_equipos,2) ?></th>
+            <th class="text-end">$<?= number_format($total_com_sims,2) ?></th>
+            <th class="text-end">$<?= number_format($total_com_pospago,2) ?></th>
+            <th class="text-end">$<?= number_format($total_comisiones,2) ?></th>
+            <th class="text-end">$<?= number_format($total_global,2) ?></th>
+          </tr>
         </tfoot>
-    </table>
+      </table>
+    </div>
+  </div>
 
-    <div class="text-end mb-3">
-    <form action="recalcular_comisiones_gerentes_zona.php" method="POST" class="d-inline">
-        <input type="hidden" name="fecha_inicio" value="<?= $fechaInicio ?>">
-        <input type="hidden" name="semana" value="<?= $semanaSeleccionada ?>">
-        <button type="submit" class="btn btn-warning"
-            onclick="return confirm('¿Seguro que deseas recalcular las comisiones de esta semana?\nEsto reemplazará los valores actuales con los más recientes.');">
-            🔄 Recalcular Semana
-        </button>
-    </form>
-
-    <a href="exportar_nomina_gerentes_excel.php?semana=<?= $fechaInicio ?>" class="btn btn-success ms-2">
-        📄 Exportar a Excel
-    </a>
-</div>
+  <div class="mt-2 text-muted small">* Los importes ya consideran el cálculo vigente para la semana seleccionada.</div>
 </div>
 
+<script>
+  // Filtros (zona + search)
+  const fZona = document.getElementById('fZona');
+  const fSearch = document.getElementById('fSearch');
+  const tbody = document.querySelector('#tablaZona tbody');
+
+  function applyFilters(){
+    const z = (fZona?.value || '').toLowerCase();
+    const q = (fSearch?.value || '').toLowerCase();
+    [...tbody.rows].forEach(tr=>{
+      const tz  = (tr.dataset.zona||'').toLowerCase();
+      const txt = (tr.textContent||'').toLowerCase();
+      let ok = true;
+      if (z && tz !== z) ok = false;
+      if (q && !txt.includes(q)) ok = false;
+      tr.style.display = ok ? '' : 'none';
+    });
+  }
+  fZona && fZona.addEventListener('change', applyFilters);
+  fSearch && fSearch.addEventListener('input', applyFilters);
+
+  // Ordenamiento por columna
+  let sortState = { key:null, dir:1 };
+  document.querySelectorAll('.th-sort').forEach(th=>{
+    th.addEventListener('click', ()=>{
+      const key = th.dataset.key;
+      sortState.dir = (sortState.key===key) ? -sortState.dir : 1;
+      sortState.key = key;
+      sortRows(key, sortState.dir);
+    });
+  });
+  function sortRows(key, dir){
+    const rows = [...tbody.rows];
+    rows.sort((a,b)=>{
+      const va = a.dataset[key] ?? '';
+      const vb = b.dataset[key] ?? '';
+      const na = Number(va), nb = Number(vb);
+      if(!Number.isNaN(na) && !Number.isNaN(nb)) return (na-nb)*dir;
+      return String(va).localeCompare(String(vb), 'es', {numeric:true, sensitivity:'base'}) * dir;
+    });
+    rows.forEach(r=>tbody.appendChild(r));
+  }
+
+  // Exportar CSV (según filtro)
+  document.getElementById('btnExport')?.addEventListener('click', ()=>{
+    const headers = [...document.querySelectorAll('#tablaZona thead th')].map(th=>th.innerText.trim());
+    const rows = [];
+    [...tbody.rows].forEach(tr=>{
+      if (tr.style.display === 'none') return;
+      rows.push([...tr.cells].map(td=>td.innerText.replace(/\s+/g,' ').trim()));
+    });
+    const csv = [headers, ...rows].map(r=>r.map(v=>`"${v.replace(/"/g,'""')}"`).join(',')).join('\n');
+    const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'nomina_gerentes_zona.csv';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+</script>
 </body>
 </html>

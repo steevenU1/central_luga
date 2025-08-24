@@ -102,7 +102,7 @@ if ($idUsuario > 0) {
 // CSRF
 if (empty($_SESSION['csrf'])) { $_SESSION['csrf'] = bin2hex(random_bytes(16)); }
 
-// Badge traspasos
+// Badge traspasos (entrantes a mi sucursal actual)
 $badgeTraspasos = 0;
 if ($idSucursal > 0) {
   $stmt = $conn->prepare("SELECT COUNT(*) FROM traspasos WHERE id_sucursal_destino=? AND estatus='Pendiente'");
@@ -113,6 +113,55 @@ if ($idSucursal > 0) {
   $stmt->close();
 }
 
+// === Badge pendientes por ZONA (solo GZ, excluye Eulalia) ===
+$badgePendZona = 0;
+if ($rolUsuario === 'GerenteZona') {
+  // zona del GZ
+  $zonaGZ = null;
+  $st = $conn->prepare("
+    SELECT s.zona
+    FROM usuarios u
+    INNER JOIN sucursales s ON s.id = u.id_sucursal
+    WHERE u.id=? LIMIT 1
+  ");
+  $st->bind_param("i", $idUsuario);
+  $st->execute();
+  $zonaGZ = $st->get_result()->fetch_assoc()['zona'] ?? null;
+  $st->close();
+
+  // id Eulalia para excluir
+  $idEulalia = 0;
+  if ($st = $conn->prepare("SELECT id FROM sucursales WHERE nombre='Eulalia' LIMIT 1")) {
+    $st->execute();
+    $row = $st->get_result()->fetch_assoc();
+    $idEulalia = (int)($row['id'] ?? 0);
+    $st->close();
+  }
+
+  if ($zonaGZ) {
+    if ($idEulalia > 0) {
+      $st = $conn->prepare("
+        SELECT COUNT(*) AS c
+        FROM traspasos t
+        INNER JOIN sucursales sd ON sd.id = t.id_sucursal_destino
+        WHERE t.estatus='Pendiente' AND sd.zona=? AND sd.id<>?
+      ");
+      $st->bind_param("si", $zonaGZ, $idEulalia);
+    } else {
+      $st = $conn->prepare("
+        SELECT COUNT(*) AS c
+        FROM traspasos t
+        INNER JOIN sucursales sd ON sd.id = t.id_sucursal_destino
+        WHERE t.estatus='Pendiente' AND sd.zona=?
+      ");
+      $st->bind_param("s", $zonaGZ);
+    }
+    $st->execute();
+    $badgePendZona = (int)($st->get_result()->fetch_assoc()['c'] ?? 0);
+    $st->close();
+  }
+}
+
 $esAdmin       = in_array($rolUsuario, ['Admin','Super'], true);
 $primerNombre  = first_name($nombreUsuario);
 
@@ -121,7 +170,14 @@ $current = basename(parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH));
 
 $grpDashboard  = ['productividad_dia.php','dashboard_unificado.php','dashboard_mensual.php'];
 $grpVentas     = ['nueva_venta.php','venta_sim_prepago.php','venta_sim_pospago.php','historial_ventas.php','historial_ventas_sims.php'];
-$grpInventario = ['panel.php','inventario_subdistribuidor.php','inventario_global.php','inventario_resumen.php','inventario_eulalia.php','inventario_retiros.php','inventario_historico.php'];
+
+/* 👉 agregamos las nuevas vistas GZ al grupo Inventario para resaltar el padre */
+$grpInventario = [
+  'panel.php','inventario_subdistribuidor.php','inventario_global.php','inventario_resumen.php',
+  'inventario_eulalia.php','inventario_retiros.php','inventario_historico.php',
+  'generar_traspaso_zona.php','traspasos_pendientes_zona.php' // <= NUEVO
+];
+
 $grpCompras    = ['compras_nueva.php','compras_resumen.php','modelos.php','proveedores.php','compras_ingreso.php'];
 $grpTraspasos  = ['generar_traspaso.php','generar_traspaso_sims.php','traspasos_sims_pendientes.php','traspasos_sims_salientes.php','traspasos_pendientes.php','traspasos_salientes.php','traspaso_nuevo.php'];
 $grpEfectivo   = ['cobros.php','cortes_caja.php','generar_corte.php','depositos_sucursal.php','depositos.php','recoleccion_comisiones.php'];
@@ -245,6 +301,25 @@ function item_active(string $file, string $current): string { return $current ==
               <?php if (in_array($rolUsuario, ['Admin','GerenteZona','Super'])): ?>
                 <li><a class="dropdown-item <?= item_active('inventario_global.php', $current) ?>" href="inventario_global.php">Inventario global</a></li>
               <?php endif; ?>
+
+              <?php if ($rolUsuario === 'GerenteZona'): ?>
+                <li><hr class="dropdown-divider"></li>
+                <li class="dropdown-header">Zona (GZ)</li>
+                <li>
+                  <a class="dropdown-item <?= item_active('generar_traspaso_zona.php', $current) ?>" href="generar_traspaso_zona.php">
+                    <i class="bi bi-arrow-left-right me-1"></i>Generar traspaso (Zona)
+                  </a>
+                </li>
+                <li>
+                  <a class="dropdown-item <?= item_active('traspasos_pendientes_zona.php', $current) ?>" href="traspasos_pendientes_zona.php">
+                    <i class="bi bi-clock-history me-1"></i>Pendientes de zona
+                    <?php if ($badgePendZona > 0): ?>
+                      <span class="badge badge-soft-danger ms-1"><?= (int)$badgePendZona ?></span>
+                    <?php endif; ?>
+                  </a>
+                </li>
+              <?php endif; ?>
+
               <?php if (in_array($rolUsuario, ['Admin','Super'])): ?>
                 <li><hr class="dropdown-divider"></li>
                 <li class="dropdown-header">Administrador</li>
