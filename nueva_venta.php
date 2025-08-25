@@ -1,12 +1,15 @@
 <?php
-include 'navbar.php';
-
-if (!isset($_SESSION['id_usuario'])) {
-    header("Location: index.php");
-    exit();
+// ✅ Iniciamos sesión aquí porque moveremos el include del navbar más abajo
+if (session_status() === PHP_SESSION_NONE) {
+  session_start();
 }
 
-include 'db.php';
+if (!isset($_SESSION['id_usuario'])) {
+  header("Location: index.php");
+  exit();
+}
+
+require_once __DIR__ . '/db.php';
 
 $id_usuario           = (int)($_SESSION['id_usuario'] ?? 0);
 $id_sucursal_usuario  = (int)($_SESSION['id_sucursal'] ?? 0);
@@ -24,6 +27,7 @@ foreach ($sucursales as $s) { $mapSuc[(int)$s['id']] = $s['nombre']; }
 <html lang="es">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1"> <!-- ✅ importante para móvil -->
   <title>Nueva Venta</title>
   <link rel="icon" type="image/x-icon" href="./img/favicon.ico?v=2">
 
@@ -37,6 +41,7 @@ foreach ($sucursales as $s) { $mapSuc[(int)$s['id']] = $s['nombre']; }
   <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
 
+  <!-- ===== Overrides del NAVBAR SOLO para esta vista ===== -->
   <style>
     :root{
       --brand: #0d6efd;
@@ -48,6 +53,29 @@ foreach ($sucursales as $s) { $mapSuc[(int)$s['id']] = $s['nombre']; }
         radial-gradient(1200px 400px at -10% 120%, rgba(25,135,84,.06), transparent),
         #f8fafc;
     }
+
+    /* 🔧 Ajuste responsive del navbar de LUGA en esta vista */
+    #topbar, .navbar-luga{ font-size:16px; }
+    @media (max-width:576px){
+      #topbar, .navbar-luga{
+        font-size:16px;       /* base */
+        --brand-font:1.00em;  /* marca un poquito más grande */
+        --nav-font:.95em;     /* links/dropdowns legibles */
+        --drop-font:.95em;
+        --icon-em:1.05em;
+        --pad-y:.44em;
+        --pad-x:.62em;
+      }
+      #topbar .navbar-brand img, .navbar-luga .navbar-brand img{ width:1.8em; height:1.8em; }
+      #topbar .btn-asistencia, .navbar-luga .btn-asistencia{ font-size:.95em; padding:.5em .9em !important; border-radius:12px; }
+      #topbar .nav-avatar, #topbar .nav-initials,
+      .navbar-luga .nav-avatar, .navbar-luga .nav-initials{ width:2.1em; height:2.1em; }
+      #topbar .navbar-toggler, .navbar-luga .navbar-toggler{ padding:.45em .7em; }
+    }
+    @media (max-width:360px){
+      #topbar, .navbar-luga{ font-size:15px; }
+    }
+
     .page-title{font-weight:700; letter-spacing:.3px;}
     .card-elev{border:0; box-shadow:0 10px 24px rgba(2,8,20,0.06), 0 2px 6px rgba(2,8,20,0.05); border-radius:1rem;}
     .section-title{
@@ -69,6 +97,8 @@ foreach ($sucursales as $s) { $mapSuc[(int)$s['id']] = $s['nombre']; }
   </style>
 </head>
 <body class="bg-light">
+
+<?php include __DIR__ . '/navbar.php'; ?> <!-- ✅ navbar dentro del body con overrides locales -->
 
 <div class="container my-4">
   <div class="d-flex align-items-center justify-content-between mb-3">
@@ -291,6 +321,7 @@ foreach ($sucursales as $s) { $mapSuc[(int)$s['id']] = $s['nombre']; }
 </div>
 
 <!-- Bootstrap JS (bundle) -->
+<!-- Deja este comentado: el navbar ya inyecta el bundle en navbar.php -->
 <!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
 
 <script>
@@ -505,11 +536,33 @@ $(document).ready(function() {
     $('#form_venta')[0].submit();
   });
 
-  // Cargar equipos al inicio
+  // Cargar productos al inicio
   function initEquipos() {
     cargarEquipos($('#id_sucursal').val());
   }
+
+  function cargarEquipos(sucursalId) {
+    $.ajax({
+      url: 'ajax_productos_por_sucursal.php',
+      method: 'POST',
+      data: { id_sucursal: sucursalId },
+      success: function(response) {
+        $('#equipo1, #equipo2').html(response).val('').trigger('change');
+      }
+    });
+  }
+
   initEquipos();
+
+  $('#id_sucursal').on('change', function() {
+    const seleccionada = parseInt($(this).val());
+    if (seleccionada !== idSucursalUsuario) {
+      $('#alerta_sucursal').removeClass('d-none');
+    } else {
+      $('#alerta_sucursal').addClass('d-none');
+    }
+    cargarEquipos(seleccionada);
+  });
 
 });
 </script>

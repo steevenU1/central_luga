@@ -221,6 +221,7 @@ $stmt->close();
 <html lang="es">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1"> <!-- ✅ navbar y layout responsivos en móvil -->
   <title>Venta SIM Pospago</title>
 
   <!-- Bootstrap 5 -->
@@ -242,6 +243,29 @@ $stmt->close();
         radial-gradient(1200px 400px at -10% 120%, rgba(25,135,84,.06), transparent),
         #f8fafc;
     }
+
+    /* 🔧 Overrides RESPONSIVE del NAVBAR (solo esta vista) */
+    #topbar, .navbar-luga{ font-size:16px; }
+    @media (max-width:576px){
+      #topbar, .navbar-luga{
+        font-size:16px;
+        --brand-font:1.00em;
+        --nav-font:.95em;
+        --drop-font:.95em;
+        --icon-em:1.05em;
+        --pad-y:.44em;
+        --pad-x:.62em;
+      }
+      #topbar .navbar-brand img, .navbar-luga .navbar-brand img{ width:1.8em; height:1.8em; }
+      #topbar .btn-asistencia, .navbar-luga .btn-asistencia{ font-size:.95em; padding:.5em .9em !important; border-radius:12px; }
+      #topbar .nav-avatar, #topbar .nav-initials,
+      .navbar-luga .nav-avatar, .navbar-luga .nav-initials{ width:2.1em; height:2.1em; }
+      #topbar .navbar-toggler, .navbar-luga .navbar-toggler{ padding:.45em .7em; }
+    }
+    @media (max-width:360px){
+      #topbar, .navbar-luga{ font-size:15px; }
+    }
+
     .page-title{font-weight:700; letter-spacing:.3px;}
     .card-elev{border:0; box-shadow:0 10px 24px rgba(2,8,20,0.06), 0 2px 6px rgba(2,8,20,0.05); border-radius:1rem;}
     .section-title{

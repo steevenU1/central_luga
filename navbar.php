@@ -1,5 +1,5 @@
 <?php
-// navbar.php (LUGA) — con cambio de sucursal para usuarios con múltiples sucursales permitidas
+// navbar.php (LUGA) — con cambio de sucursal para usuarios con múltiples sucursales permitidas + FIX tamaño móvil
 
 if (session_status() === PHP_SESSION_NONE) {
   session_start();
@@ -191,19 +191,48 @@ function item_active(string $file, string $current): string { return $current ==
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 
 <style>
-  :root{ --brand-font:.88rem; --nav-font:.84rem; --drop-font:.86rem; --icon-em:.90em; --pad-y:.32rem; --pad-x:.48rem; }
+  /* ====== FIX: tamaño consistente del navbar en móvil ====== */
+  #topbar{
+    /* baseline local: 1em = 16px dentro del navbar */
+    --nav-base: 16px;
+    font-size: var(--nav-base);
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+  /* Variables locales del navbar (en EM, no REM) */
+  #topbar{
+    --brand-font:.88em;  /* título marca */
+    --nav-font:.84em;    /* links */
+    --drop-font:.86em;   /* menú */
+    --icon-em:.90em;     /* iconos */
+    --pad-y:.32em;
+    --pad-x:.48em;
+  }
+  /* Heredar tamaño dentro del navbar */
+  #topbar *{ font-size: inherit; }
+
+  /* ===== Estilos visuales ===== */
   .navbar-luga{
     background: radial-gradient(1200px 600px at 10% -20%, rgba(255,255,255,.18), rgba(255,255,255,0)),
                 linear-gradient(90deg,#0b0f14,#0f141a 60%,#121922);
     border-bottom:1px solid rgba(255,255,255,.08); backdrop-filter: blur(6px);
   }
-  .brand-title{ font-weight:900; letter-spacing:.1px; line-height:1; font-size:var(--brand-font);
-    background:linear-gradient(92deg,#eaf2ff 0%,#cfe0ff 45%,#9ec5ff 100%); -webkit-background-clip:text; background-clip:text; color:transparent;
-    text-shadow:0 1px 0 rgba(0,0,0,.25); white-space:nowrap; }
-  .navbar-brand img{ width:26px; height:26px; }
-  .navbar-luga .nav-link{ padding:var(--pad-y) var(--pad-x); font-size:var(--nav-font); border-radius:.6rem; color:#e7eef7 !important; line-height:1.1; }
+  .brand-title{
+    font-weight:900; letter-spacing:.1px; line-height:1; font-size:var(--brand-font);
+    background:linear-gradient(92deg,#eaf2ff 0%,#cfe0ff 45%,#9ec5ff 100%);
+    -webkit-background-clip:text; background-clip:text; color:transparent;
+    text-shadow:0 1px 0 rgba(0,0,0,.25); white-space:nowrap;
+  }
+  .navbar-brand img{ width:1.625em; height:1.625em; object-fit:cover; } /* ≈26px */
+
+  .navbar-luga .nav-link{
+    padding:var(--pad-y) var(--pad-x);
+    font-size:var(--nav-font);
+    border-radius:.6rem; color:#e7eef7 !important; line-height:1.1;
+  }
   .navbar-luga .nav-link i{ font-size:var(--icon-em); margin-right:.35rem; }
   .navbar-luga .nav-link:hover{ background:rgba(255,255,255,.06); }
+
   .navbar-luga .dropdown-menu{
     --bs-dropdown-bg:#0f141a; --bs-dropdown-color:#e7eef7; --bs-dropdown-link-color:#e7eef7;
     --bs-dropdown-link-hover-color:#fff; --bs-dropdown-link-hover-bg:rgba(255,255,255,.06);
@@ -212,31 +241,40 @@ function item_active(string $file, string $current): string { return $current ==
     border:1px solid rgba(255,255,255,.08); border-radius:14px; box-shadow:0 16px 40px rgba(0,0,0,.35);
     overflow:hidden; font-size:var(--drop-font);
   }
-  .navbar-luga .dropdown-item{ padding:.48rem .76rem; line-height:1.15; }
+  .navbar-luga .dropdown-item{ padding:.48em .76em; line-height:1.15; }
   .navbar-luga .nav-link.active-parent{ background:rgba(255,255,255,.10); box-shadow:inset 0 0 0 1px rgba(255,255,255,.12); }
   .navbar-luga .dropdown-item.active{ background:rgba(255,255,255,.18); font-weight:600; }
-  .nav-avatar,.nav-initials{ width:32px; height:32px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; font-weight:700; font-size:.92rem; object-fit:cover; }
+
+  .nav-avatar,.nav-initials{
+    width:2em; height:2em; border-radius:50%;
+    display:inline-flex; align-items:center; justify-content:center;
+    font-weight:700; font-size:.92em; object-fit:cover;
+  }
   .nav-initials{ background:#25303a; color:#e8f0f8; }
-  .dropdown-avatar,.dropdown-initials{ width:54px; height:54px; border-radius:16px; object-fit:cover; }
-  .dropdown-initials{ background:#25303a; color:#e8f0f8; display:inline-flex; align-items:center; justify-content:center; font-weight:800; }
+
+  .dropdown-avatar,.dropdown-initials{
+    width:3.375em; height:3.375em; border-radius:16px; object-fit:cover; /* ≈54px */
+  }
+  .dropdown-initials{
+    background:#25303a; color:#e8f0f8; display:inline-flex; align-items:center; justify-content:center; font-weight:800;
+  }
   .user-chip{ color:#e7eef7; font-weight:600; }
   .user-chip small{ color:#a7b4c2; font-weight:500; }
+
   .badge-soft-danger{ background:rgba(220,53,69,.18); color:#ffadb7; border:1px solid rgba(220,53,69,.35); }
 
   /* ===== Botón de Asistencia destacado ===== */
   .btn-asistencia{
-    font-weight:800;
-    letter-spacing:.2px;
-    padding:.46rem .86rem !important;
-    border:2px solid #8fd0ff;
-    border-radius:14px;
+    font-weight:800; letter-spacing:.2px;
+    padding:.46em .86em !important;
+    border:2px solid #8fd0ff; border-radius:14px;
     background:rgba(13,110,253,.10);
-    display:flex; align-items:center; gap:.4rem;
+    display:flex; align-items:center; gap:.4em;
     box-shadow:0 0 0 0 rgba(13,110,253,.55), 0 0 10px rgba(13,110,253,.25);
     animation:pulseGlow 1.9s ease-in-out infinite;
     text-transform:uppercase;
   }
-  .btn-asistencia i{ font-size:1.05em; margin-right:.25rem; }
+  .btn-asistencia i{ font-size:1.05em; margin-right:.25em; }
   .btn-asistencia:hover{ background:rgba(13,110,253,.18); }
   @keyframes pulseGlow{
     0%   { box-shadow:0 0 0 0 rgba(13,110,253,.55), 0 0 10px rgba(13,110,253,.25); border-color:#aee0ff; }
@@ -244,22 +282,29 @@ function item_active(string $file, string $current): string { return $current ==
     100% { box-shadow:0 0 0 0 rgba(13,110,253,0), 0 0 10px rgba(13,110,253,.25); border-color:#aee0ff; }
   }
 
+  /* Toggler consistente */
+  #topbar .navbar-toggler{ padding:.35em .6em; font-size:1em; }
+  #topbar .navbar-toggler .navbar-toggler-icon{ width:1.3em; height:1.3em; background-size:100% 100%; }
+
+  /* Ajustes responsivos para no encoger de más */
   @media (min-width:1200px) and (max-width:1440px){
-    :root{ --brand-font:.84rem; --nav-font:.82rem; --drop-font:.84rem; --pad-y:.30rem; --pad-x:.44rem; --icon-em:.88em; }
-    .navbar-brand img{ width:24px; height:24px; }
+    #topbar{ font-size:15px; }
+  }
+  @media (max-width:420px){
+    #topbar{ font-size:clamp(15px, 3.8vw, 16px); }
   }
 </style>
 
-<nav class="navbar navbar-expand-lg navbar-dark navbar-luga sticky-top">
+<nav id="topbar" class="navbar navbar-expand-lg navbar-dark navbar-luga sticky-top">
   <div class="container-fluid">
 
     <!-- LOGO -->
     <a class="navbar-brand d-flex align-items-center" href="dashboard_unificado.php">
-      <img src="https://i.ibb.co/DDw7yjYV/43f8e23a-8877-4928-9407-32d18fb70f79.png" alt="Logo" class="me-2 rounded-circle" style="object-fit:cover;">
+      <img src="https://i.ibb.co/DDw7yjYV/43f8e23a-8877-4928-9407-32d18fb70f79.png" alt="Logo" class="me-2 rounded-circle">
       <span class="brand-title">Central&nbsp;<strong>2.0</strong></span>
     </a>
 
-    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarMain">
+    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarMain" aria-label="Menú">
       <span class="navbar-toggler-icon"></span>
     </button>
 
@@ -279,8 +324,6 @@ function item_active(string $file, string $current): string { return $current ==
             <li><a class="dropdown-item <?= item_active('dashboard_mensual.php', $current) ?>" href="dashboard_mensual.php">Dashboard mensual</a></li>
           </ul>
         </li>
-
-        <!-- (Asistencia removida de aquí) -->
 
         <!-- VENTAS -->
         <?php $pActive = parent_active($grpVentas, $current); ?>

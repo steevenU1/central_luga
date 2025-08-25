@@ -311,10 +311,40 @@ foreach ($weekSeries as $sucursalNombre => $serie) {
 <html lang="es">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"> <!-- importante para móvil -->
 <title>Dashboard Semanal Luga</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css">
+
 <style>
+  /* ===== Overrides del NAVBAR SOLO para esta vista ===== */
+  /* Base local: asegura escala consistente */
+  #topbar{ font-size:16px; }
+
+  /* Móvil (≤576px): subimos legibilidad y toques de spacing */
+  @media (max-width:576px){
+    #topbar{
+      font-size:16px;                 /* 1em interno = 16px */
+      --brand-font:1.00em;            /* título un poco más grande */
+      --nav-font:.95em;               /* items y dropdown más legibles */
+      --drop-font:.95em;
+      --icon-em:1.05em;
+      --pad-y:.44em;                  /* más “tap area” */
+      --pad-x:.62em;
+    }
+    #topbar .navbar-brand img{ width:1.8em; height:1.8em; }
+    #topbar .brand-title{ letter-spacing:.2px; }
+    #topbar .btn-asistencia{ font-size:.95em; padding:.5em .9em !important; border-radius:12px; }
+    #topbar .nav-avatar, #topbar .nav-initials{ width:2.1em; height:2.1em; }
+    #topbar .navbar-toggler{ padding:.45em .7em; }
+  }
+
+  /* Ultra-compacto (≤360px) */
+  @media (max-width:360px){
+    #topbar{ font-size:15px; }
+  }
+
+  /* Estilos propios de la página */
   .trend { font-size: .875rem; white-space: nowrap; }
   .trend .delta { font-weight: 600; }
   .w-120 { min-width:120px; }
@@ -341,7 +371,7 @@ foreach ($weekSeries as $sucursalNombre => $serie) {
         <span class="ms-2 text-muted small">Comparando con: <?= $inicioPrevObj->format('d/m/Y') ?> → <?= $finPrevObj->format('d/m/Y') ?></span>
     </form>
 
-    <!-- Tarjetas por zonas + global (igual que antes) -->
+    <!-- Tarjetas por zonas + global -->
     <div class="row mb-4">
         <?php foreach ($zonas as $zona => $info): ?>
             <div class="col-md-4 mb-3">

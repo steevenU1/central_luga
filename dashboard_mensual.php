@@ -6,7 +6,7 @@ if (empty($_SESSION['id_usuario'])) {
 }
 
 require_once __DIR__ . '/db.php';
-require_once __DIR__ . '/navbar.php';
+// NOTE: el navbar se incluye dentro del <body> para evitar glitches en móvil
 
 // 🔹 Nombre de mes en español
 function nombreMes($mes) {
@@ -320,15 +320,45 @@ foreach ($weeklySeries as $sucursalNombre => $serie) {
 <html lang="es">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1"> <!-- ✅ importante para móvil -->
   <title>Dashboard Mensual</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+  <!-- ===== Overrides del NAVBAR SOLO para esta vista ===== -->
   <style>
+    /* Base local del navbar para esta vista */
+    #topbar{ font-size:16px; }
+
+    /* Móvil (≤576px): mejor legibilidad y área táctil */
+    @media (max-width:576px){
+      #topbar{
+        font-size:16px;         /* 1em interno = 16px */
+        --brand-font:1.00em;    /* título marca un poco mayor */
+        --nav-font:.95em;       /* links y dropdown más legibles */
+        --drop-font:.95em;
+        --icon-em:1.05em;
+        --pad-y:.44em;
+        --pad-x:.62em;
+      }
+      #topbar .navbar-brand img{ width:1.8em; height:1.8em; }
+      #topbar .btn-asistencia{ font-size:.95em; padding:.5em .9em !important; border-radius:12px; }
+      #topbar .nav-avatar, #topbar .nav-initials{ width:2.1em; height:2.1em; }
+      #topbar .navbar-toggler{ padding:.45em .7em; }
+    }
+
+    /* Ultra compacto (≤360px) */
+    @media (max-width:360px){
+      #topbar{ font-size:15px; }
+    }
+
+    /* Estilos propios de la página */
     .progress{height:18px}
     .progress-bar{font-size:.75rem}
     .tab-pane{padding-top:10px}
   </style>
 </head>
 <body class="bg-light">
+
+<?php include __DIR__ . '/navbar.php'; ?>  <!-- ✅ navbar dentro del body -->
 
 <div class="container mt-4">
   <h2>📊 Dashboard Mensual - <?= nombreMes($mes)." $anio" ?></h2>

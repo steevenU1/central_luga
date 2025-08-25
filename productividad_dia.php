@@ -265,18 +265,49 @@ while ($s = $resSuc->fetch_assoc()) {
     $sucursales[] = $s;
 }
 $stmt->close();
-
-require_once __DIR__ . '/navbar.php';
 ?>
 <!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1"> <!-- ✅ importante para móvil -->
   <title>Productividad del Día (<?= h($fecha) ?>)</title>
   <link rel="icon" type="image/x-icon" href="./img/favicon.ico">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+
+  <!-- ===== Overrides del NAVBAR SOLO para esta vista ===== -->
+  <style>
+    /* Aplica a nav con id #topbar (si existe) o a .navbar-luga (de tu navbar.php) */
+    #topbar, .navbar-luga{ font-size:16px; }
+
+    /* Móvil (≤576px): legibilidad y área táctil */
+    @media (max-width:576px){
+      #topbar, .navbar-luga{
+        font-size:16px;         /* 1em interno = 16px */
+        --brand-font:1.00em;    /* título marca un poco mayor */
+        --nav-font:.95em;       /* links/dropdown más legibles */
+        --drop-font:.95em;
+        --icon-em:1.05em;
+        --pad-y:.44em;
+        --pad-x:.62em;
+      }
+      #topbar .navbar-brand img, .navbar-luga .navbar-brand img{ width:1.8em; height:1.8em; }
+      #topbar .btn-asistencia, .navbar-luga .btn-asistencia{ font-size:.95em; padding:.5em .9em !important; border-radius:12px; }
+      #topbar .nav-avatar, #topbar .nav-initials,
+      .navbar-luga .nav-avatar, .navbar-luga .nav-initials{ width:2.1em; height:2.1em; }
+      #topbar .navbar-toggler, .navbar-luga .navbar-toggler{ padding:.45em .7em; }
+    }
+
+    /* Ultra compacto (≤360px) */
+    @media (max-width:360px){
+      #topbar, .navbar-luga{ font-size:15px; }
+    }
+  </style>
 </head>
 <body class="bg-light">
+
+<?php include __DIR__ . '/navbar.php'; ?>  <!-- ✅ navbar dentro del body -->
+
 <div class="container mt-4">
   <div class="d-flex justify-content-between align-items-center">
     <h2>📅 Productividad del Día — <?= date('d/m/Y', strtotime($fecha)) ?></h2>
