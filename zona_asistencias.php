@@ -12,7 +12,7 @@ $idUsuario  = (int)$_SESSION['id_usuario'];
 $rolUser    = $_SESSION['rol'] ?? 'GerenteZona';
 $nombreUser = trim($_SESSION['nombre'] ?? 'Gerente Zona');
 
-$isExport = isset($_GET['export']); // <-- clave: si exportamos, NO incluimos navbar ni HTML
+$isExport = isset($_GET['export']); // <-- si exportamos, NO incluimos navbar ni HTML
 
 function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 
@@ -81,7 +81,7 @@ if ($sucursal_id>0 && !in_array($sucursal_id, $idsPermitidos, true)) $sucursal_i
 // QS export (para los links)
 $qsExport = http_build_query(['week'=>$weekIso, 'sucursal_id'=>$sucursal_id]);
 
-// ========= Acciones: APROBACIÓN / RECHAZO de PERMISOS (EXISTS; sin LIMIT) =========
+// ========= Acciones: APROBACIÓN / RECHAZO de PERMISOS =========
 if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['action']) && in_array($_POST['action'], ['perm_aprobar','perm_rechazar'], true)) {
   $pid = (int)($_POST['perm_id'] ?? 0);
   $obs = trim($_POST['perm_obs'] ?? '');
@@ -262,6 +262,9 @@ $stmt->close();
 $days=[]; for($i=0;$i<7;$i++){ $d=clone $tuesdayStart; $d->modify("+$i day"); $days[]=$d; }
 $weekNames=['Mar','Mié','Jue','Vie','Sáb','Dom','Lun'];
 
+$hoyYmd = (new DateTime('today'))->format('Y-m-d');
+$nowDT  = new DateTime();
+
 $matriz=[];
 foreach($usuarios as $u){
   $uid=(int)$u['id']; $sid=(int)$u['id_sucursal'];
@@ -269,25 +272,58 @@ foreach($usuarios as $u){
 
   foreach($days as $d){
     $f=$d->format('Y-m-d'); $dow=(int)$d->format('N');
-    $hor=$horarios[$sid][$dow]??null; $cerrado=$hor?((int)$hor['cerrado']===1):false;
+    $hor=$horarios[$sid][$dow]??null; 
+    $cerrado=$hor?((int)$hor['cerrado']===1):false;
+    $cierraStr = $hor['cierra'] ?? null;
+    $cierreDT = new DateTime($f.' '.($cierraStr ? $cierraStr : '23:59:59'));
+
+    $isFuture  = ($f > $hoyYmd);
+    $isToday   = ($f === $hoyYmd);
+
     $isDesc=!empty($descansos[$uid][$f]);
     $isPermA=!empty($permAprob[$uid][$f]);
     $isPermP=!empty($permPend[$uid][$f]);
     $a=$asistByUserDay[$uid][$f]??null;
 
+    // 1) Días futuros: no cuentan, mostrar "PEND."
+    if ($isFuture) {
+      $fila['dias'][]=['fecha'=>$f,'estado'=>'PEND.','entrada'=>null,'salida'=>null,'retardo_min'=>0,'dur'=>0];
+      continue;
+    }
+
+    // 2) Registros existentes (cuentan normal)
     if($a){
       $ret=(int)($a['retardo']??0); $retMin=(int)($a['retardo_minutos']??0); $dur=(int)($a['duracion_minutos']??0);
       $fila['min'] += $dur;
       if($ret===1){ $estado='RETARDO'; $fila['ret']++; } else { $estado='ASISTIÓ'; $fila['asis']++; }
       $fila['dias'][]=['fecha'=>$f,'estado'=>$estado,'entrada'=>$a['hora_entrada'],'salida'=>$a['hora_salida'],'retardo_min'=>$retMin,'dur'=>$dur];
-    } else {
-      if($isDesc){ $estado='DESCANSO'; $fila['desc']++; }
-      elseif($cerrado){ $estado='CERRADA'; }
-      elseif($isPermA){ $estado='PERMISO'; $fila['perm']++; }
-      elseif($isPermP){ $estado='PEND. PERM'; $fila['fal']++; } // pendiente aún cuenta como falta
-      else { $estado='FALTA'; $fila['fal']++; }
-      $fila['dias'][]=['fecha'=>$f,'estado'=>$estado,'entrada'=>null,'salida'=>null,'retardo_min'=>0,'dur'=>0];
+      continue;
     }
+
+    // 3) Sin asistencia registrada
+    if($isDesc){ 
+      $estado='DESCANSO'; $fila['desc']++; 
+    } elseif($cerrado){ 
+      $estado='CERRADA'; // no suma a nada
+    } elseif($isPermA){ 
+      $estado='PERMISO'; $fila['perm']++; 
+    } elseif($isPermP){ 
+      // Solo cuenta como "falta" si el día ya terminó; si es hoy y aún no cierra, lo dejamos "EN CURSO"
+      if ($isToday && $nowDT < $cierreDT) {
+        $estado='EN CURSO';
+      } else {
+        $estado='PEND. PERM'; 
+        $fila['fal']++; // como antes
+      }
+    } else {
+      // Sin nada: si es hoy y aún no cierra, no marcar falta todavía
+      if ($isToday && $nowDT < $cierreDT) {
+        $estado='EN CURSO';
+      } else {
+        $estado='FALTA'; $fila['fal']++;
+      }
+    }
+    $fila['dias'][]=['fecha'=>$f,'estado'=>$estado,'entrada'=>null,'salida'=>null,'retardo_min'=>0,'dur'=>0];
   }
   $matriz[]=$fila;
 }
@@ -308,9 +344,35 @@ foreach ($matriz as $fila) {
   if ((int)$fila['ret'] >= 3) $resumenSuc[$suc]['falta_retardos'] += 1; // por persona/semana
 }
 
-// ========= EXPORT CSV (importante: antes de cualquier HTML y SIN navbar) =========
+/* ===== Totales para KPIs (cards) ===== */
+$colaboradoresActivos = count($usuarios);
+$numSucursalesVista   = count($resumenSuc) ?: ($sucursal_id>0 ? 1 : 0);
+$sumAsis = $sumRet = $sumFal = $sumPerm = $sumDesc = $sumMin = 0;
+foreach ($resumenSuc as $t) {
+  $sumAsis += (int)$t['asis'];
+  $sumRet  += (int)$t['ret'];
+  $sumFal  += (int)$t['fal'];
+  $sumPerm += (int)$t['perm'];
+  $sumDesc += (int)$t['desc'];
+  $sumMin  += (int)$t['min'];
+}
+$sumHoras = $sumMin > 0 ? round($sumMin/60, 1) : 0;
+$pendientesPerm = count($pendPerm);
+$faltanSalida = 0;
+foreach ($asistDet as $a) { if (empty($a['hora_salida'])) $faltanSalida++; }
+
+// Denominador solo con días concluidos (matriz ya excluye futuro y hoy en curso)
+$denAsistencia = max($sumAsis + $sumRet + $sumFal, 1);
+$tasaAsistencia = round((($sumAsis + $sumRet) / $denAsistencia) * 100, 1);
+
+$sucursalesAlerta = 0; $topFaltasSuc = '—'; $topFaltasVal = -1;
+foreach ($resumenSuc as $suc=>$t) {
+  if ((int)$t['falta_retardos'] > 0) $sucursalesAlerta++;
+  if ((int)$t['fal'] > $topFaltasVal) { $topFaltasVal = (int)$t['fal']; $topFaltasSuc = $suc; }
+}
+
+// ========= EXPORT CSV =========
 if ($isExport) {
-  // Evita que cualquier output previo arruine los headers
   while (ob_get_level()) { ob_end_clean(); }
   header("Content-Type: text/csv; charset=UTF-8");
   header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
@@ -318,8 +380,8 @@ if ($isExport) {
   echo "\xEF\xBB\xBF"; // BOM UTF-8
 
   $type = $_GET['export'] ?? '';
-  // Labels de días
-  $labels=[]; foreach($days as $d){ $labels[]=$d->format('D d/m'); }
+  // Labels de días en español (p. ej. "Mar 20/08")
+  $labels=[]; foreach($days as $idx=>$d){ $labels[]=$weekNames[$idx].' '.$d->format('d/m'); }
 
   if ($type==='matrix') {
     header("Content-Disposition: attachment; filename=zona_matriz_{$weekIso}.csv");
@@ -376,12 +438,11 @@ if ($isExport) {
     fclose($out); exit;
   }
 
-  // Tipo no reconocido
   header("Content-Disposition: attachment; filename=export_{$weekIso}.csv");
   $out=fopen('php://output','w'); fputcsv($out,['Sin datos']); fclose($out); exit;
 }
 
-// ============== A partir de aquí SOLO UI (no se ejecuta en export) ==============
+// ============== UI ==============
 require_once __DIR__.'/navbar.php';
 ?>
 <!DOCTYPE html>
@@ -404,7 +465,33 @@ require_once __DIR__.'/navbar.php';
     .pill-closed{ background:#ede9fe; color:#5b21b6; border:1px solid #ddd6fe; }
     .pill-perm{ background:#e2f0d9; color:#2b6a2b; border:1px solid #c7e3be; }
     .pill-pending{ background:#f0eefc; color:#4c1d95; border:1px solid #e0d9ff; }
+    .pill-future{ background:#f0f9ff; color:#0c4a6e; border:1px solid #bae6fd; } /* PEND. (futuro) */
+    .pill-today{ background:#ecfeff; color:#155e75; border:1px solid #a5f3fc; }  /* EN CURSO (hoy) */
     .thead-sticky th{ position:sticky; top:0; background:#111827; color:#fff; z-index:2; }
+
+    /* ===== KPI cards ===== */
+    .metrics-grid{ display:grid; grid-template-columns: repeat(auto-fit, minmax(220px,1fr)); gap:12px; margin-bottom: 16px; }
+    .card-kpi{ border:0; border-radius:1rem; box-shadow:0 10px 24px rgba(15,23,42,.06), 0 2px 6px rgba(15,23,42,.05); position:relative; overflow:hidden; background:#fff; }
+    .card-kpi .kpi-body{ padding:16px 16px; }
+    .card-kpi .kpi-top{ display:flex; align-items:center; justify-content:space-between; margin-bottom:.35rem; }
+    .card-kpi .kpi-icon{ width:36px; height:36px; display:grid; place-items:center; border-radius:10px; }
+    .kpi-blue .kpi-icon{ background:#e7f5ff; color:#0b7285; }
+    .kpi-green .kpi-icon{ background:#e6f4ea; color:#1e7e34; }
+    .kpi-amber .kpi-icon{ background:#fff3cd; color:#8a6d3b; }
+    .kpi-rose .kpi-icon{ background:#fde2e1; color:#a61e4d; }
+    .kpi-indigo .kpi-icon{ background:#e0e7ff; color:#3730a3; }
+    .kpi-slate .kpi-icon{ background:#e5e7eb; color:#111827; }
+    .card-kpi .kpi-label{ font-size:.8rem; font-weight:600; color:#6b7280; }
+    .card-kpi .kpi-value{ font-size:1.6rem; font-weight:800; color:#111827; line-height:1.1; }
+    .card-kpi .kpi-sub{ font-size:.82rem; color:#6b7280; }
+    .card-kpi .kpi-badge{ font-size:.75rem; }
+    .card-kpi::before{ content:""; position:absolute; inset:0 0 auto 0; height:4px; }
+    .kpi-blue::before{ background:linear-gradient(90deg,#38bdf8,#0ea5e9); }
+    .kpi-green::before{ background:linear-gradient(90deg,#34d399,#10b981); }
+    .kpi-amber::before{ background:linear-gradient(90deg,#fbbf24,#f59e0b); }
+    .kpi-rose::before{ background:linear-gradient(90deg,#fb7185,#f43f5e); }
+    .kpi-indigo::before{ background:linear-gradient(90deg,#818cf8,#6366f1); }
+    .kpi-slate::before{ background:linear-gradient(90deg,#94a3b8,#64748b); }
   </style>
 </head>
 <body>
@@ -422,6 +509,89 @@ require_once __DIR__.'/navbar.php';
   </div>
 
   <?= $msg ?>
+
+  <!-- ====== KPI CARDS ====== -->
+  <div class="metrics-grid">
+    <div class="card-kpi kpi-blue">
+      <div class="kpi-body">
+        <div class="kpi-top">
+          <span class="kpi-label">Colaboradores activos</span>
+          <span class="kpi-icon"><i class="bi bi-people-fill"></i></span>
+        </div>
+        <div class="kpi-value"><?= number_format($colaboradoresActivos) ?></div>
+        <div class="kpi-sub">En el rango semanal seleccionado</div>
+      </div>
+    </div>
+
+    <div class="card-kpi kpi-indigo">
+      <div class="kpi-body">
+        <div class="kpi-top">
+          <span class="kpi-label">Sucursales en vista</span>
+          <span class="kpi-icon"><i class="bi bi-shop"></i></span>
+        </div>
+        <div class="kpi-value"><?= number_format($numSucursalesVista) ?></div>
+        <div class="kpi-sub">
+          <?php if ($sucursalesAlerta>0): ?>
+            <span class="badge text-bg-danger kpi-badge">Alertas en <?= (int)$sucursalesAlerta ?> suc.</span>
+          <?php else: ?>
+            <span class="badge text-bg-success kpi-badge">Sin alertas</span>
+          <?php endif; ?>
+          <span class="ms-1 text-muted">Top faltas: <b><?= h($topFaltasSuc) ?></b> (<?= max($topFaltasVal,0) ?>)</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card-kpi kpi-green">
+      <div class="kpi-body">
+        <div class="kpi-top">
+          <span class="kpi-label">Asistencias</span>
+          <span class="kpi-icon"><i class="bi bi-check2-circle"></i></span>
+        </div>
+        <div class="kpi-value"><?= number_format($sumAsis) ?></div>
+        <div class="kpi-sub"><span class="badge kpi-badge" style="border:1px solid #c5e3f6;color:#0b7285;background:#e7f5ff;">Con retardo: <?= number_format($sumRet) ?></span> · Tasa asistencia: <b><?= $tasaAsistencia ?>%</b></div>
+      </div>
+    </div>
+
+    <div class="card-kpi kpi-amber">
+      <div class="kpi-body">
+        <div class="kpi-top">
+          <span class="kpi-label">Faltas</span>
+          <span class="kpi-icon"><i class="bi bi-exclamation-triangle-fill"></i></span>
+        </div>
+        <div class="kpi-value"><?= number_format($sumFal) ?></div>
+        <div class="kpi-sub">Permisos aprobados: <b><?= number_format($sumPerm) ?></b> · Descansos: <b><?= number_format($sumDesc) ?></b></div>
+      </div>
+    </div>
+
+    <div class="card-kpi kpi-slate">
+      <div class="kpi-body">
+        <div class="kpi-top">
+          <span class="kpi-label">Horas trabajadas</span>
+          <span class="kpi-icon"><i class="bi bi-clock-history"></i></span>
+        </div>
+        <div class="kpi-value"><?= number_format($sumHoras,1) ?> h</div>
+        <div class="kpi-sub"><?= number_format($sumMin) ?> min acumulados</div>
+      </div>
+    </div>
+
+    <div class="card-kpi kpi-rose">
+      <div class="kpi-body">
+        <div class="kpi-top">
+          <span class="kpi-label">Permisos pendientes</span>
+          <span class="kpi-icon"><i class="bi bi-clipboard-check"></i></span>
+        </div>
+        <div class="kpi-value"><?= number_format($pendientesPerm) ?></div>
+        <div class="kpi-sub">
+          <?php if ($faltanSalida>0): ?>
+            <span class="badge text-bg-warning text-dark kpi-badge"><i class="bi bi-stopwatch"></i> Checadas sin salida: <?= (int)$faltanSalida ?></span>
+          <?php else: ?>
+            <span class="badge text-bg-success kpi-badge"><i class="bi bi-check2"></i> Sin checadas abiertas</span>
+          <?php endif; ?>
+        </div>
+      </div>
+    </div>
+  </div>
+  <!-- ====== /KPI CARDS ====== -->
 
   <div class="card card-elev mb-3">
     <div class="card-body">
@@ -552,6 +722,8 @@ require_once __DIR__.'/navbar.php';
                     elseif($estado==='CERRADA'){ $pill='pill-closed'; }
                     elseif($estado==='PERMISO'){ $pill='pill-perm'; }
                     elseif($estado==='PEND. PERM'){ $pill='pill-pending'; }
+                    elseif($estado==='PEND.'){ $pill='pill-future'; }
+                    elseif($estado==='EN CURSO'){ $pill='pill-today'; }
                   ?>
                     <td class="text-center">
                       <span class="pill <?= $pill ?>" title="<?= 'Entrada: '.($d['entrada']??'—').' | Salida: '.($d['salida']??'—').' | Dur: '.$d['dur'].'m' ?>"><?= h($txt) ?></span>
