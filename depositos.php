@@ -670,7 +670,7 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
   </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
 <script>
   // Historial: toggle fechas cuando se selecciona semana
   const semanaInput = document.querySelector('input[name="semana"]');

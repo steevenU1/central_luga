@@ -151,7 +151,7 @@ if ($rolUsuario === 'GerenteZona') {
       $st = $conn->prepare("
         SELECT COUNT(*) AS c
         FROM traspasos t
-        INNER JOIN sucursales sd ON sd.id = t.id_sucursal_destino
+        INNER INNER JOIN sucursales sd ON sd.id = t.id_sucursal_destino
         WHERE t.estatus='Pendiente' AND sd.zona=?
       ");
       $st->bind_param("s", $zonaGZ);
@@ -486,10 +486,9 @@ function item_active(string $file, string $current): string { return $current ==
               <li><a class="dropdown-item <?= item_active('insumos_pedido.php', $current) ?>" href="insumos_pedido.php">Pedido de insumos</a></li>
             <?php endif; ?>
 
-            <?php if (in_array($rolUsuario, ['Admin','Super','Gerente'])): ?>
-              <?php if ($esAdmin): ?>
-                <li><a class="dropdown-item <?= item_active('insumos_admin.php', $current) ?>" href="insumos_admin.php">Administrar insumos</a></li>
-              <?php endif; ?>
+            <!-- Solo Admin/Super ven estos dos -->
+            <?php if ($esAdmin): ?>
+              <li><a class="dropdown-item <?= item_active('insumos_admin.php', $current) ?>" href="insumos_admin.php">Administrar insumos</a></li>
               <li><a class="dropdown-item <?= item_active('gestionar_usuarios.php', $current) ?>" href="gestionar_usuarios.php">Gestionar usuarios</a></li>
             <?php endif; ?>
 

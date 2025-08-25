@@ -4,7 +4,6 @@ session_start();
 if (!isset($_SESSION['id_usuario'])) { header("Location: index.php"); exit(); }
 
 include 'db.php';
-include 'navbar.php';
 
 $ROL         = $_SESSION['rol'] ?? '';
 $ID_USUARIO  = intval($_SESSION['id_usuario'] ?? 0);
@@ -212,7 +211,7 @@ function cargarUsuarios($conn, $activo, $busq, $frol, $fsuc, $limitToSucursalId 
   return $data;
 }
 
-$limitSucGerente = (!$permAdmin && $permGerente) ? $ID_SUCURSAL : null;
+$limitSucGerente   = (!$permAdmin && $permGerente) ? $ID_SUCURSAL : null;
 $usuariosActivos   = cargarUsuarios($conn, 1, $busq, $frol, $fsuc, $limitSucGerente);
 $usuariosInactivos = cargarUsuarios($conn, 0, $busq, $frol, $fsuc, $limitSucGerente);
 
@@ -234,40 +233,179 @@ $logs = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
 $stmt->close();
 
 // Sucursales/roles para filtro
-$suc = $conn->query("SELECT id, nombre FROM sucursales ORDER BY nombre ASC")->fetch_all(MYSQLI_ASSOC);
+$suc   = $conn->query("SELECT id, nombre FROM sucursales ORDER BY nombre ASC")->fetch_all(MYSQLI_ASSOC);
 $roles = ['Ejecutivo','Gerente','GerenteZona','Supervisor','Admin'];
+
+// KPIs
+$kpiActivos    = count($usuariosActivos);
+$kpiInactivos  = count($usuariosInactivos);
+$kpiSucursales = count($suc);
+$kpiLogs       = count($logs);
+
+// Breakdown por rol (activos)
+$rolesBreak = array_fill_keys($roles, 0);
+foreach ($usuariosActivos as $u) {
+  $r = $u['rol'] ?? '—';
+  if (!isset($rolesBreak[$r])) $rolesBreak[$r] = 0;
+  $rolesBreak[$r]++;
+}
 ?>
 <!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1"> <!-- ✅ responsive -->
   <title>Gestionar usuarios</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
   <link rel="icon" type="image/x-icon" href="./img/favicon.ico">
+
+  <!-- Bootstrap 5 + Icons -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css">
+
+  <style>
+    :root{
+      --brand:#0d6efd;
+      --brand-100: rgba(13,110,253,.08);
+    }
+    body.bg-light{
+      background:
+        radial-gradient(1100px 420px at 110% -80%, var(--brand-100), transparent),
+        radial-gradient(1100px 420px at -10% 120%, rgba(25,135,84,.06), transparent),
+        #f8fafc;
+    }
+
+    /* ✅ Ajustes del NAVBAR para móviles (sin tocar navbar.php) */
+    #topbar, .navbar-luga{ font-size:16px; }
+    @media (max-width: 576px){
+      #topbar, .navbar-luga{
+        font-size:16px;
+        --brand-font:1.0em; --nav-font:.95em; --drop-font:.95em; --icon-em:1.05em;
+        --pad-y:.44em; --pad-x:.62em;
+      }
+      #topbar .navbar-brand img, .navbar-luga .navbar-brand img{ width:1.9em; height:1.9em; }
+      #topbar .navbar-toggler, .navbar-luga .navbar-toggler{ padding:.45em .7em; }
+      #topbar .nav-avatar, #topbar .nav-initials,
+      .navbar-luga .nav-avatar, .navbar-luga .nav-initials{ width:2.1em; height:2.1em; }
+      .navbar .dropdown-menu{ font-size:.95em; }
+    }
+    @media (max-width: 360px){
+      #topbar, .navbar-luga{ font-size:15px; }
+    }
+
+    /* Estilo moderno para esta vista */
+    .page-title{
+      border:0; border-radius:1rem;
+      background: linear-gradient(135deg, #22c55e 0%, #0ea5e9 55%, #6366f1 100%);
+      color:#fff; padding:1rem 1.25rem; box-shadow: 0 20px 45px rgba(2,8,20,.12), 0 3px 10px rgba(2,8,20,.06);
+    }
+    .kpi-card{
+      border:0; border-radius:1rem;
+      box-shadow:0 10px 24px rgba(2,8,20,.06), 0 2px 8px rgba(2,8,20,.05);
+    }
+    .kpi-icon{
+      width:42px; height:42px; display:inline-grid; place-items:center; border-radius:12px;
+      background:#eef2ff; color:#1e40af;
+    }
+    .card-elev{
+      border:0; border-radius:1rem;
+      box-shadow:0 10px 24px rgba(2,8,20,.06), 0 2px 8px rgba(2,8,20,.05);
+    }
+    .badge-role{ background:#eef2ff; color:#1e40af; border:1px solid #dbeafe; }
+    .table-sm td, .table-sm th{vertical-align: middle;}
+    .badge-status{font-size:.85rem}
+  </style>
 </head>
 <body class="bg-light">
 
-<div class="container mt-4">
-  <h2>👥 Gestión de Usuarios</h2>
+<?php include 'navbar.php'; ?>
+
+<div class="container my-4">
+  <!-- Header -->
+  <div class="page-title mb-3">
+    <h2 class="mb-1">👥 Gestión de Usuarios</h2>
+    <div class="opacity-75">Administra altas/bajas, roles y resets de contraseña. Tu rol: <b><?= htmlspecialchars($ROL) ?></b></div>
+  </div>
+
   <?= $mensaje ?>
 
+  <!-- KPIs -->
+  <div class="row g-3 mb-4">
+    <div class="col-6 col-md-3">
+      <div class="kpi-card p-3 bg-white h-100">
+        <div class="d-flex align-items-center gap-3">
+          <div class="kpi-icon"><i class="bi bi-people"></i></div>
+          <div>
+            <div class="text-muted small">Activos</div>
+            <div class="h5 mb-0"><?= $kpiActivos ?></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="kpi-card p-3 bg-white h-100">
+        <div class="d-flex align-items-center gap-3">
+          <div class="kpi-icon" style="background:#fff7ed; color:#9a3412;"><i class="bi bi-person-dash"></i></div>
+          <div>
+            <div class="text-muted small">Inactivos</div>
+            <div class="h5 mb-0"><?= $kpiInactivos ?></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="kpi-card p-3 bg-white h-100">
+        <div class="d-flex align-items-center gap-3">
+          <div class="kpi-icon" style="background:#ecfeff; color:#155e75;"><i class="bi bi-shop"></i></div>
+          <div>
+            <div class="text-muted small">Sucursales</div>
+            <div class="h5 mb-0"><?= $kpiSucursales ?></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="kpi-card p-3 bg-white h-100">
+        <div class="d-flex align-items-center gap-3">
+          <div class="kpi-icon" style="background:#f0fdf4; color:#166534;"><i class="bi bi-activity"></i></div>
+          <div>
+            <div class="text-muted small">Movimientos</div>
+            <div class="h5 mb-0"><?= $kpiLogs ?></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Rol breakdown -->
+  <div class="card-elev bg-white p-3 mb-4">
+    <div class="d-flex flex-wrap align-items-center gap-2">
+      <div class="text-muted me-2">Distribución (activos):</div>
+      <?php foreach ($rolesBreak as $r=>$n): ?>
+        <span class="badge rounded-pill badge-role"><?= htmlspecialchars($r) ?>: <?= (int)$n ?></span>
+      <?php endforeach; ?>
+    </div>
+  </div>
+
   <!-- Filtros -->
-  <form class="card p-3 mb-3 shadow-sm bg-white" method="get">
+  <form class="card-elev bg-white p-3 mb-4" method="get">
     <div class="row g-2">
       <div class="col-md-4">
-        <input class="form-control" type="text" name="q" placeholder="Buscar por nombre o usuario" value="<?=htmlspecialchars($busq)?>">
+        <label class="form-label small text-muted">Búsqueda</label>
+        <input class="form-control" type="text" name="q" placeholder="Nombre o usuario" value="<?=htmlspecialchars($busq)?>">
       </div>
       <div class="col-md-3">
+        <label class="form-label small text-muted">Rol</label>
         <select name="rol" class="form-select">
-          <option value="">Todos los roles</option>
+          <option value="">Todos</option>
           <?php foreach ($roles as $r): ?>
             <option value="<?=$r?>" <?=($frol===$r?'selected':'')?>><?=$r?></option>
           <?php endforeach; ?>
         </select>
       </div>
       <div class="col-md-3">
+        <label class="form-label small text-muted">Sucursal</label>
         <select name="sucursal" class="form-select" <?=(!$permAdmin?'disabled':'')?>>
-          <option value="0">Todas las sucursales</option>
+          <option value="0">Todas</option>
           <?php foreach ($suc as $s): ?>
             <option value="<?=$s['id']?>" <?=($fsuc==$s['id']?'selected':'')?>>
               <?=htmlspecialchars($s['nombre'])?>
@@ -276,28 +414,34 @@ $roles = ['Ejecutivo','Gerente','GerenteZona','Supervisor','Admin'];
         </select>
         <?php if(!$permAdmin): ?><div class="form-text">Como Gerente, solo ves tu sucursal.</div><?php endif; ?>
       </div>
-      <div class="col-md-2 d-grid">
-        <button class="btn btn-primary" type="submit">Filtrar</button>
+      <div class="col-md-2 d-grid align-self-end">
+        <button class="btn btn-primary" type="submit"><i class="bi bi-funnel me-1"></i> Filtrar</button>
       </div>
     </div>
   </form>
 
   <!-- Tabs -->
-  <ul class="nav nav-tabs" role="tablist">
+  <ul class="nav nav-tabs card-elev bg-white px-3 pt-3" role="tablist" style="border-bottom:0;">
     <li class="nav-item" role="presentation">
-      <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-activos" type="button" role="tab">Activos</button>
+      <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-activos" type="button" role="tab">
+        Activos (<?= $kpiActivos ?>)
+      </button>
     </li>
     <li class="nav-item" role="presentation">
-      <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-inactivos" type="button" role="tab">Inactivos</button>
+      <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-inactivos" type="button" role="tab">
+        Inactivos (<?= $kpiInactivos ?>)
+      </button>
     </li>
     <li class="nav-item" role="presentation">
-      <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-bitacora" type="button" role="tab">Bitácora</button>
+      <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-bitacora" type="button" role="tab">
+        Bitácora
+      </button>
     </li>
   </ul>
 
-  <div class="tab-content card border-top-0 shadow-sm">
+  <div class="tab-content card-elev bg-white mt-2">
     <!-- Activos -->
-    <div class="tab-pane fade show active" id="tab-activos" role="tabpanel">
+    <div class="tab-pane fade show active p-3" id="tab-activos" role="tabpanel">
       <div class="table-responsive">
         <table class="table table-hover align-middle mb-0">
           <thead class="table-light">
@@ -308,7 +452,7 @@ $roles = ['Ejecutivo','Gerente','GerenteZona','Supervisor','Admin'];
           </thead>
           <tbody>
             <?php if (!$usuariosActivos): ?>
-              <tr><td colspan="6" class="text-center py-4">Sin usuarios activos.</td></tr>
+              <tr><td colspan="6" class="text-center py-4 text-muted">Sin usuarios activos.</td></tr>
             <?php else: foreach ($usuariosActivos as $u):
               $bloqGerente = (!$permAdmin && $permGerente && !puedeGerenteOperar($u, $ID_SUCURSAL));
               $deshabBaja  = ($u['id']===$ID_USUARIO) || ($u['rol']==='Admin' && !$permAdmin) || $bloqGerente;
@@ -319,22 +463,22 @@ $roles = ['Ejecutivo','Gerente','GerenteZona','Supervisor','Admin'];
                 <td><?=intval($u['id'])?></td>
                 <td><?=htmlspecialchars($u['nombre'])?></td>
                 <td><?=htmlspecialchars($u['usuario'])?></td>
-                <td><?=htmlspecialchars($u['rol'])?></td>
+                <td><span class="badge badge-role rounded-pill"><?=htmlspecialchars($u['rol'])?></span></td>
                 <td><?=htmlspecialchars($u['sucursal_nombre'] ?? '-')?></td>
                 <td class="text-end">
                   <button class="btn btn-outline-danger btn-sm"
                           data-bs-toggle="modal" data-bs-target="#modalBaja"
                           data-id="<?=$u['id']?>" data-nombre="<?=htmlspecialchars($u['nombre'])?>"
-                          <?= $deshabBaja ? 'disabled' : '' ?>>Dar de baja</button>
+                          <?= $deshabBaja ? 'disabled' : '' ?>><i class="bi bi-person-x me-1"></i> Baja</button>
                   <button class="btn btn-outline-secondary btn-sm"
                           data-bs-toggle="modal" data-bs-target="#modalRol"
                           data-id="<?=$u['id']?>" data-nombre="<?=htmlspecialchars($u['nombre'])?>"
                           data-rol="<?=$u['rol']?>"
-                          <?= $deshabRol ? 'disabled' : '' ?>>Cambiar rol</button>
+                          <?= $deshabRol ? 'disabled' : '' ?>><i class="bi bi-person-gear me-1"></i> Rol</button>
                   <button class="btn btn-outline-warning btn-sm"
                           data-bs-toggle="modal" data-bs-target="#modalResetPass"
                           data-id="<?=$u['id']?>" data-nombre="<?=htmlspecialchars($u['nombre'])?>"
-                          <?= $deshabReset ? 'disabled' : '' ?>>Resetear contraseña</button>
+                          <?= $deshabReset ? 'disabled' : '' ?>><i class="bi bi-key me-1"></i> Reset</button>
                 </td>
               </tr>
             <?php endforeach; endif; ?>
@@ -344,7 +488,7 @@ $roles = ['Ejecutivo','Gerente','GerenteZona','Supervisor','Admin'];
     </div>
 
     <!-- Inactivos -->
-    <div class="tab-pane fade" id="tab-inactivos" role="tabpanel">
+    <div class="tab-pane fade p-3" id="tab-inactivos" role="tabpanel">
       <div class="table-responsive">
         <table class="table table-hover align-middle mb-0">
           <thead class="table-light">
@@ -355,7 +499,7 @@ $roles = ['Ejecutivo','Gerente','GerenteZona','Supervisor','Admin'];
           </thead>
           <tbody>
             <?php if (!$usuariosInactivos): ?>
-              <tr><td colspan="6" class="text-center py-4">Sin usuarios inactivos.</td></tr>
+              <tr><td colspan="6" class="text-center py-4 text-muted">Sin usuarios inactivos.</td></tr>
             <?php else: foreach ($usuariosInactivos as $u):
               $bloqGerente = (!$permAdmin && $permGerente && !puedeGerenteOperar($u, $ID_SUCURSAL));
               $deshabReac  = ($u['rol']==='Admin' && !$permAdmin) || $bloqGerente;
@@ -365,17 +509,17 @@ $roles = ['Ejecutivo','Gerente','GerenteZona','Supervisor','Admin'];
                 <td><?=intval($u['id'])?></td>
                 <td><?=htmlspecialchars($u['nombre'])?></td>
                 <td><?=htmlspecialchars($u['usuario'])?></td>
-                <td><?=htmlspecialchars($u['rol'])?></td>
+                <td><span class="badge badge-role rounded-pill"><?=htmlspecialchars($u['rol'])?></span></td>
                 <td><?=htmlspecialchars($u['sucursal_nombre'] ?? '-')?></td>
                 <td class="text-end">
                   <button class="btn btn-outline-success btn-sm"
                           data-bs-toggle="modal" data-bs-target="#modalReactivar"
                           data-id="<?=$u['id']?>" data-nombre="<?=htmlspecialchars($u['nombre'])?>"
-                          <?= $deshabReac ? 'disabled' : '' ?>>Reactivar</button>
+                          <?= $deshabReac ? 'disabled' : '' ?>><i class="bi bi-person-check me-1"></i> Reactivar</button>
                   <button class="btn btn-outline-warning btn-sm"
                           data-bs-toggle="modal" data-bs-target="#modalResetPass"
                           data-id="<?=$u['id']?>" data-nombre="<?=htmlspecialchars($u['nombre'])?>"
-                          <?= $deshabResetInac ? 'disabled' : '' ?>>Resetear contraseña</button>
+                          <?= $deshabResetInac ? 'disabled' : '' ?>><i class="bi bi-key me-1"></i> Reset</button>
                 </td>
               </tr>
             <?php endforeach; endif; ?>
@@ -385,41 +529,39 @@ $roles = ['Ejecutivo','Gerente','GerenteZona','Supervisor','Admin'];
     </div>
 
     <!-- Bitácora -->
-    <div class="tab-pane fade" id="tab-bitacora" role="tabpanel">
-      <div class="p-3">
-        <h5 class="mb-2">Últimos <?=$logLimit?> movimientos</h5>
-        <div class="table-responsive">
-          <table class="table table-sm table-striped align-middle">
-            <thead class="table-light">
+    <div class="tab-pane fade p-3" id="tab-bitacora" role="tabpanel">
+      <h6 class="mb-2">Últimos <?= $logLimit ?> movimientos</h6>
+      <div class="table-responsive">
+        <table class="table table-sm table-striped align-middle mb-0">
+          <thead class="table-light">
+            <tr>
+              <th>#</th>
+              <th>Fecha</th>
+              <th>Acción</th>
+              <th>Actor</th>
+              <th>Usuario afectado</th>
+              <th>Detalles</th>
+              <th>IP</th>
+            </tr>
+          </thead>
+          <tbody>
+            <?php if (empty($logs)): ?>
+              <tr><td colspan="7" class="text-center py-3 text-muted">Sin registros.</td></tr>
+            <?php else: foreach ($logs as $l): ?>
               <tr>
-                <th>#</th>
-                <th>Fecha</th>
-                <th>Acción</th>
-                <th>Actor</th>
-                <th>Usuario afectado</th>
-                <th>Detalles</th>
-                <th>IP</th>
+                <td><?=intval($l['id'])?></td>
+                <td><?=htmlspecialchars($l['created_at'])?></td>
+                <td><span class="badge bg-secondary"><?=htmlspecialchars($l['accion'])?></span></td>
+                <td><?=htmlspecialchars($l['actor_nombre'] ?: '-')?></td>
+                <td><?=htmlspecialchars(($l['target_nombre'] ?: '-') . ' (' . ($l['target_user'] ?: '-') . ')')?></td>
+                <td><?=htmlspecialchars($l['detalles'] ?: '-')?></td>
+                <td><?=htmlspecialchars($l['ip'] ?: '-')?></td>
               </tr>
-            </thead>
-            <tbody>
-              <?php if (empty($logs)): ?>
-                <tr><td colspan="7" class="text-center py-3">Sin registros.</td></tr>
-              <?php else: foreach ($logs as $l): ?>
-                <tr>
-                  <td><?=intval($l['id'])?></td>
-                  <td><?=htmlspecialchars($l['created_at'])?></td>
-                  <td><span class="badge bg-secondary"><?=htmlspecialchars($l['accion'])?></span></td>
-                  <td><?=htmlspecialchars($l['actor_nombre'] ?: '-')?></td>
-                  <td><?=htmlspecialchars(($l['target_nombre'] ?: '-') . ' (' . ($l['target_user'] ?: '-') . ')')?></td>
-                  <td><?=htmlspecialchars($l['detalles'] ?: '-')?></td>
-                  <td><?=htmlspecialchars($l['ip'] ?: '-')?></td>
-                </tr>
-              <?php endforeach; endif; ?>
-            </tbody>
-          </table>
-        </div>
-        <div class="text-muted small">* El historial se conserva aunque el usuario sea reactivado.</div>
+            <?php endforeach; endif; ?>
+          </tbody>
+        </table>
       </div>
+      <div class="text-muted small mt-2">* El historial se conserva aunque el usuario sea reactivado.</div>
     </div>
   </div>
 </div>
@@ -450,7 +592,7 @@ $roles = ['Ejecutivo','Gerente','GerenteZona','Supervisor','Admin'];
           <input type="date" name="fecha_baja" class="form-control" value="<?=date('Y-m-d')?>">
         </div>
 
-        <!-- ✅ Checklist informativo, no se guarda (habilita el botón al marcar los tres) -->
+        <!-- Checklist informativo -->
         <div class="mb-3">
           <label class="form-label">Checklist de bajas/seguridad</label>
           <div class="form-check">
@@ -465,7 +607,6 @@ $roles = ['Ejecutivo','Gerente','GerenteZona','Supervisor','Admin'];
             <input class="form-check-input" type="checkbox" id="chkTiempoAire">
             <label class="form-check-label" for="chkTiempoAire">Cambio de contraseña para Tiempo aire</label>
           </div>
-          <!-- <div class="form-text">Estos checks no se guardan; para confirmar debes marcar los 3.</div> -->
         </div>
 
         <div class="alert alert-warning mb-0">Esta acción desactiva el acceso inmediatamente.</div>
@@ -568,6 +709,8 @@ $roles = ['Ejecutivo','Gerente','GerenteZona','Supervisor','Admin'];
   </div>
 </div>
 
+<!-- JS (si tu navbar no lo carga ya, descomenta la línea de Bootstrap) -->
+<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
 <script>
 // Modal Baja: setea datos y controla el checklist
 const modalBaja = document.getElementById('modalBaja');
@@ -583,7 +726,6 @@ modalBaja.addEventListener('show.bs.modal', e => {
 
   function toggleBtn(){ btn.disabled = !(chkPay.checked && chkKre.checked && chkTA.checked); }
 
-  // Reiniciar estado y asignar listeners (sin duplicar)
   chkPay.checked = false;
   chkKre.checked = false;
   chkTA.checked  = false;
@@ -591,7 +733,6 @@ modalBaja.addEventListener('show.bs.modal', e => {
   chkPay.onchange = toggleBtn;
   chkKre.onchange = toggleBtn;
   chkTA.onchange  = toggleBtn;
-
   chkPay.oninput = toggleBtn;
   chkKre.oninput = toggleBtn;
   chkTA.oninput  = toggleBtn;

@@ -80,9 +80,6 @@ if ($estatus !== 'Todos') {
     $whereH .= " AND t.estatus = ?";
     $params[] = $estatus;
     $types   .= "s";
-} else {
-    // Histórico normalmente excluye Pendiente, pero si quieres verlo también, deja así:
-    // $whereH .= " AND t.estatus <> 'Pendiente'";
 }
 
 if ($idDest > 0) {
@@ -117,21 +114,66 @@ $stmtHist->close();
 <html lang="es">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1"> <!-- ✅ Ajuste responsive para navbar y layout -->
   <title>Traspasos Salientes Pendientes</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+  <link rel="icon" type="image/x-icon" href="./img/favicon.ico">
+
+  <!-- Bootstrap 5 -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
+
   <style>
+    :root{
+      --brand:#0d6efd;
+      --brand-100: rgba(13,110,253,.08);
+    }
+    body.bg-light{
+      background:
+        radial-gradient(1100px 420px at 110% -80%, var(--brand-100), transparent),
+        radial-gradient(1100px 420px at -10% 120%, rgba(25,135,84,.06), transparent),
+        #f8fafc;
+    }
+
+    /* ✅ Ajustes del NAVBAR para móviles (sin tocar navbar.php) */
+    #topbar, .navbar-luga{ font-size:16px; }
+    @media (max-width: 576px){
+      #topbar, .navbar-luga{
+        font-size:16px;
+        --brand-font:1.0em; --nav-font:.95em; --drop-font:.95em; --icon-em:1.05em;
+        --pad-y:.44em; --pad-x:.62em;
+      }
+      #topbar .navbar-brand img, .navbar-luga .navbar-brand img{ width:1.9em; height:1.9em; }
+      #topbar .navbar-toggler, .navbar-luga .navbar-toggler{ padding:.45em .7em; }
+      #topbar .nav-avatar, #topbar .nav-initials,
+      .navbar-luga .nav-avatar, .navbar-luga .nav-initials{ width:2.1em; height:2.1em; }
+      .navbar .dropdown-menu{ font-size:.95em; }
+    }
+    @media (max-width: 360px){
+      #topbar, .navbar-luga{ font-size:15px; }
+    }
+
+    /* Detalles visuales de esta vista (no invasivo) */
     .badge-status{font-size:.85rem}
     .table-sm td, .table-sm th{vertical-align: middle;}
     .btn-link{padding:0}
+    .card{ border:0; border-radius:1rem; box-shadow:0 10px 24px rgba(2,8,20,.06), 0 2px 8px rgba(2,8,20,.05); }
+    .card-header{ border-top-left-radius:1rem; border-top-right-radius:1rem; }
+    .page-title{
+      border:0; border-radius:1rem;
+      background: linear-gradient(135deg, #22c55e 0%, #0ea5e9 55%, #6366f1 100%);
+      color:#fff; padding:1rem 1.25rem; box-shadow: 0 20px 45px rgba(2,8,20,.12), 0 3px 10px rgba(2,8,20,.06);
+    }
   </style>
 </head>
 <body class="bg-light">
 
 <?php include 'navbar.php'; ?>
 
-<div class="container mt-4">
-  <h2>📦 Traspasos Salientes Pendientes</h2>
-  <p class="text-muted">Traspasos enviados por tu sucursal que aún no han sido confirmados por el destino.</p>
+<div class="container my-4">
+  <div class="page-title mb-3">
+    <h2 class="mb-0">📦 Traspasos Salientes Pendientes</h2>
+    <p class="mb-0 opacity-75">Traspasos enviados por tu sucursal que aún no han sido confirmados por el destino.</p>
+  </div>
+
   <?= $mensaje ?>
 
   <?php if ($traspasosPend->num_rows > 0): ?>
@@ -147,9 +189,9 @@ $stmtHist->close();
           ORDER BY p.marca, p.modelo, i.id
       ");
       ?>
-      <div class="card mb-4 shadow">
+      <div class="card mb-4">
         <div class="card-header bg-secondary text-white">
-          <div class="d-flex justify-content-between align-items-center">
+          <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
             <span>
               Traspaso #<?= $idTraspaso ?> |
               Destino: <b><?= h($traspaso['sucursal_destino']) ?></b> |
@@ -159,30 +201,32 @@ $stmtHist->close();
           </div>
         </div>
         <div class="card-body p-0">
-          <table class="table table-striped table-bordered table-sm mb-0">
-            <thead class="table-dark">
-              <tr>
-                <th>ID Inv</th><th>Marca</th><th>Modelo</th><th>Color</th><th>Capacidad</th>
-                <th>IMEI1</th><th>IMEI2</th><th>Estatus</th>
-              </tr>
-            </thead>
-            <tbody>
-              <?php while ($row = $detalles->fetch_assoc()): ?>
+          <div class="table-responsive">
+            <table class="table table-striped table-bordered table-sm mb-0">
+              <thead class="table-dark">
                 <tr>
-                  <td><?= (int)$row['id'] ?></td>
-                  <td><?= h($row['marca']) ?></td>
-                  <td><?= h($row['modelo']) ?></td>
-                  <td><?= h($row['color']) ?></td>
-                  <td><?= $row['capacidad'] ?: '-' ?></td>
-                  <td><?= h($row['imei1']) ?></td>
-                  <td><?= $row['imei2'] ? h($row['imei2']) : '-' ?></td>
-                  <td>En tránsito</td>
+                  <th>ID Inv</th><th>Marca</th><th>Modelo</th><th>Color</th><th>Capacidad</th>
+                  <th>IMEI1</th><th>IMEI2</th><th>Estatus</th>
                 </tr>
-              <?php endwhile; ?>
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                <?php while ($row = $detalles->fetch_assoc()): ?>
+                  <tr>
+                    <td><?= (int)$row['id'] ?></td>
+                    <td><?= h($row['marca']) ?></td>
+                    <td><?= h($row['modelo']) ?></td>
+                    <td><?= h($row['color']) ?></td>
+                    <td><?= $row['capacidad'] ?: '-' ?></td>
+                    <td><?= h($row['imei1']) ?></td>
+                    <td><?= $row['imei2'] ? h($row['imei2']) : '-' ?></td>
+                    <td><span class="badge text-bg-warning">En tránsito</span></td>
+                  </tr>
+                <?php endwhile; ?>
+              </tbody>
+            </table>
+          </div>
         </div>
-        <div class="card-footer text-muted d-flex justify-content-between align-items-center">
+        <div class="card-footer text-muted d-flex justify-content-between align-items-center flex-wrap gap-2">
           <span>Esperando confirmación de <b><?= h($traspaso['sucursal_destino']) ?></b>...</span>
           <form method="POST" action="eliminar_traspaso.php"
                 onsubmit="return confirm('¿Eliminar este traspaso? Esta acción no se puede deshacer.')">
@@ -276,8 +320,8 @@ $stmtHist->close();
       elseif ($h['estatus']==='Rechazado') $badge='bg-danger';
       elseif ($h['estatus']==='Pendiente') $badge='bg-info text-dark';
       ?>
-      <div class="card mb-3 shadow-sm">
-        <div class="card-header d-flex justify-content-between align-items-center">
+      <div class="card mb-3">
+        <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
           <div>
             <span class="badge badge-status <?= $badge ?>"><?= h($h['estatus']) ?></span>
             &nbsp; Traspaso #<?= $idT ?> · Destino: <b><?= h($h['sucursal_destino']) ?></b>
@@ -360,6 +404,7 @@ $stmtHist->close();
   <?php endif; ?>
 </div>
 
-<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script> -->
+<!-- Si tu navbar no carga el JS de Bootstrap, descomenta la siguiente línea -->
+<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
 </body>
 </html>

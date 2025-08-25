@@ -15,26 +15,23 @@ $whereSucursal     = "id_sucursal_destino = $idSucursalUsuario";
 $mensaje = "";
 
 /* -----------------------------------------------------------
-   Utilidades: detectar si una columna existe (para bitácoras)
+   Utilidades
 ----------------------------------------------------------- */
 function hasColumn(mysqli $conn, string $table, string $column): bool {
-    $table = $conn->real_escape_string($table);
+    $table  = $conn->real_escape_string($table);
     $column = $conn->real_escape_string($column);
     $rs = $conn->query("SHOW COLUMNS FROM `$table` LIKE '$column'");
     return $rs && $rs->num_rows > 0;
 }
+function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 
-$hasDT_Resultado     = hasColumn($conn, 'detalle_traspaso', 'resultado');
-$hasDT_FechaResultado= hasColumn($conn, 'detalle_traspaso', 'fecha_resultado');
-$hasT_FechaRecep     = hasColumn($conn, 'traspasos', 'fecha_recepcion');
-$hasT_UsuarioRecibio = hasColumn($conn, 'traspasos', 'usuario_recibio');
+$hasDT_Resultado      = hasColumn($conn, 'detalle_traspaso', 'resultado');
+$hasDT_FechaResultado = hasColumn($conn, 'detalle_traspaso', 'fecha_resultado');
+$hasT_FechaRecep      = hasColumn($conn, 'traspasos', 'fecha_recepcion');
+$hasT_UsuarioRecibio  = hasColumn($conn, 'traspasos', 'usuario_recibio');
 
 /* ==========================================================
    POST: Recepción parcial / total
-   - Recibe lo marcado (checkbox) -> va a destino y Disponible
-   - Lo no marcado se regresa al origen y Disponible
-   - Estatus: Completado / Parcial / Rechazado
-   - Guarda bitácora por pieza si existen columnas
 ========================================================== */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['procesar_traspaso'])) {
     $idTraspaso = (int)($_POST['id_traspaso'] ?? 0);
@@ -72,7 +69,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['procesar_traspaso']))
             $mensaje = "<div class='alert alert-warning mt-3'>⚠️ El traspaso no contiene productos.</div>";
         } else {
             // Sanitizar marcados: que existan en el traspaso
-            $marcados = array_values(array_intersect($marcados, $todos));
+            $marcados   = array_values(array_intersect($marcados, $todos));
             $rechazados = [];
             foreach ($todos as $idInv) {
                 if (!in_array($idInv, $marcados, true)) $rechazados[] = $idInv;
@@ -129,9 +126,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['procesar_traspaso']))
                 }
 
                 // Estatus del traspaso
-                $total = count($todos);
-                $ok    = count($marcados);
-                $rej   = count($rechazados);
+                $total   = count($todos);
+                $ok      = count($marcados);
+                $rej     = count($rechazados);
                 $estatus = ($ok === 0) ? 'Rechazado' : (($ok < $total) ? 'Parcial' : 'Completado');
 
                 // Actualizar traspaso (fecha/usuario si existen)
@@ -148,18 +145,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['procesar_traspaso']))
                 $conn->commit();
 
                 $mensaje = "<div class='alert alert-success mt-3'>
-                    ✅ Traspaso #$idTraspaso procesado. Recibidos: <b>$ok</b> · Rechazados: <b>$rej</b> · Estatus: <b>$estatus</b>.
+                    ✅ Traspaso #".h($idTraspaso)." procesado. Recibidos: <b>".h($ok)."</b> · Rechazados: <b>".h($rej)."</b> · Estatus: <b>".h($estatus)."</b>.
                 </div>";
             } catch (Throwable $e) {
                 $conn->rollback();
-                $mensaje = "<div class='alert alert-danger mt-3'>❌ Error al procesar: ".htmlspecialchars($e->getMessage())."</div>";
+                $mensaje = "<div class='alert alert-danger mt-3'>❌ Error al procesar: ".h($e->getMessage())."</div>";
             }
         }
     }
 }
 
 /* ==========================================================
-   Traspasos pendientes de la sucursal
+   Traspasos pendientes de la sucursal + RESUMEN
 ========================================================== */
 $sql = "
     SELECT t.id, t.fecha_traspaso, s.nombre AS sucursal_origen, u.nombre AS usuario_creo
@@ -170,24 +167,194 @@ $sql = "
     ORDER BY t.fecha_traspaso ASC, t.id ASC
 ";
 $traspasos = $conn->query($sql);
+$cntTraspasos = $traspasos ? $traspasos->num_rows : 0;
+
+// Nombre sucursal
+$nomSucursal = '—';
+$stS = $conn->prepare("SELECT nombre FROM sucursales WHERE id=?");
+$stS->bind_param("i",$idSucursalUsuario);
+$stS->execute();
+if ($rowS = $stS->get_result()->fetch_assoc()) $nomSucursal = $rowS['nombre'];
+$stS->close();
+
+// Totales de piezas por recibir y últimas fechas
+$totItems = 0; $minFecha = null; $maxFecha = null;
+$stRes = $conn->prepare("
+    SELECT COUNT(*) AS items, MIN(t.fecha_traspaso) AS primero, MAX(t.fecha_traspaso) AS ultimo
+    FROM detalle_traspaso dt
+    INNER JOIN traspasos t ON t.id = dt.id_traspaso
+    WHERE t.$whereSucursal AND t.estatus='Pendiente'
+");
+$stRes->execute();
+$rRes = $stRes->get_result()->fetch_assoc();
+if ($rRes){
+  $totItems = (int)$rRes['items'];
+  $minFecha = $rRes['primero'];
+  $maxFecha = $rRes['ultimo'];
+}
+$stRes->close();
 ?>
 <!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1"> <!-- ✅ Responsive navbar/layout -->
   <title>Traspasos Pendientes</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+  <link rel="icon" type="image/x-icon" href="./img/favicon.ico">
+
+  <!-- Bootstrap & Icons -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css">
+
   <style>
+    :root{
+      --brand:#0d6efd;
+      --brand-100:rgba(13,110,253,.08);
+    }
+    body.bg-light{
+      background:
+        radial-gradient(1200px 420px at 110% -80%, var(--brand-100), transparent),
+        radial-gradient(1200px 420px at -10% 120%, rgba(25,135,84,.06), transparent),
+        #f8fafc;
+    }
+
+    /* 🔧 Ajuste del NAVBAR para móvil (sin tocar navbar.php) */
+    #topbar, .navbar-luga{ font-size:16px; }
+    @media (max-width:576px){
+      #topbar, .navbar-luga{
+        font-size:16px;
+        --brand-font:1.0em; --nav-font:.95em; --drop-font:.95em; --icon-em:1.05em;
+        --pad-y:.44em; --pad-x:.62em;
+      }
+      #topbar .navbar-brand img, .navbar-luga .navbar-brand img{ width:1.9em; height:1.9em; }
+      #topbar .navbar-toggler, .navbar-luga .navbar-toggler{ padding:.45em .7em; }
+      #topbar .nav-avatar, #topbar .nav-initials,
+      .navbar-luga .nav-avatar, .navbar-luga .nav-initials{ width:2.1em; height:2.1em; }
+    }
+    @media (max-width:360px){
+      #topbar, .navbar-luga{ font-size:15px; }
+    }
+
+    /* Encabezado moderno */
+    .page-head{
+      border:0; border-radius:1rem;
+      background: linear-gradient(135deg, #22c55e 0%, #0ea5e9 55%, #6366f1 100%);
+      color:#fff;
+      box-shadow: 0 20px 45px rgba(2,8,20,.12), 0 3px 10px rgba(2,8,20,.06);
+    }
+    .page-head .icon{
+      width:48px;height:48px; display:grid;place-items:center;
+      background:rgba(255,255,255,.15); border-radius:14px;
+    }
+    .chip{
+      background:rgba(255,255,255,.16);
+      border:1px solid rgba(255,255,255,.25);
+      color:#fff; padding:.35rem .6rem; border-radius:999px; font-weight:600;
+    }
+
+    /* Cards stats */
+    .card-elev{
+      border:0; border-radius:1rem;
+      box-shadow:0 10px 28px rgba(2,8,20,.06), 0 2px 8px rgba(2,8,20,.05);
+    }
+    .stat{
+      display:flex; align-items:center; gap:.75rem;
+    }
+    .stat .bubble{
+      width:42px; height:42px; display:grid; place-items:center;
+      border-radius:12px; background:#eef2ff; color:#312e81;
+    }
+
+    /* Sección traspaso */
+    .card-header-gradient{
+      background: linear-gradient(135deg,#0f172a 0%,#111827 100%);
+      color:#fff; border-top-left-radius:1rem; border-top-right-radius:1rem;
+    }
+    .table thead th{ letter-spacing:.4px; text-transform:uppercase; font-size:.78rem; }
+    .sticky-actions{
+      position:sticky; bottom:0; background:#fff; padding:12px; 
+      border-top:1px solid #e5e7eb; border-bottom-left-radius:1rem; border-bottom-right-radius:1rem;
+    }
+
+    .btn-confirm{
+      background:linear-gradient(90deg,#16a34a,#22c55e); border:0;
+      box-shadow: 0 6px 18px rgba(22,163,74,.25);
+    }
+    .btn-confirm:hover{ filter:brightness(.98); }
+
     .chk-cell{ width:72px; text-align:center }
-    .sticky-actions{ position:sticky; bottom:0; background:#fff; padding:10px; border-top:1px solid #e5e7eb }
   </style>
 </head>
 <body class="bg-light">
 
 <?php include 'navbar.php'; ?>
 
-<div class="container mt-4">
-  <h2>📦 Traspasos Pendientes</h2>
+<div class="container my-4">
+
+  <!-- Encabezado -->
+  <div class="page-head p-4 p-md-5 mb-4">
+    <div class="d-flex flex-wrap align-items-center gap-3">
+      <div class="icon"><i class="bi bi-boxes fs-4"></i></div>
+      <div class="flex-grow-1">
+        <h2 class="mb-1 fw-bold">Traspasos Pendientes</h2>
+        <div class="opacity-75">Sucursal: <strong><?= h($nomSucursal) ?></strong></div>
+      </div>
+      <div class="d-flex flex-wrap gap-2">
+        <span class="chip"><i class="bi bi-clock-history me-1"></i> <?= date('d/m/Y H:i') ?></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Cards de información -->
+  <div class="row g-3 mb-4">
+    <div class="col-md-4">
+      <div class="card card-elev h-100">
+        <div class="card-body">
+          <div class="stat">
+            <div class="bubble"><i class="bi bi-arrow-left-right"></i></div>
+            <div>
+              <div class="text-muted small">Traspasos pendientes</div>
+              <div class="fs-4 fw-bold"><?= (int)$cntTraspasos ?></div>
+            </div>
+          </div>
+          <div class="mt-3 small text-muted">Confirma para liberar artículos al inventario local.</div>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-4">
+      <div class="card card-elev h-100">
+        <div class="card-body">
+          <div class="stat">
+            <div class="bubble" style="background:#ecfeff;color:#164e63;"><i class="bi bi-phone"></i></div>
+            <div>
+              <div class="text-muted small">Piezas por revisar</div>
+              <div class="fs-4 fw-bold"><?= (int)$totItems ?></div>
+            </div>
+          </div>
+          <div class="mt-3 small text-muted">Marcarás solo lo que <b>SÍ</b> recibiste. Lo demás se rechaza.</div>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-4">
+      <div class="card card-elev h-100">
+        <div class="card-body">
+          <div class="stat">
+            <div class="bubble" style="background:#fef3c7;color:#7c2d12;"><i class="bi bi-calendar-event"></i></div>
+            <div>
+              <div class="text-muted small">Rango de fechas</div>
+              <div class="fw-semibold">
+                <?= $minFecha ? h(date('d/m/Y', strtotime($minFecha))) : '—' ?> 
+                <span class="text-muted">→</span>
+                <?= $maxFecha ? h(date('d/m/Y', strtotime($maxFecha))) : '—' ?>
+              </div>
+            </div>
+          </div>
+          <div class="mt-3 small text-muted">Revisa primero los traspasos más antiguos.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <?= $mensaje ?>
 
   <?php if ($traspasos && $traspasos->num_rows > 0): ?>
@@ -203,15 +370,17 @@ $traspasos = $conn->query($sql);
           ORDER BY p.marca, p.modelo, i.id
       ");
       ?>
-      <div class="card mb-4 shadow">
-        <div class="card-header bg-dark text-white">
-          <div class="d-flex flex-wrap justify-content-between align-items-center">
-            <span>
-              Traspaso #<?= $idTraspaso ?>
-              &nbsp;|&nbsp; Origen: <b><?= htmlspecialchars($traspaso['sucursal_origen']) ?></b>
-              &nbsp;|&nbsp; Fecha: <?= htmlspecialchars($traspaso['fecha_traspaso']) ?>
-            </span>
-            <span>Creado por: <?= htmlspecialchars($traspaso['usuario_creo']) ?></span>
+      <div class="card card-elev mb-4">
+        <div class="card-header card-header-gradient">
+          <div class="d-flex flex-column flex-md-row justify-content-between align-items-md-center gap-2">
+            <div class="fw-semibold">
+              <i class="bi bi-hash"></i> Traspaso <strong>#<?= $idTraspaso ?></strong>
+              <span class="ms-2">• Origen: <strong><?= h($traspaso['sucursal_origen']) ?></strong></span>
+              <span class="ms-2">• Fecha: <strong><?= h($traspaso['fecha_traspaso']) ?></strong></span>
+            </div>
+            <div class="opacity-75">
+              Creado por: <strong><?= h($traspaso['usuario_creo']) ?></strong>
+            </div>
           </div>
         </div>
 
@@ -219,53 +388,59 @@ $traspasos = $conn->query($sql);
           <input type="hidden" name="id_traspaso" value="<?= $idTraspaso ?>">
 
           <div class="card-body p-0">
-            <table class="table table-striped table-bordered table-sm mb-0">
-              <thead class="table-dark">
-                <tr>
-                  <th class="chk-cell">
-                    <input type="checkbox" class="form-check-input" id="chk_all_<?= $idTraspaso ?>" checked
-                      onclick="toggleAll(<?= $idTraspaso ?>, this.checked)">
-                  </th>
-                  <th>ID Inv</th>
-                  <th>Marca</th>
-                  <th>Modelo</th>
-                  <th>Color</th>
-                  <th>IMEI1</th>
-                  <th>IMEI2</th>
-                  <th>Estatus Actual</th>
-                </tr>
-              </thead>
-              <tbody>
-                <?php while ($row = $detalles->fetch_assoc()): ?>
+            <div class="table-responsive">
+              <table class="table table-striped table-hover table-sm mb-0">
+                <thead class="table-dark">
                   <tr>
-                    <td class="chk-cell">
-                      <input type="checkbox" class="form-check-input chk-item-<?= $idTraspaso ?>"
-                             name="aceptar[]" value="<?= (int)$row['id'] ?>" checked>
-                    </td>
-                    <td><?= (int)$row['id'] ?></td>
-                    <td><?= htmlspecialchars($row['marca']) ?></td>
-                    <td><?= htmlspecialchars($row['modelo']) ?></td>
-                    <td><?= htmlspecialchars($row['color']) ?></td>
-                    <td><?= htmlspecialchars($row['imei1']) ?></td>
-                    <td><?= $row['imei2'] ? htmlspecialchars($row['imei2']) : '-' ?></td>
-                    <td>En tránsito</td>
+                    <th class="chk-cell">
+                      <input type="checkbox" class="form-check-input" id="chk_all_<?= $idTraspaso ?>" checked
+                        onclick="toggleAll(<?= $idTraspaso ?>, this.checked)">
+                    </th>
+                    <th>ID Inv</th>
+                    <th>Marca</th>
+                    <th>Modelo</th>
+                    <th>Color</th>
+                    <th>IMEI1</th>
+                    <th>IMEI2</th>
+                    <th>Estatus</th>
                   </tr>
-                <?php endwhile; ?>
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  <?php if ($detalles && $detalles->num_rows): ?>
+                    <?php while ($row = $detalles->fetch_assoc()): ?>
+                      <tr>
+                        <td class="chk-cell">
+                          <input type="checkbox" class="form-check-input chk-item-<?= $idTraspaso ?>"
+                                 name="aceptar[]" value="<?= (int)$row['id'] ?>" checked>
+                        </td>
+                        <td><?= (int)$row['id'] ?></td>
+                        <td><?= h($row['marca']) ?></td>
+                        <td><?= h($row['modelo']) ?></td>
+                        <td><?= h($row['color']) ?></td>
+                        <td><?= h($row['imei1']) ?></td>
+                        <td><?= $row['imei2'] ? h($row['imei2']) : '—' ?></td>
+                        <td><span class="badge text-bg-warning">En tránsito</span></td>
+                      </tr>
+                    <?php endwhile; ?>
+                  <?php else: ?>
+                    <tr><td colspan="8" class="text-center text-muted py-3">Sin detalle</td></tr>
+                  <?php endif; ?>
+                </tbody>
+              </table>
+            </div>
           </div>
 
-          <div class="sticky-actions d-flex justify-content-between align-items-center">
+          <div class="sticky-actions d-flex flex-wrap gap-2 justify-content-between align-items-center">
             <div class="text-muted">
               Marca lo que <b>SÍ recibiste</b>. Lo demás se <b>rechaza</b> y regresa a la sucursal origen.
             </div>
             <div class="d-flex gap-2">
               <button type="button" class="btn btn-outline-secondary btn-sm"
-                      onclick="toggleAll(<?= $idTraspaso ?>, true)">Marcar todo</button>
+                      onclick="toggleAll(<?= $idTraspaso ?>, true)"><i class="bi bi-check2-all me-1"></i> Marcar todo</button>
               <button type="button" class="btn btn-outline-secondary btn-sm"
-                      onclick="toggleAll(<?= $idTraspaso ?>, false)">Desmarcar todo</button>
-              <button type="submit" name="procesar_traspaso" class="btn btn-success btn-sm">
-                ✅ Procesar recepción
+                      onclick="toggleAll(<?= $idTraspaso ?>, false)"><i class="bi bi-x-circle me-1"></i> Desmarcar todo</button>
+              <button type="submit" name="procesar_traspaso" class="btn btn-confirm text-white btn-sm">
+                <i class="bi bi-send-check me-1"></i> Procesar recepción
               </button>
             </div>
           </div>
@@ -273,10 +448,18 @@ $traspasos = $conn->query($sql);
       </div>
     <?php endwhile; ?>
   <?php else: ?>
-    <div class="alert alert-info mt-3">No hay traspasos pendientes para tu sucursal.</div>
+    <div class="card card-elev">
+      <div class="card-body text-center py-5">
+        <div class="display-6 mb-2">😌</div>
+        <h5 class="mb-1">No hay traspasos pendientes para tu sucursal</h5>
+        <div class="text-muted">Cuando recibas traspasos, aparecerán aquí para su confirmación.</div>
+      </div>
+    </div>
   <?php endif; ?>
 </div>
 
+<!-- Si tu navbar ya importa Bootstrap JS, puedes omitir esto -->
+<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
 <script>
 function toggleAll(idT, checked){
   document.querySelectorAll('.chk-item-' + idT).forEach(el => el.checked = checked);
