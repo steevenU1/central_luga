@@ -1,20 +1,12 @@
 <?php
-// generar_snapshot_inventario.php  (compatible con MySQL/MariaDB sin "ADD COLUMN IF NOT EXISTS")
-// - Crea/actualiza snapshot de inventario
-// - Auto-evoluciona columnas/índices consultando INFORMATION_SCHEMA
-// - Aplica retención
+// generar_snapshot_inventario.php  (sin validación de token)
+// - Genera snapshot diario de inventario
+// - Auto-evoluciona columnas/índices consultando INFORMATION_SCHEMA (compatible MariaDB)
+// - Aplica retención configurable
 
 session_start();
 require_once __DIR__.'/db.php';
 date_default_timezone_set('America/Mexico_City');
-
-// ===== Seguridad Cron/Admin =====
-$CRON_SECRET = '1Sp2gd3pa*';  // cámbialo en prod
-$isCli  = (php_sapi_name() === 'cli');
-$token  = $isCli ? (getenv('CRON_TOKEN') ?: '') : ($_GET['token'] ?? '');
-$tieneSesionAdmin = isset($_SESSION['id_usuario']) && (($_SESSION['rol'] ?? '') === 'Admin');
-$tokenOk = hash_equals($CRON_SECRET, $token);
-if (!($tieneSesionAdmin || $tokenOk)) { http_response_code(403); exit('No autorizado'); }
 
 // ===== Parámetros =====
 $fecha         = $_GET['fecha'] ?? date('Y-m-d');     // día del snapshot
@@ -23,14 +15,22 @@ if ($retencionDias < 1) $retencionDias = 15;
 
 // ==== Helpers de migración (sin IF NOT EXISTS) ====
 function colExists(mysqli $c, string $table, string $col): bool {
-  $sql = "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=? LIMIT 1";
-  $st = $c->prepare($sql); $st->bind_param('ss', $table, $col); $st->execute(); $st->store_result();
-  $ok = $st->num_rows > 0; $st->close(); return $ok;
+  $sql = "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+          WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=? LIMIT 1";
+  $st = $c->prepare($sql);
+  $st->bind_param('ss', $table, $col);
+  $st->execute(); $st->store_result();
+  $ok = $st->num_rows > 0; $st->close();
+  return $ok;
 }
 function idxExists(mysqli $c, string $table, string $idx): bool {
-  $sql = "SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND INDEX_NAME=? LIMIT 1";
-  $st = $c->prepare($sql); $st->bind_param('ss', $table, $idx); $st->execute(); $st->store_result();
-  $ok = $st->num_rows > 0; $st->close(); return $ok;
+  $sql = "SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS
+          WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND INDEX_NAME=? LIMIT 1";
+  $st = $c->prepare($sql);
+  $st->bind_param('ss', $table, $idx);
+  $st->execute(); $st->store_result();
+  $ok = $st->num_rows > 0; $st->close();
+  return $ok;
 }
 function ensureColumn(mysqli $c, string $table, string $col, string $definition) {
   if (!colExists($c, $table, $col)) {
@@ -47,7 +47,7 @@ function ensureIndex(mysqli $c, string $table, string $name, string $definition)
   }
 }
 
-// ===== 1) Crear tabla base (si no existe) =====
+// ===== 1) Crear tabla base si no existe =====
 $create = "
 CREATE TABLE IF NOT EXISTS inventario_snapshot (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -80,13 +80,12 @@ CREATE TABLE IF NOT EXISTS inventario_snapshot (
 
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-";
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;";
 if(!$conn->query($create)) { http_response_code(500); exit("Error creando tabla: ".$conn->error); }
 
-// ===== 2) Alinear columnas “nuevas” sin IF NOT EXISTS =====
-// (Si alguna ya existe, la función simplemente no hace nada)
+// ===== 2) Alinear columnas “nuevas” (no truena si ya existen) =====
 try {
+  // De productos
   ensureColumn($conn, 'inventario_snapshot', 'ram',               "ram VARCHAR(50) NULL");
   ensureColumn($conn, 'inventario_snapshot', 'subtipo',           "subtipo VARCHAR(50) NULL");
   ensureColumn($conn, 'inventario_snapshot', 'gama',              "gama VARCHAR(50) NULL");
@@ -96,7 +95,8 @@ try {
   ensureColumn($conn, 'inventario_snapshot', 'compania',          "compania VARCHAR(100) NULL");
   ensureColumn($conn, 'inventario_snapshot', 'financiera',        "financiera VARCHAR(100) NULL");
   ensureColumn($conn, 'inventario_snapshot', 'fecha_lanzamiento', "fecha_lanzamiento DATE NULL");
-  // por si faltan campos base en algunas instalaciones:
+
+  // Por si faltan en instalaciones antiguas
   ensureColumn($conn, 'inventario_snapshot', 'id_producto',       "id_producto INT NULL");
   ensureColumn($conn, 'inventario_snapshot', 'codigo_producto',   "codigo_producto VARCHAR(50) NULL");
   ensureColumn($conn, 'inventario_snapshot', 'costo',             "costo DECIMAL(10,2) NULL");
@@ -106,7 +106,7 @@ try {
   http_response_code(500); exit($e->getMessage());
 }
 
-// Índices
+// Índices recomendados
 try {
   ensureIndex($conn, 'inventario_snapshot', 'uniq_date_inv', "UNIQUE KEY uniq_date_inv (snapshot_date, id_inventario)");
   ensureIndex($conn, 'inventario_snapshot', 'idx_date',      "KEY idx_date (snapshot_date)");
@@ -119,7 +119,8 @@ try {
 
 // ===== 3) Idempotencia: borrar snapshot del día =====
 $st = $conn->prepare("DELETE FROM inventario_snapshot WHERE snapshot_date = ?");
-$st->bind_param('s', $fecha); $st->execute(); $st->close();
+$st->bind_param('s', $fecha);
+$st->execute(); $st->close();
 
 // ===== 4) Insertar snapshot =====
 $sqlInsert = "
