@@ -17,6 +17,22 @@ function esc($v){ return htmlspecialchars($v ?? '', ENT_QUOTES, 'UTF-8'); }
 function toNull($s){ $s=trim((string)$s); return $s===''? null : $s; }
 function toDec($s){ $x=trim((string)$s); return $x===''? null : number_format((float)$x, 2, '.', ''); }
 
+// ===== Catálogo controlado: SUBTIPO =====
+$SUBTIPOS_PERMITIDOS = [
+  'INALAMBRICOS',
+  'SMARTPHONE HIGH',
+  'SMARTPHONE LOW',
+  'SMARTPHONE MID',
+  'TABLETS'
+];
+
+// ===== Catálogos controlados nuevos =====
+$OPERADORES_PERMITIDOS = ['AT&T','BIENESTAR','MOVISTAR','TELCEL','LIBRE(op)','UNEFON','VIRGIN'];
+$OPERADOR_DEFAULT = 'LIBRE(op)';
+
+$FINANCIERAS_PERMITIDAS = ['PAYJOY','KREDIYA','LIBRE'];
+$FINANCIERA_DEFAULT = 'LIBRE';
+
 $mensaje = "";
 
 // ============ Crear / editar ============
@@ -36,82 +52,105 @@ if ($permEscritura && $_SERVER['REQUEST_METHOD']==='POST') {
   $descripcion       = toNull($_POST['descripcion'] ?? '');
   $nombre_comercial  = texto($_POST['nombre_comercial'] ?? '', 255);
   $compania          = texto($_POST['compania'] ?? '', 100);
-  $financiera        = texto($_POST['financiera'] ?? '', 100);
+
+  // Financiera (controlada)
+  $financiera_in = trim((string)($_POST['financiera'] ?? ''));
+  $financiera = in_array($financiera_in, $FINANCIERAS_PERMITIDAS, true) ? $financiera_in : $FINANCIERA_DEFAULT;
+
   $fecha_lanzamiento = toNull($_POST['fecha_lanzamiento'] ?? '');
   $precio_lista      = toDec($_POST['precio_lista'] ?? '');
   $tipo_producto     = toNull($_POST['tipo_producto'] ?? '');
-  $subtipo           = texto($_POST['subtipo'] ?? '', 50);
+
+  // Subtipo controlado
+  $subtipo_in  = $_POST['subtipo'] ?? '';
+  $subtipo_norm = strtoupper(trim((string)$subtipo_in));
+  if ($subtipo_norm === '') {
+    $subtipo = null; // permitir vacío
+  } else {
+    if (!in_array($subtipo_norm, $SUBTIPOS_PERMITIDOS, true)) {
+      $mensaje = "<div class='alert alert-danger'>El valor de <b>Subcategoría</b> no es válido.</div>";
+    }
+    $subtipo = $subtipo_norm;
+  }
+
   $gama              = toNull($_POST['gama'] ?? '');
   $ciclo_vida        = toNull($_POST['ciclo_vida'] ?? '');
   $abc               = toNull($_POST['abc'] ?? '');
-  $operador          = texto($_POST['operador'] ?? '', 50);
+
+  // Operador (controlado)
+  $operador_in = trim((string)($_POST['operador'] ?? ''));
+  $operador = in_array($operador_in, $OPERADORES_PERMITIDOS, true) ? $operador_in : $OPERADOR_DEFAULT;
+
+  // Resurtible (se mantiene libre: Sí/No)
   $resurtible        = toNull($_POST['resurtible'] ?? '');
 
-  if ($marca==='' || $modelo==='') {
-    $mensaje = "<div class='alert alert-danger'>Marca y Modelo son obligatorios.</div>";
-  } else {
-    if ($modo==='editar' && $id>0) {
-      $stmt = $conn->prepare("
-        UPDATE catalogo_modelos
-           SET marca=?, modelo=?, color=?, ram=?, capacidad=?, codigo_producto=?,
-               descripcion=?, nombre_comercial=?, compania=?, financiera=?, fecha_lanzamiento=?,
-               precio_lista=?, tipo_producto=?, subtipo=?, gama=?, ciclo_vida=?, abc=?, operador=?, resurtible=?
-         WHERE id=?
-      ");
-      if (!$stmt) {
-        $mensaje = "<div class='alert alert-danger'>Error de preparación: ".$conn->error."</div>";
-      } else {
-        $stmt->bind_param(
-          "sssssssssssssssssssi",
-          $marca,$modelo,$color,$ram,$cap,$codigo,
-          $descripcion,$nombre_comercial,$compania,$financiera,$fecha_lanzamiento,
-          $precio_lista,$tipo_producto,$subtipo,$gama,$ciclo_vida,$abc,$operador,$resurtible,
-          $id
-        );
-        $ok = $stmt->execute();
-        $errno = $stmt->errno; $stmt->close();
-
-        if ($ok) {
-          $mensaje = "<div class='alert alert-success'>Modelo actualizado.</div>";
+  if (!$mensaje) {
+    if ($marca==='' || $modelo==='') {
+      $mensaje = "<div class='alert alert-danger'>Marca y Modelo son obligatorios.</div>";
+    } else {
+      if ($modo==='editar' && $id>0) {
+        $stmt = $conn->prepare("
+          UPDATE catalogo_modelos
+             SET marca=?, modelo=?, color=?, ram=?, capacidad=?, codigo_producto=?,
+                 descripcion=?, nombre_comercial=?, compania=?, financiera=?, fecha_lanzamiento=?,
+                 precio_lista=?, tipo_producto=?, subtipo=?, gama=?, ciclo_vida=?, abc=?, operador=?, resurtible=?
+           WHERE id=?
+        ");
+        if (!$stmt) {
+          $mensaje = "<div class='alert alert-danger'>Error de preparación: ".$conn->error."</div>";
         } else {
-          if ($errno === 1062) {
-            $mensaje = "<div class='alert alert-danger'>
-              Duplicado: combinación Marca+Modelo+Color+RAM+Capacidad o Código de producto ya existe.
-            </div>";
+          $stmt->bind_param(
+            "sssssssssssssssssssi",
+            $marca,$modelo,$color,$ram,$cap,$codigo,
+            $descripcion,$nombre_comercial,$compania,$financiera,$fecha_lanzamiento,
+            $precio_lista,$tipo_producto,$subtipo,$gama,$ciclo_vida,$abc,$operador,$resurtible,
+            $id
+          );
+          $ok = $stmt->execute();
+          $errno = $stmt->errno; $stmt->close();
+
+          if ($ok) {
+            $mensaje = "<div class='alert alert-success'>Modelo actualizado.</div>";
           } else {
-            $mensaje = "<div class='alert alert-danger'>Error al actualizar.</div>";
+            if ($errno === 1062) {
+              $mensaje = "<div class='alert alert-danger'>
+                Duplicado: combinación Marca+Modelo+Color+RAM+Capacidad o Código de producto ya existe.
+              </div>";
+            } else {
+              $mensaje = "<div class='alert alert-danger'>Error al actualizar.</div>";
+            }
           }
         }
-      }
-    } else {
-      $stmt = $conn->prepare("
-        INSERT INTO catalogo_modelos
-          (marca, modelo, color, ram, capacidad, codigo_producto,
-           descripcion, nombre_comercial, compania, financiera, fecha_lanzamiento,
-           precio_lista, tipo_producto, subtipo, gama, ciclo_vida, abc, operador, resurtible, activo)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)
-      ");
-      if (!$stmt) {
-        $mensaje = "<div class='alert alert-danger'>Error de preparación: ".$conn->error."</div>";
       } else {
-        $stmt->bind_param(
-          "sssssssssssssssssss",
-          $marca,$modelo,$color,$ram,$cap,$codigo,
-          $descripcion,$nombre_comercial,$compania,$financiera,$fecha_lanzamiento,
-          $precio_lista,$tipo_producto,$subtipo,$gama,$ciclo_vida,$abc,$operador,$resurtible
-        );
-        $ok = $stmt->execute();
-        $errno = $stmt->errno; $stmt->close();
-
-        if ($ok) {
-          $mensaje = "<div class='alert alert-success'>Modelo creado.</div>";
+        $stmt = $conn->prepare("
+          INSERT INTO catalogo_modelos
+            (marca, modelo, color, ram, capacidad, codigo_producto,
+             descripcion, nombre_comercial, compania, financiera, fecha_lanzamiento,
+             precio_lista, tipo_producto, subtipo, gama, ciclo_vida, abc, operador, resurtible, activo)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)
+        ");
+        if (!$stmt) {
+          $mensaje = "<div class='alert alert-danger'>Error de preparación: ".$conn->error."</div>";
         } else {
-          if ($errno === 1062) {
-            $mensaje = "<div class='alert alert-danger'>
-              Duplicado: revisa Marca+Modelo+Color+RAM+Capacidad o el Código de producto.
-            </div>";
+          $stmt->bind_param(
+            "sssssssssssssssssss",
+            $marca,$modelo,$color,$ram,$cap,$codigo,
+            $descripcion,$nombre_comercial,$compania,$financiera,$fecha_lanzamiento,
+            $precio_lista,$tipo_producto,$subtipo,$gama,$ciclo_vida,$abc,$operador,$resurtible
+          );
+          $ok = $stmt->execute();
+          $errno = $stmt->errno; $stmt->close();
+
+          if ($ok) {
+            $mensaje = "<div class='alert alert-success'>Modelo creado.</div>";
           } else {
-            $mensaje = "<div class='alert alert-danger'>Error al crear.</div>";
+            if ($errno === 1062) {
+              $mensaje = "<div class='alert alert-danger'>
+                Duplicado: revisa Marca+Modelo+Color+RAM+Capacidad o el Código de producto.
+              </div>";
+            } else {
+              $mensaje = "<div class='alert alert-danger'>Error al crear.</div>";
+            }
           }
         }
       }
@@ -201,9 +240,9 @@ $list = $conn->query("SELECT * FROM catalogo_modelos $where ORDER BY marca, mode
         <button class="btn btn-success btn-sm rounded-pill" data-bs-toggle="modal" data-bs-target="#mdlModelo" id="btnNuevo">
           <i class="bi bi-plus-circle me-1"></i>Nuevo
         </button>
-        <a href="modelos_carga.php" class="btn btn-outline-primary btn-sm rounded-pill">
+        <!-- <a href="modelos_carga.php" class="btn btn-outline-primary btn-sm rounded-pill">
           <i class="bi bi-upload me-1"></i>Carga masiva CSV
-        </a>
+        </a> -->
       <?php endif; ?>
       <a href="compras_nueva.php" class="btn btn-light btn-sm rounded-pill border">
         <i class="bi bi-bag-plus me-1"></i>Ir a compras
@@ -229,7 +268,7 @@ $list = $conn->query("SELECT * FROM catalogo_modelos $where ORDER BY marca, mode
         </div>
         <div class="col-md-7">
           <label class="form-label">Búsqueda</label>
-          <input name="q" class="form-control form-control-sm" placeholder="Marca, modelo, código, compañía, financiera u operador" value="<?= esc($q) ?>">
+          <input name="q" class="form-control form-select-sm" placeholder="Marca, modelo, código, compañía, financiera u operador" value="<?= esc($q) ?>">
         </div>
         <div class="col-md-2 d-flex align-items-end">
           <button class="btn btn-outline-primary btn-sm w-100"><i class="bi bi-search me-1"></i>Buscar</button>
@@ -262,6 +301,7 @@ $list = $conn->query("SELECT * FROM catalogo_modelos $where ORDER BY marca, mode
             <th class="cell-tight">Cap.</th>
             <th class="cell-tight">Código</th>
             <th class="cell-tight">Tipo</th>
+            <th class="cell-tight">Subcategoria</th>
             <th class="cell-tight">Gama</th>
             <th class="text-end cell-tight">$ Lista</th>
             <th class="cell-tight">Compañía</th>
@@ -296,6 +336,7 @@ $list = $conn->query("SELECT * FROM catalogo_modelos $where ORDER BY marca, mode
                   <span class="chip"><i class="bi bi-tag"></i>&nbsp;<?= esc($r['tipo_producto']) ?></span>
                 <?php endif; ?>
               </td>
+              <td class="cell-tight"><?= esc($r['subtipo'] ?? '') ?></td>
               <td class="cell-tight"><?= esc($r['gama'] ?? '') ?></td>
               <td class="text-end cell-tight"><?= $r['precio_lista']!==null ? number_format((float)$r['precio_lista'],2) : '' ?></td>
               <td class="cell-tight"><?= esc($r['compania'] ?? '') ?></td>
@@ -321,7 +362,7 @@ $list = $conn->query("SELECT * FROM catalogo_modelos $where ORDER BY marca, mode
               </td>
             </tr>
           <?php endwhile; else: ?>
-            <tr><td colspan="13" class="text-center text-muted py-4">Sin modelos</td></tr>
+            <tr><td colspan="14" class="text-center text-muted py-4">Sin modelos</td></tr>
           <?php endif; ?>
         </tbody>
       </table>
@@ -381,7 +422,12 @@ $list = $conn->query("SELECT * FROM catalogo_modelos $where ORDER BY marca, mode
           </div>
           <div class="col-md-6">
             <label class="form-label">Financiera</label>
-            <input class="form-control" name="financiera" value="<?= esc($edit['financiera'] ?? '') ?>" placeholder="PayJoy, Krediya...">
+            <?php $fin_ = trim((string)($edit['financiera'] ?? $FINANCIERA_DEFAULT)); if(!in_array($fin_, $FINANCIERAS_PERMITIDAS, true)) $fin_ = $FINANCIERA_DEFAULT; ?>
+            <select class="form-select" name="financiera">
+              <?php foreach($FINANCIERAS_PERMITIDAS as $opt): ?>
+                <option value="<?= esc($opt) ?>" <?= ($fin_===$opt)?'selected':'' ?>><?= esc($opt) ?></option>
+              <?php endforeach; ?>
+            </select>
           </div>
 
           <div class="col-md-6">
@@ -403,9 +449,16 @@ $list = $conn->query("SELECT * FROM catalogo_modelos $where ORDER BY marca, mode
               <option value="Accesorio" <?= $tp==='Accesorio'?'selected':'' ?>>Accesorio</option>
             </select>
           </div>
+
           <div class="col-md-6">
-            <label class="form-label">Subtipo</label>
-            <input class="form-control" name="subtipo" value="<?= esc($edit['subtipo'] ?? '') ?>" placeholder="p. ej. Smartphone">
+            <label class="form-label">Subcategoría</label>
+            <?php $sub_ = strtoupper(trim((string)($edit['subtipo'] ?? ''))); ?>
+            <select class="form-select" name="subtipo">
+              <option value="">(sin definir)</option>
+              <?php foreach($SUBTIPOS_PERMITIDOS as $opt): ?>
+                <option value="<?= esc($opt) ?>" <?= ($sub_===$opt)?'selected':'' ?>><?= esc($opt) ?></option>
+              <?php endforeach; ?>
+            </select>
           </div>
 
           <div class="col-md-6">
@@ -414,7 +467,7 @@ $list = $conn->query("SELECT * FROM catalogo_modelos $where ORDER BY marca, mode
             <select class="form-select" name="gama">
               <option value="">(sin definir)</option>
               <?php
-                $gamas = ['Ultra baja','Baja','Media baja','Media','Media alta','Alta','Premium'];
+                $gamas = ['ALTA1','BAJA','MEDIA','MEDIA ALTA','MEDIA BAJA','ULTRA BAJA'];
                 foreach ($gamas as $g) {
                   $sel = ($gm===$g)?'selected':''; echo "<option value=\"".esc($g)."\" $sel>".esc($g)."</option>";
                 }
@@ -426,9 +479,9 @@ $list = $conn->query("SELECT * FROM catalogo_modelos $where ORDER BY marca, mode
             <?php $cv = $edit['ciclo_vida'] ?? ''; ?>
             <select class="form-select" name="ciclo_vida">
               <option value="">(sin definir)</option>
-              <option value="Nuevo"        <?= $cv==='Nuevo'?'selected':'' ?>>Nuevo</option>
-              <option value="Linea"        <?= $cv==='Linea'?'selected':'' ?>>Línea</option>
-              <option value="Fin de vida"  <?= $cv==='Fin de vida'?'selected':'' ?>>Fin de vida</option>
+              <option value="NUEVO"        <?= $cv==='NUEVO'?'selected':'' ?>>NUEVO</option>
+              <option value="LINEA"        <?= $cv==='LINEA'?'selected':'' ?>>LINEA</option>
+              <option value="FIN DE VIDA"  <?= $cv==='FIN DE VIDA'?'selected':'' ?>>FIN DE VIDA</option>
             </select>
           </div>
 
@@ -440,12 +493,20 @@ $list = $conn->query("SELECT * FROM catalogo_modelos $where ORDER BY marca, mode
               <option value="A" <?= $abcv==='A'?'selected':'' ?>>A</option>
               <option value="B" <?= $abcv==='B'?'selected':'' ?>>B</option>
               <option value="C" <?= $abcv==='C'?'selected':'' ?>>C</option>
+              <option value="D" <?= $abcv==='D'?'selected':'' ?>>D</option>
             </select>
           </div>
+
           <div class="col-md-4">
             <label class="form-label">Operador</label>
-            <input class="form-control" name="operador" value="<?= esc($edit['operador'] ?? '') ?>" placeholder="AT&T, Telcel...">
+            <?php $op_ = trim((string)($edit['operador'] ?? $OPERADOR_DEFAULT)); if(!in_array($op_, $OPERADORES_PERMITIDOS, true)) $op_ = $OPERADOR_DEFAULT; ?>
+            <select class="form-select" name="operador">
+              <?php foreach($OPERADORES_PERMITIDOS as $opt): ?>
+                <option value="<?= esc($opt) ?>" <?= ($op_===$opt)?'selected':'' ?>><?= esc($opt) ?></option>
+              <?php endforeach; ?>
+            </select>
           </div>
+
           <div class="col-md-4">
             <label class="form-label">Resurtible</label>
             <?php $rs = $edit['resurtible'] ?? 'Sí'; ?>
@@ -473,11 +534,12 @@ $list = $conn->query("SELECT * FROM catalogo_modelos $where ORDER BY marca, mode
 
 <!-- JS -->
 <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+<!-- Si no cargas Bootstrap bundle en otra parte, descomenta la siguiente línea: -->
 <!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
 
 <!-- DataTables core + addons -->
 <script src="https://cdn.datatables.net/1.13.8/js/jquery.dataTables.min.js"></script>
-script src="https://cdn.datatables.net/1.13.8/js/dataTables.bootstrap5.min.js"></script>
+<script src="https://cdn.datatables.net/1.13.8/js/dataTables.bootstrap5.min.js"></script>
 <script src="https://cdn.datatables.net/fixedheader/3.4.0/js/dataTables.fixedHeader.min.js"></script>
 <script src="https://cdn.datatables.net/responsive/2.5.1/js/dataTables.responsive.min.js"></script>
 <script src="https://cdn.datatables.net/responsive/2.5.1/js/responsive.bootstrap5.min.js"></script>
@@ -493,7 +555,6 @@ script src="https://cdn.datatables.net/1.13.8/js/dataTables.bootstrap5.min.js"><
   // Copiar al portapapeles
   function copyText(txt) {
     navigator.clipboard?.writeText(txt).then(()=> {
-      // toast ligero
       const el = document.createElement('div');
       el.textContent = 'Copiado: ' + txt;
       el.className = 'position-fixed top-0 start-50 translate-middle-x bg-dark text-white px-3 py-1 rounded-3 mt-2';
@@ -522,8 +583,8 @@ script src="https://cdn.datatables.net/1.13.8/js/dataTables.bootstrap5.min.js"><
         { extend: 'colvis',     className: 'btn btn-light btn-sm rounded-pill border buttons-colvis', text: '<i class="bi bi-view-list me-1"></i>Columnas' }
       ],
       columnDefs: [
-        { targets: [8], render: $.fn.dataTable.render.number('.', ',', 2, '$') },
-        { targets: [0,2,3,4,5,6,7,8,9,10,11,12], className: 'cell-tight' }
+        { targets: [9], render: $.fn.dataTable.render.number('.', ',', 2, '$') }, // $ Lista
+        { targets: [0,2,3,4,5,6,7,8,9,10,11,12,13], className: 'cell-tight' }
       ]
     });
 
@@ -536,8 +597,11 @@ script src="https://cdn.datatables.net/1.13.8/js/dataTables.bootstrap5.min.js"><
   // Auto abrir modal si venimos con editar o tras POST
   (function () {
     <?php if ($permEscritura && ($edit || ($_SERVER['REQUEST_METHOD']==='POST'))): ?>
-      const mdl = new bootstrap.Modal(document.getElementById('mdlModelo'));
-      mdl.show();
+      // Requiere Bootstrap Bundle activo
+      if (window.bootstrap?.Modal) {
+        const mdl = new bootstrap.Modal(document.getElementById('mdlModelo'));
+        mdl.show();
+      }
     <?php endif; ?>
   })();
 </script>
