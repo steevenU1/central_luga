@@ -38,7 +38,7 @@ $fechaFin = $finSemana->format('Y-m-d');
    OBTENER GERENTES DE ZONA
 ======================== */
 $sqlGerentes = "
-    SELECT u.id, u.nombre, u.sueldo, s.zona
+    SELECT u.id, u.nombre, s.zona
     FROM usuarios u
     INNER JOIN sucursales s ON s.id = u.id_sucursal
     WHERE u.rol='GerenteZona'
@@ -46,10 +46,10 @@ $sqlGerentes = "
 $gerentes = $conn->query($sqlGerentes);
 
 /* ========================
-   CONSULTA TABLA EXISTENTE
+   CONSULTA TABLA EXISTENTE (histórico)
 ======================== */
 $stmtHist = $conn->prepare("
-    SELECT cgz.*, u.nombre AS gerente, u.sueldo
+    SELECT cgz.*, u.nombre AS gerente
     FROM comisiones_gerentes_zona cgz
     INNER JOIN usuarios u ON cgz.id_gerente = u.id
     WHERE cgz.fecha_inicio = ?
@@ -63,29 +63,25 @@ $datos = [];
 
 if ($resultHist->num_rows > 0) {
     while ($row = $resultHist->fetch_assoc()) {
-        $totalPago = $row['sueldo'] + $row['comision_total'];
         $datos[] = [
             'gerente'      => $row['gerente'],
             'zona'         => $row['zona'],
-            'sueldo'       => (float)$row['sueldo'],
-            'cumplimiento' => (float)$row['porcentaje_cumplimiento'], // ← usar valor histórico
+            'cumplimiento' => (float)$row['porcentaje_cumplimiento'], // histórico
             'com_equipos'  => (float)$row['comision_equipos'],
             'com_sims'     => (float)$row['comision_sims'],
             'com_pospago'  => (float)$row['comision_pospago'],
-            'com_total'    => (float)$row['comision_total'],
-            'total_pago'   => (float)$totalPago
+            'com_total'    => (float)$row['comision_total']  // Total a pagar = solo comisiones
         ];
     }
 }
 
 /* ========================
-   SI NO EXISTE REGISTRO → CALCULAR AUTOMÁTICO (misma lógica)
+   SI NO EXISTE REGISTRO → CALCULAR AUTOMÁTICO (misma lógica sin sueldo)
 ======================== */
 if ($resultHist->num_rows == 0) {
     while ($g = $gerentes->fetch_assoc()) {
-        $idGerente     = $g['id'];
+        $idGerente     = (int)$g['id'];
         $zona          = $g['zona'];
-        $sueldo        = (float)$g['sueldo'];
         $nombreGerente = $g['nombre'];
 
         // 1️⃣ Equipos
@@ -126,9 +122,9 @@ if ($resultHist->num_rows == 0) {
         $stmtSucursales->execute();
         $resSuc = $stmtSucursales->get_result();
 
-        $cuotaZona = 0;
+        $cuotaZona = 0.0;
         while ($suc = $resSuc->fetch_assoc()) {
-            $idSucursal = $suc['id'];
+            $idSucursal = (int)$suc['id'];
             $stmtCuota = $conn->prepare("
                 SELECT cuota_monto
                 FROM cuotas_sucursales
@@ -161,7 +157,7 @@ if ($resultHist->num_rows == 0) {
         }
 
         // 6️⃣ Pospago
-        $comPospago = 0;
+        $comPospago = 0.0;
         $stmtPos = $conn->prepare("
             SELECT vs.precio_total, vs.modalidad
             FROM ventas_sims vs
@@ -184,7 +180,6 @@ if ($resultHist->num_rows == 0) {
         $stmtPos->close();
 
         $comTotal  = $comEquipos + $comSims + $comPospago;
-        $totalPago = $sueldo + $comTotal;
         $comModems = 0.0; // por ahora 0
 
         // Guardar histórico (igual que antes)
@@ -205,26 +200,23 @@ if ($resultHist->num_rows == 0) {
         $datos[] = [
             'gerente'      => $nombreGerente,
             'zona'         => $zona,
-            'sueldo'       => $sueldo,
-            'cumplimiento' => $cumplimiento,           // ← añadimos para UI
+            'cumplimiento' => $cumplimiento,
             'com_equipos'  => $comEquipos,
             'com_sims'     => $comSims,
             'com_pospago'  => $comPospago,
-            'com_total'    => $comTotal,
-            'total_pago'   => $totalPago
+            'com_total'    => $comTotal // Total a pagar = solo comisiones
         ];
     }
 }
 
 /* ========================
-   Totales & promedio cumplimiento
+   Totales & promedio cumplimiento (sin sueldos)
 ======================== */
-$total_sueldos       = array_sum(array_column($datos, 'sueldo'));
 $total_com_equipos   = array_sum(array_column($datos, 'com_equipos'));
 $total_com_sims      = array_sum(array_column($datos, 'com_sims'));
 $total_com_pospago   = array_sum(array_column($datos, 'com_pospago'));
 $total_comisiones    = array_sum(array_column($datos, 'com_total'));
-$total_global        = array_sum(array_column($datos, 'total_pago'));
+$total_global        = $total_comisiones; // Total a Pagar = sólo comisiones
 $prom_cumplimiento   = count($datos) ? array_sum(array_map(fn($d)=> (float)$d['cumplimiento'], $datos)) / count($datos) : 0.0;
 
 // Opciones de filtro zona (UI)
@@ -297,7 +289,7 @@ ksort($zonas, SORT_NATURAL | SORT_FLAG_CASE);
     </div>
   </div>
 
-  <!-- Summary cards -->
+  <!-- Summary cards (sin sueldos) -->
   <div class="summary-cards d-flex flex-wrap gap-3 mb-3">
     <div class="card-soft p-3">
       <div class="text-muted small mb-1">Gerentes</div>
@@ -306,10 +298,6 @@ ksort($zonas, SORT_NATURAL | SORT_FLAG_CASE);
     <div class="card-soft p-3">
       <div class="text-muted small mb-1">Promedio Cumplimiento</div>
       <div class="h5 mb-0"><?= number_format($prom_cumplimiento,1) ?>%</div>
-    </div>
-    <div class="card-soft p-3">
-      <div class="text-muted small mb-1">Total Sueldos</div>
-      <div class="h5 mb-0">$<?= number_format($total_sueldos,2) ?></div>
     </div>
     <div class="card-soft p-3">
       <div class="text-muted small mb-1">Total Comisiones</div>
@@ -355,7 +343,7 @@ ksort($zonas, SORT_NATURAL | SORT_FLAG_CASE);
     </div>
   </div>
 
-  <!-- Tabla -->
+  <!-- Tabla (sin columna Sueldo) -->
   <div class="card-soft p-0">
     <div class="table-responsive">
       <table id="tablaZona" class="table table-hover align-middle mb-0">
@@ -364,12 +352,10 @@ ksort($zonas, SORT_NATURAL | SORT_FLAG_CASE);
             <th class="th-sort" data-key="gerente">Gerente <i class="bi bi-arrow-down-up ms-1"></i></th>
             <th class="th-sort" data-key="zona">Zona <i class="bi bi-arrow-down-up ms-1"></i></th>
             <th class="text-center th-sort" data-key="cump">Cumplimiento <i class="bi bi-arrow-down-up ms-1"></i></th>
-            <th class="text-end th-sort" data-key="sueldo">Sueldo Base <i class="bi bi-arrow-down-up ms-1"></i></th>
             <th class="text-end th-sort" data-key="eq">Com. Equipos <i class="bi bi-arrow-down-up ms-1"></i></th>
             <th class="text-end th-sort" data-key="sims">Com. SIMs <i class="bi bi-arrow-down-up ms-1"></i></th>
             <th class="text-end th-sort" data-key="pos">Com. Pospago <i class="bi bi-arrow-down-up ms-1"></i></th>
             <th class="text-end th-sort" data-key="com">Total Comisión <i class="bi bi-arrow-down-up ms-1"></i></th>
-            <th class="text-end th-sort" data-key="tot">Total a Pagar <i class="bi bi-arrow-down-up ms-1"></i></th>
           </tr>
         </thead>
         <tbody>
@@ -381,36 +367,30 @@ ksort($zonas, SORT_NATURAL | SORT_FLAG_CASE);
               data-gerente="<?= htmlspecialchars($d['gerente'], ENT_QUOTES, 'UTF-8') ?>"
               data-zona="<?= htmlspecialchars($d['zona'], ENT_QUOTES, 'UTF-8') ?>"
               data-cump="<?= $cump ?>"
-              data-sueldo="<?= (float)$d['sueldo'] ?>"
               data-eq="<?= (float)$d['com_equipos'] ?>"
               data-sims="<?= (float)$d['com_sims'] ?>"
               data-pos="<?= (float)$d['com_pospago'] ?>"
               data-com="<?= (float)$d['com_total'] ?>"
-              data-tot="<?= (float)$d['total_pago'] ?>"
             >
               <td class="fw-semibold"><?= htmlspecialchars($d['gerente'], ENT_QUOTES, 'UTF-8') ?></td>
               <td><span class="chip"><?= htmlspecialchars($d['zona'], ENT_QUOTES, 'UTF-8') ?></span></td>
               <td class="text-center">
                 <span class="badge rounded-pill <?= $cl ?>"><?= number_format($cump,1) ?>%</span>
               </td>
-              <td class="text-end">$<?= number_format($d['sueldo'],2) ?></td>
               <td class="text-end">$<?= number_format($d['com_equipos'],2) ?></td>
               <td class="text-end">$<?= number_format($d['com_sims'],2) ?></td>
               <td class="text-end">$<?= number_format($d['com_pospago'],2) ?></td>
-              <td class="text-end">$<?= number_format($d['com_total'],2) ?></td>
-              <td class="text-end fw-semibold">$<?= number_format($d['total_pago'],2) ?></td>
+              <td class="text-end fw-semibold">$<?= number_format($d['com_total'],2) ?></td>
             </tr>
           <?php endforeach; ?>
         </tbody>
         <tfoot class="table-light">
           <tr>
             <th colspan="3">Totales</th>
-            <th class="text-end">$<?= number_format($total_sueldos,2) ?></th>
             <th class="text-end">$<?= number_format($total_com_equipos,2) ?></th>
             <th class="text-end">$<?= number_format($total_com_sims,2) ?></th>
             <th class="text-end">$<?= number_format($total_com_pospago,2) ?></th>
             <th class="text-end">$<?= number_format($total_comisiones,2) ?></th>
-            <th class="text-end">$<?= number_format($total_global,2) ?></th>
           </tr>
         </tfoot>
       </table>
