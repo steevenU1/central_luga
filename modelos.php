@@ -1,6 +1,5 @@
 <?php
 // modelos.php — Catálogo de modelos (UI Pro)
-// Fuente para Compras → Productos. Mantiene POST/GET existentes y agrega DataTables + UI moderna.
 
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 if (!isset($_SESSION['id_usuario'])) { header("Location: index.php"); exit(); }
@@ -19,11 +18,7 @@ function toDec($s){ $x=trim((string)$s); return $x===''? null : number_format((f
 
 // ===== Catálogo controlado: SUBTIPO =====
 $SUBTIPOS_PERMITIDOS = [
-  'INALAMBRICOS',
-  'SMARTPHONE HIGH',
-  'SMARTPHONE LOW',
-  'SMARTPHONE MID',
-  'TABLETS'
+  'INALAMBRICOS','SMARTPHONE HIGH','SMARTPHONE LOW','SMARTPHONE MID','TABLETS'
 ];
 
 // ===== Catálogos controlados nuevos =====
@@ -81,7 +76,7 @@ if ($permEscritura && $_SERVER['REQUEST_METHOD']==='POST') {
   $operador_in = trim((string)($_POST['operador'] ?? ''));
   $operador = in_array($operador_in, $OPERADORES_PERMITIDOS, true) ? $operador_in : $OPERADOR_DEFAULT;
 
-  // Resurtible (se mantiene libre: Sí/No)
+  // Resurtible (Sí/No)
   $resurtible        = toNull($_POST['resurtible'] ?? '');
 
   if (!$mensaje) {
@@ -112,16 +107,12 @@ if ($permEscritura && $_SERVER['REQUEST_METHOD']==='POST') {
           if ($ok) {
             $mensaje = "<div class='alert alert-success'>Modelo actualizado.</div>";
           } else {
-            if ($errno === 1062) {
-              $mensaje = "<div class='alert alert-danger'>
-                Duplicado: combinación Marca+Modelo+Color+RAM+Capacidad o Código de producto ya existe.
-              </div>";
-            } else {
-              $mensaje = "<div class='alert alert-danger'>Error al actualizar.</div>";
-            }
+            $mensaje = ($errno === 1062)
+              ? "<div class='alert alert-danger'>Duplicado: combinación Marca+Modelo+Color+RAM+Capacidad o Código ya existe.</div>"
+              : "<div class='alert alert-danger'>Error al actualizar.</div>";
           }
         }
-      } else {
+      } else { // crear
         $stmt = $conn->prepare("
           INSERT INTO catalogo_modelos
             (marca, modelo, color, ram, capacidad, codigo_producto,
@@ -144,13 +135,9 @@ if ($permEscritura && $_SERVER['REQUEST_METHOD']==='POST') {
           if ($ok) {
             $mensaje = "<div class='alert alert-success'>Modelo creado.</div>";
           } else {
-            if ($errno === 1062) {
-              $mensaje = "<div class='alert alert-danger'>
-                Duplicado: revisa Marca+Modelo+Color+RAM+Capacidad o el Código de producto.
-              </div>";
-            } else {
-              $mensaje = "<div class='alert alert-danger'>Error al crear.</div>";
-            }
+            $mensaje = ($errno === 1062)
+              ? "<div class='alert alert-danger'>Duplicado: revisa Marca+Modelo+Color+RAM+Capacidad o el Código.</div>"
+              : "<div class='alert alert-danger'>Error al crear.</div>";
           }
         }
       }
@@ -240,9 +227,6 @@ $list = $conn->query("SELECT * FROM catalogo_modelos $where ORDER BY marca, mode
         <button class="btn btn-success btn-sm rounded-pill" data-bs-toggle="modal" data-bs-target="#mdlModelo" id="btnNuevo">
           <i class="bi bi-plus-circle me-1"></i>Nuevo
         </button>
-        <!-- <a href="modelos_carga.php" class="btn btn-outline-primary btn-sm rounded-pill">
-          <i class="bi bi-upload me-1"></i>Carga masiva CSV
-        </a> -->
       <?php endif; ?>
       <a href="compras_nueva.php" class="btn btn-light btn-sm rounded-pill border">
         <i class="bi bi-bag-plus me-1"></i>Ir a compras
@@ -361,180 +345,15 @@ $list = $conn->query("SELECT * FROM catalogo_modelos $where ORDER BY marca, mode
                 </div>
               </td>
             </tr>
-          <?php endwhile; else: ?>
-            <tr><td colspan="14" class="text-center text-muted py-4">Sin modelos</td></tr>
-          <?php endif; ?>
+          <?php endwhile; endif; ?>
         </tbody>
       </table>
     </div>
   </div>
 </div>
 
-<!-- ================= Modal Crear/Editar ================= -->
-<div class="modal fade" id="mdlModelo" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-lg modal-dialog-scrollable">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title"><?= $edit ? 'Editar modelo' : 'Nuevo modelo' ?></h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
-      </div>
-      <div class="modal-body">
-        <form method="POST" id="frmModelo" class="row g-2">
-          <input type="hidden" name="modo" value="<?= $edit ? 'editar' : 'crear' ?>">
-          <?php if ($edit): ?><input type="hidden" name="id" value="<?= (int)$edit['id'] ?>"><?php endif; ?>
-
-          <div class="col-md-6">
-            <label class="form-label">Marca *</label>
-            <input class="form-control" name="marca" required value="<?= esc($edit['marca'] ?? '') ?>">
-          </div>
-          <div class="col-md-6">
-            <label class="form-label">Modelo *</label>
-            <input class="form-control" name="modelo" required value="<?= esc($edit['modelo'] ?? '') ?>">
-          </div>
-
-          <div class="col-md-4">
-            <label class="form-label">Color</label>
-            <input class="form-control" name="color" value="<?= esc($edit['color'] ?? '') ?>" placeholder="Negro">
-          </div>
-          <div class="col-md-4">
-            <label class="form-label">RAM</label>
-            <input class="form-control" name="ram" value="<?= esc($edit['ram'] ?? '') ?>" placeholder="4GB">
-          </div>
-          <div class="col-md-4">
-            <label class="form-label">Capacidad</label>
-            <input class="form-control" name="capacidad" value="<?= esc($edit['capacidad'] ?? '') ?>" placeholder="128GB">
-          </div>
-
-          <div class="col-12">
-            <label class="form-label">Código de producto</label>
-            <input class="form-control" name="codigo_producto" value="<?= esc($edit['codigo_producto'] ?? '') ?>">
-            <div class="form-text">Debe ser único si lo usas como SKU.</div>
-          </div>
-
-          <div class="col-12">
-            <label class="form-label">Nombre comercial</label>
-            <input class="form-control" name="nombre_comercial" value="<?= esc($edit['nombre_comercial'] ?? '') ?>" placeholder="Galaxy S24 Ultra">
-          </div>
-
-          <div class="col-md-6">
-            <label class="form-label">Compañía</label>
-            <input class="form-control" name="compania" value="<?= esc($edit['compania'] ?? '') ?>" placeholder="AT&T, Telcel...">
-          </div>
-          <div class="col-md-6">
-            <label class="form-label">Financiera</label>
-            <?php $fin_ = trim((string)($edit['financiera'] ?? $FINANCIERA_DEFAULT)); if(!in_array($fin_, $FINANCIERAS_PERMITIDAS, true)) $fin_ = $FINANCIERA_DEFAULT; ?>
-            <select class="form-select" name="financiera">
-              <?php foreach($FINANCIERAS_PERMITIDAS as $opt): ?>
-                <option value="<?= esc($opt) ?>" <?= ($fin_===$opt)?'selected':'' ?>><?= esc($opt) ?></option>
-              <?php endforeach; ?>
-            </select>
-          </div>
-
-          <div class="col-md-6">
-            <label class="form-label">Fecha de lanzamiento</label>
-            <input type="date" class="form-control" name="fecha_lanzamiento" value="<?= esc($edit['fecha_lanzamiento'] ?? '') ?>">
-          </div>
-          <div class="col-md-6">
-            <label class="form-label">Precio lista (sugerido)</label>
-            <input class="form-control" name="precio_lista" value="<?= esc($edit['precio_lista'] ?? '') ?>" placeholder="0.00">
-          </div>
-
-          <div class="col-md-6">
-            <label class="form-label">Tipo de producto</label>
-            <select class="form-select" name="tipo_producto">
-              <?php $tp = $edit['tipo_producto'] ?? 'Equipo'; ?>
-              <option value="">(sin definir)</option>
-              <option value="Equipo"    <?= $tp==='Equipo'?'selected':'' ?>>Equipo</option>
-              <option value="Modem"     <?= $tp==='Modem'?'selected':'' ?>>Modem</option>
-              <option value="Accesorio" <?= $tp==='Accesorio'?'selected':'' ?>>Accesorio</option>
-            </select>
-          </div>
-
-          <div class="col-md-6">
-            <label class="form-label">Subcategoría</label>
-            <?php $sub_ = strtoupper(trim((string)($edit['subtipo'] ?? ''))); ?>
-            <select class="form-select" name="subtipo">
-              <option value="">(sin definir)</option>
-              <?php foreach($SUBTIPOS_PERMITIDOS as $opt): ?>
-                <option value="<?= esc($opt) ?>" <?= ($sub_===$opt)?'selected':'' ?>><?= esc($opt) ?></option>
-              <?php endforeach; ?>
-            </select>
-          </div>
-
-          <div class="col-md-6">
-            <label class="form-label">Gama</label>
-            <?php $gm = $edit['gama'] ?? ''; ?>
-            <select class="form-select" name="gama">
-              <option value="">(sin definir)</option>
-              <?php
-                $gamas = ['ALTA1','BAJA','MEDIA','MEDIA ALTA','MEDIA BAJA','ULTRA BAJA'];
-                foreach ($gamas as $g) {
-                  $sel = ($gm===$g)?'selected':''; echo "<option value=\"".esc($g)."\" $sel>".esc($g)."</option>";
-                }
-              ?>
-            </select>
-          </div>
-          <div class="col-md-6">
-            <label class="form-label">Ciclo de vida</label>
-            <?php $cv = $edit['ciclo_vida'] ?? ''; ?>
-            <select class="form-select" name="ciclo_vida">
-              <option value="">(sin definir)</option>
-              <option value="NUEVO"        <?= $cv==='NUEVO'?'selected':'' ?>>NUEVO</option>
-              <option value="LINEA"        <?= $cv==='LINEA'?'selected':'' ?>>LINEA</option>
-              <option value="FIN DE VIDA"  <?= $cv==='FIN DE VIDA'?'selected':'' ?>>FIN DE VIDA</option>
-            </select>
-          </div>
-
-          <div class="col-md-4">
-            <label class="form-label">ABC</label>
-            <?php $abcv = $edit['abc'] ?? ''; ?>
-            <select class="form-select" name="abc">
-              <option value="">(sin definir)</option>
-              <option value="A" <?= $abcv==='A'?'selected':'' ?>>A</option>
-              <option value="B" <?= $abcv==='B'?'selected':'' ?>>B</option>
-              <option value="C" <?= $abcv==='C'?'selected':'' ?>>C</option>
-              <option value="D" <?= $abcv==='D'?'selected':'' ?>>D</option>
-            </select>
-          </div>
-
-          <div class="col-md-4">
-            <label class="form-label">Operador</label>
-            <?php $op_ = trim((string)($edit['operador'] ?? $OPERADOR_DEFAULT)); if(!in_array($op_, $OPERADORES_PERMITIDOS, true)) $op_ = $OPERADOR_DEFAULT; ?>
-            <select class="form-select" name="operador">
-              <?php foreach($OPERADORES_PERMITIDOS as $opt): ?>
-                <option value="<?= esc($opt) ?>" <?= ($op_===$opt)?'selected':'' ?>><?= esc($opt) ?></option>
-              <?php endforeach; ?>
-            </select>
-          </div>
-
-          <div class="col-md-4">
-            <label class="form-label">Resurtible</label>
-            <?php $rs = $edit['resurtible'] ?? 'Sí'; ?>
-            <select class="form-select" name="resurtible">
-              <option value="Sí" <?= $rs==='Sí'?'selected':'' ?>>Sí</option>
-              <option value="No" <?= $rs==='No'?'selected':'' ?>>No</option>
-            </select>
-          </div>
-
-          <div class="col-12">
-            <label class="form-label">Descripción</label>
-            <textarea class="form-control" name="descripcion" rows="3" placeholder="Notas o especificaciones del modelo..."><?= esc($edit['descripcion'] ?? '') ?></textarea>
-          </div>
-        </form>
-      </div>
-      <div class="modal-footer">
-        <button class="btn btn-secondary" data-bs-dismiss="modal">Cerrar</button>
-        <?php if ($permEscritura): ?>
-          <button form="frmModelo" class="btn btn-success"><?= $edit ? 'Actualizar' : 'Guardar' ?></button>
-        <?php endif; ?>
-      </div>
-    </div>
-  </div>
-</div>
-
 <!-- JS -->
 <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
-<!-- Si no cargas Bootstrap bundle en otra parte, descomenta la siguiente línea: -->
 <!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
 
 <!-- DataTables core + addons -->
@@ -573,7 +392,11 @@ $list = $conn->query("SELECT * FROM catalogo_modelos $where ORDER BY marca, mode
       order: [[ 0, 'asc' ], [1, 'asc'] ],
       fixedHeader: true,
       responsive: true,
-      language: { url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/es-ES.json' },
+      language: {
+        url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/es-ES.json',
+        emptyTable: 'Sin modelos',
+        zeroRecords: 'Sin resultados para esos filtros'
+      },
       dom: "<'row align-items-center mb-2'<'col-sm-12 col-md-6'B><'col-sm-12 col-md-6'f>>" +
            "tr" +
            "<'row mt-2'<'col-sm-12 col-md-5'i><'col-sm-12 col-md-7'p>>",
@@ -597,7 +420,6 @@ $list = $conn->query("SELECT * FROM catalogo_modelos $where ORDER BY marca, mode
   // Auto abrir modal si venimos con editar o tras POST
   (function () {
     <?php if ($permEscritura && ($edit || ($_SERVER['REQUEST_METHOD']==='POST'))): ?>
-      // Requiere Bootstrap Bundle activo
       if (window.bootstrap?.Modal) {
         const mdl = new bootstrap.Modal(document.getElementById('mdlModelo'));
         mdl.show();

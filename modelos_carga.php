@@ -3,6 +3,7 @@
 // Requiere rol: Admin o Gerente
 
 session_start();
+if (isset($_GET['debug'])) { ini_set('display_errors', 1); error_reporting(E_ALL); }
 if (!isset($_SESSION['id_usuario'])) { header("Location: index.php"); exit(); }
 
 include 'db.php';
@@ -18,7 +19,7 @@ function toNull($s){ $s = trim((string)$s); return $s===''? null : $s; }
 function toDecOrNull($s){
   $s = trim((string)$s);
   if ($s==='') return null;
-  // soporta "1.234,56" y "1,234.56" y "1234.56"
+  // "1.234,56", "1,234.56" o "1234.56"
   if (preg_match('/^\d{1,3}(\.\d{3})*,\d+$/', $s)) { $s = str_replace('.','',$s); $s = str_replace(',', '.', $s); }
   else { $s = str_replace(',', '', $s); }
   return is_numeric($s) ? number_format((float)$s, 2, '.', '') : null;
@@ -26,14 +27,10 @@ function toDecOrNull($s){
 function normDateOrNull($s){
   $s = trim((string)$s);
   if ($s==='') return null;
-  // Acepta YYYY-MM-DD, DD/MM/YYYY, DD-MM-YYYY
   if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $s)) return $s;
-  if (preg_match('/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})$/', $s, $m)) {
-    return $m[3].'-'.$m[2].'-'.$m[1];
-  }
-  return null; // inválida
+  if (preg_match('/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})$/', $s, $m)) return $m[3].'-'.$m[2].'-'.$m[1];
+  return null;
 }
-// Mapea encabezados a llaves internas (lowercase, sin tildes)
 function slug($s){
   $s = mb_strtolower(trim((string)$s), 'UTF-8');
   $s = strtr($s, ['á'=>'a','é'=>'e','í'=>'i','ó'=>'o','ú'=>'u','ñ'=>'n']);
@@ -49,14 +46,12 @@ $columns = [
   'ram'               => ['required'=>false],
   'capacidad'         => ['required'=>false],
   'codigo_producto'   => ['required'=>false],
-
   'descripcion'       => ['required'=>false],
   'nombre_comercial'  => ['required'=>false],
   'compania'          => ['required'=>false],
   'financiera'        => ['required'=>false],
   'fecha_lanzamiento' => ['required'=>false, 'type'=>'date'],
   'precio_lista'      => ['required'=>false, 'type'=>'decimal'],
-
   'tipo_producto'     => ['required'=>false],
   'subtipo'           => ['required'=>false],
   'gama'              => ['required'=>false],
@@ -67,7 +62,6 @@ $columns = [
   'activo'            => ['required'=>false], // 1/0; si no viene -> 1
 ];
 
-// Resultados
 $report = null;
 
 if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion']) && $_POST['accion']==='cargar' && isset($_FILES['csv'])) {
@@ -82,22 +76,20 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion']) && $_POST['ac
   } else {
     $path = $file['tmp_name'];
     $fh = fopen($path, 'r');
-    if (!$fh) { $report = ['ok'=>false,'msg'=>'No se pudo leer el CSV.']; }
-    else {
+    if (!$fh) {
+      $report = ['ok'=>false,'msg'=>'No se pudo leer el CSV.'];
+    } else {
       // Detectar BOM UTF-8
       $bom = fread($fh, 3);
-      if ($bom !== "\xEF\xBB\xBF") fseek($fh, 0); // regresar si no hay BOM
+      if ($bom !== "\xEF\xBB\xBF") fseek($fh, 0);
 
       // Leer encabezados
       $headers = fgetcsv($fh, 0, ',');
-      if (!$headers) { $report = ['ok'=>false,'msg'=>'El CSV no tiene encabezados.']; }
-      else {
+      if (!$headers) {
+        $report = ['ok'=>false,'msg'=>'El CSV no tiene encabezados.'];
+      } else {
         $hdrMap = [];
-        foreach ($headers as $idx=>$h) {
-          $key = slug($h);
-          $hdrMap[$idx] = $key;
-        }
-        // Validar que estén los requeridos (marca, modelo)
+        foreach ($headers as $idx=>$h) $hdrMap[$idx] = slug($h);
         $have = array_values($hdrMap);
         if (!in_array('marca', $have) || !in_array('modelo', $have)) {
           $report = ['ok'=>false,'msg'=>'Encabezados mínimos requeridos: marca, modelo.'];
@@ -106,13 +98,14 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion']) && $_POST['ac
           $line = 1;
           while (($row = fgetcsv($fh, 0, ',')) !== false) {
             $line++;
-            if (count(array_filter($row, fn($x)=>trim((string)$x)!=''))===0) continue; // saltar vacías
+            // sin arrow function para compatibilidad PHP <7.4
+            $nonEmpty = array_filter($row, function($x){ return trim((string)$x) !== ''; });
+            if (count($nonEmpty)===0) continue;
+
             $data = array_fill_keys(array_keys($columns), null);
             foreach ($row as $i=>$val) {
-              $col = $hdrMap[$i] ?? null;
-              if ($col && array_key_exists($col, $columns)) {
-                $data[$col] = trim((string)$val);
-              }
+              $col = isset($hdrMap[$i]) ? $hdrMap[$i] : null;
+              if ($col && array_key_exists($col, $columns)) $data[$col] = trim((string)$val);
             }
             $rows[] = ['line'=>$line, 'data'=>$data];
           }
@@ -121,40 +114,41 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion']) && $_POST['ac
           if (count($rows)===0) {
             $report = ['ok'=>false,'msg'=>'No se encontraron filas con datos.'];
           } else {
-            // Validaciones por fila
+            // Validaciones
             $errores = [];
             $okRows  = [];
 
-            // listas correctas (arreglos) para in_array
             $YES = ['si','sí','1','yes','true'];
             $NO  = ['no','0','false'];
             $TRUEY = ['1','si','sí','true','yes'];
 
             foreach ($rows as $r) {
               $ln = $r['line']; $d = $r['data'];
+
               // requeridos
               foreach ($columns as $k=>$meta) {
                 if (!empty($meta['required']) && (trim((string)($d[$k] ?? ''))==='')) {
                   $errores[] = "L{$ln}: el campo '$k' es obligatorio.";
                 }
               }
+
               // tipos
               if (isset($d['fecha_lanzamiento']) && $d['fecha_lanzamiento']!=='') {
                 $norm = normDateOrNull($d['fecha_lanzamiento']);
-                if ($norm===null) { $errores[]="L{$ln}: fecha_lanzamiento inválida (usa YYYY-MM-DD)."; }
+                if ($norm===null) $errores[]="L{$ln}: fecha_lanzamiento inválida (usa YYYY-MM-DD).";
                 else $d['fecha_lanzamiento'] = $norm;
               }
               if (isset($d['precio_lista']) && $d['precio_lista']!=='') {
                 $dec = toDecOrNull($d['precio_lista']);
-                if ($dec===null) { $errores[]="L{$ln}: precio_lista inválido."; }
+                if ($dec===null) $errores[]="L{$ln}: precio_lista inválido.";
                 else $d['precio_lista'] = $dec;
               }
-              // normalizaciones (AQUÍ estaba el bug)
+
+              // normalizaciones
               if ($d['resurtible']!=='') {
                 $val = mb_strtolower((string)$d['resurtible'],'UTF-8');
                 if (in_array($val, $YES, true))      $d['resurtible'] = 'Sí';
                 elseif (in_array($val, $NO, true))   $d['resurtible'] = 'No';
-                // si trae otro valor lo dejamos tal cual (para ENUMs personalizados)
               } else {
                 $d['resurtible'] = null;
               }
@@ -172,38 +166,40 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion']) && $_POST['ac
             if (!empty($errores)) {
               $report = ['ok'=>false,'msg'=>'Se encontraron errores de validación.','errores'=>$errores];
             } else {
-              // Preparar INSERT / UPSERT
+              // INSERT / UPSERT (MariaDB: usar VALUES(col))
               $insertCols = array_keys($columns);
               $placeholders = implode(',', array_fill(0, count($insertCols), '?'));
 
-              // Usamos alias "new" para evitar VALUES() (deprecado en MySQL 8)
               $updateSet = [];
               foreach ($insertCols as $c) {
-                if (in_array($c, ['marca','modelo','color','ram','capacidad','codigo_producto'])) continue; // parte de las llaves/índices
-                $updateSet[] = "$c = new.$c";
+                // evita sobreescribir llaves / índices
+                if (in_array($c, ['marca','modelo','color','ram','capacidad','codigo_producto'])) continue;
+                $updateSet[] = "$c = VALUES($c)";
               }
-              $sql = "INSERT INTO catalogo_modelos (".implode(',', $insertCols).")
-                      VALUES ($placeholders)
-                      AS new
-                      ON DUPLICATE KEY UPDATE ".implode(',', $updateSet);
+
+              $sqlUpsert = "INSERT INTO catalogo_modelos (".implode(',', $insertCols).")
+                            VALUES ($placeholders)
+                            ON DUPLICATE KEY UPDATE ".implode(',', $updateSet);
 
               $sqlInsertOnly = "INSERT INTO catalogo_modelos (".implode(',', $insertCols).")
                                 VALUES ($placeholders)";
 
-              $stmt = $conn->prepare($hacerUpsert ? $sql : $sqlInsertOnly);
+              $stmt = $conn->prepare($hacerUpsert ? $sqlUpsert : $sqlInsertOnly);
               if (!$stmt) {
                 $report = ['ok'=>false,'msg'=>'Error preparando sentencia: '.$conn->error];
               } else {
                 $conn->begin_transaction();
                 $tot = 0; $ins = 0; $upd = 0; $skp = 0; $errs = [];
+
                 try {
                   foreach ($okRows as $r) {
-                    $d = $r['data']; $tot++;
+                    $tot++;
+                    $d = $r['data'];
 
-                    // Bind por orden de $insertCols
+                    // Bind en el orden de $insertCols
                     $vals = [];
                     foreach ($insertCols as $c) {
-                      $v = $d[$c] ?? null;
+                      $v = isset($d[$c]) ? $d[$c] : null;
                       if ($c==='precio_lista')         $v = toDecOrNull($v);
                       if ($c==='fecha_lanzamiento')    $v = normDateOrNull($v);
                       if ($c==='descripcion')          $v = toNull($v);
@@ -221,7 +217,6 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion']) && $_POST['ac
                       $vals[] = $v;
                     }
 
-                    // Tipos: la mayoría son strings excepto precio_lista (double) y activo (int)
                     $types = '';
                     foreach ($insertCols as $c) {
                       if ($c==='precio_lista') $types.='d';
@@ -232,21 +227,18 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion']) && $_POST['ac
                     $stmt->bind_param($types, ...$vals);
 
                     if ($soloValidar) {
-                      // En solo validar NO ejecutamos; simulamos OK.
-                      continue;
+                      continue; // no ejecutar
                     }
 
                     if (!$stmt->execute()) {
                       if ($conn->errno===1062) { $skp++; }
-                      else {
-                        $errs[] = "L".$r['line'].": Error MySQL ".$conn->errno." - ".$conn->error;
-                      }
+                      else { $errs[] = "L".$r['line'].": Error MySQL ".$conn->errno." - ".$conn->error; }
                     } else {
-                      // affected_rows: 1 insert, 2 update (en ON DUPLICATE KEY UPDATE)
+                      // En MariaDB: affected_rows = 2 cuando hace UPDATE por duplicate
                       if ($hacerUpsert) {
                         if ($conn->affected_rows===1) $ins++;
                         elseif ($conn->affected_rows===2) $upd++;
-                        else $ins++; // fallback
+                        else $ins++;
                       } else {
                         $ins++;
                       }
@@ -255,30 +247,18 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion']) && $_POST['ac
 
                   if ($soloValidar) {
                     $conn->rollback();
-                    $report = [
-                      'ok'=>true,
-                      'msg'=>'Validación exitosa. No se escribieron datos.',
-                      'tot'=>$tot, 'ins'=>0, 'upd'=>0, 'skp'=>0, 'errores'=>$errs
-                    ];
+                    $report = ['ok'=>true,'msg'=>'Validación exitosa. No se escribieron datos.','tot'=>$tot,'ins'=>0,'upd'=>0,'skp'=>0,'errores'=>$errs];
                   } else {
                     if (!empty($errs)) {
                       $conn->rollback();
-                      $report = [
-                        'ok'=>false,
-                        'msg'=>'Errores en la ejecución. No se guardaron cambios.',
-                        'errores'=>$errs
-                      ];
+                      $report = ['ok'=>false,'msg'=>'Errores en la ejecución. No se guardaron cambios.','errores'=>$errs];
                     } else {
                       $conn->commit();
-                      $report = [
-                        'ok'=>true,
-                        'msg'=>'Carga completada.',
-                        'tot'=>$tot, 'ins'=>$ins, 'upd'=>$upd, 'skp'=>$skp
-                      ];
+                      $report = ['ok'=>true,'msg'=>'Carga completada.','tot'=>$tot,'ins'=>$ins,'upd'=>$upd,'skp'=>$skp];
                     }
                   }
 
-                } catch (Throwable $e) {
+                } catch (Exception $e) {
                   $conn->rollback();
                   $report = ['ok'=>false,'msg'=>'Excepción: '.$e->getMessage()];
                 } finally {
@@ -303,6 +283,7 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion']) && $_POST['ac
 
   <div class="alert alert-warning">
     <strong>Temporal:</strong> esta pantalla es solo para la <em>carga inicial</em>. Asegúrate de que el CSV esté en <strong>UTF-8</strong>.
+    <div class="small mt-1">¿Atorado? abre <code>modelos_carga.php?debug=1</code> para ver errores en vivo.</div>
   </div>
 
   <?php if ($report): ?>
@@ -334,9 +315,7 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['accion']) && $_POST['ac
         <input type="hidden" name="accion" value="cargar">
         <div class="col-12">
           <input type="file" name="csv" accept=".csv,text/csv" class="form-control" required>
-          <div class="form-text">
-            Tamaño máx: 5 MB. Separador: coma. Primera fila: encabezados.
-          </div>
+          <div class="form-text">Tamaño máx: 5 MB. Separador: coma. Primera fila: encabezados.</div>
         </div>
         <div class="col-md-6">
           <div class="form-check">

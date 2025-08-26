@@ -12,6 +12,9 @@ $alertPend    = []; // datos para el modal de alertas (GZ)
 
 /* ================= Helpers ================= */
 
+// Escapado corto
+function h($v){ return htmlspecialchars($v ?? '', ENT_QUOTES, 'UTF-8'); }
+
 // Iniciales (fallback)
 function iniciales($nombreCompleto) {
   $p = preg_split('/\s+/', trim((string)$nombreCompleto));
@@ -73,7 +76,7 @@ function hasColumn(mysqli $conn, string $table, string $column): bool {
 function traspasosFechaExpr(mysqli $conn): ?string {
   if (hasColumn($conn,'traspasos','fecha_traspaso')) return 't.fecha_traspaso';
   if (hasColumn($conn,'traspasos','fecha_creacion')) return 't.fecha_creacion';
-  return null; // no hay columna de fecha (fallback: no verificamos alertas)
+  return null; // no hay columna de fecha
 }
 
 // Obtiene la foto del usuario desde usuarios_expediente
@@ -135,6 +138,13 @@ function obtenerIdEulalia(mysqli $conn): int {
   }
   return $id;
 }
+
+/* ===== Cuenta regresiva de lanzamiento (mañana 09:00 CDMX) ===== */
+$tz = new DateTimeZone('America/Mexico_City');
+$launchDT   = new DateTime('2025-08-26 09:00', $tz); // FECHA FIJA
+$LAUNCH_TS  = $launchDT->getTimestamp();               // epoch (seg)
+$showBanner = (time() < $LAUNCH_TS);                   // mostrar solo antes del lanzamiento
+$launchHuman = $launchDT->format('d/m/Y H:i') . ' CDMX';
 
 /* ============== Lógica de login ============== */
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -299,6 +309,9 @@ $inits = iniciales($nombreSesion ?: 'Usuario');
   .welcome-inits{font-weight:800; font-size:34px; color:#2b3d59}
   .progress{ height:8px; }
 
+  /* Banner countdown */
+  #launchBanner { border-radius:12px; border:1px solid #cfe2ff; }
+
   /* Modal invasivo (alerta) */
   .modal-danger .modal-header{
     background:#fff1f0; border-bottom:1px solid #ffd6d6;
@@ -315,8 +328,20 @@ $inits = iniciales($nombreSesion ?: 'Usuario');
   <div class="title">Central Luga <span style="color:var(--brand)">2.0</span></div>
   <div class="subtitle" id="welcomeMsg">Bienvenido</div>
 
+  <?php if ($showBanner): ?>
+    <div class="alert alert-info d-flex align-items-center justify-content-between py-2 px-3 mb-3"
+         id="launchBanner" data-launch="<?= (int)$LAUNCH_TS ?>">
+      <div class="me-3">
+        🚀 <strong>Lanzamiento</strong>: <?= h($launchHuman) ?>
+        <span class="text-muted">— falta</span>
+        <span id="lc" class="fw-bold">00:00:00</span>
+      </div>
+      <span class="badge text-bg-primary">Central Luga 2.0</span>
+    </div>
+  <?php endif; ?>
+
   <?php if ($mensaje): ?>
-    <div class="alert alert-danger text-center"><?= htmlspecialchars($mensaje) ?></div>
+    <div class="alert alert-danger text-center"><?= h($mensaje) ?></div>
   <?php endif; ?>
 
   <form id="loginForm" method="POST" novalidate>
@@ -347,12 +372,12 @@ $inits = iniciales($nombreSesion ?: 'Usuario');
       <div class="modal-body text-center p-4">
         <div class="welcome-avatar mb-2">
           <?php if (!empty($fotoUrl)): ?>
-            <img src="<?= htmlspecialchars($fotoUrl, ENT_QUOTES, 'UTF-8') ?>" alt="Foto de perfil">
+            <img src="<?= h($fotoUrl) ?>" alt="Foto de perfil">
           <?php else: ?>
-            <div class="welcome-inits"><?= htmlspecialchars($inits, ENT_QUOTES, 'UTF-8') ?></div>
+            <div class="welcome-inits"><?= h($inits) ?></div>
           <?php endif; ?>
         </div>
-        <h5 class="fw-bold mb-1"><?= htmlspecialchars($saludo) ?>, <?= htmlspecialchars($nombreSesion) ?>.</h5>
+        <h5 class="fw-bold mb-1"><?= h($saludo) ?>, <?= h($nombreSesion) ?>.</h5>
         <div class="text-muted mb-3">Bienvenido de nuevo 👋</div>
         <div class="progress mb-1">
           <div class="progress-bar" role="progressbar" style="width:0%" id="pb"></div>
@@ -380,7 +405,7 @@ $inits = iniciales($nombreSesion ?: 'Usuario');
           <b><?= (int)$alertPend['total_suc'] ?></b> sucursal(es) de tu zona:
         </p>
         <ul class="list-group list-slim mb-3">
-          <?php foreach ($alertPend['rows'] as $r): 
+          <?php foreach ($alertPend['rows'] as $r):
             $fechaFmt = $r['fecha'] ? date('d/m/Y', strtotime($r['fecha'])) : '-';
           ?>
           <li class="list-group-item">
@@ -434,6 +459,34 @@ $inits = iniciales($nombreSesion ?: 'Usuario');
   btn.addEventListener('click',()=>{pwd.type = (pwd.type==="text" ? "password" : "text");});
 })();
 
+// Cuenta regresiva de lanzamiento (basada en timestamp del servidor)
+(function(){
+  const banner = document.getElementById('launchBanner');
+  if (!banner) return;
+  const targetMs = parseInt(banner.dataset.launch, 10) * 1000; // epoch -> ms
+  const out = document.getElementById('lc');
+
+  function pad(n){ return n < 10 ? '0'+n : ''+n; }
+  function tick(){
+    const diff = targetMs - Date.now();
+    if (diff <= 0){
+      out.textContent = '¡es hoy!';
+      clearInterval(t);
+      // Oculta el banner cuando llegue la hora (y no recargas)
+      setTimeout(()=>{ banner.remove(); }, 3000);
+      return;
+    }
+    const totalSec = Math.floor(diff/1000);
+    const d = Math.floor(totalSec / 86400);
+    const h = Math.floor((totalSec % 86400) / 3600);
+    const m = Math.floor((totalSec % 3600) / 60);
+    const s = totalSec % 60;
+    out.textContent = (d>0 ? d+'d ' : '') + pad(h)+':'+pad(m)+':'+pad(s);
+  }
+  const t = setInterval(tick, 1000);
+  tick();
+})();
+
 // Bienvenida auto-redirect (sólo si NO hay alertas)
 <?php if ($showWelcome): ?>
 (function(){
@@ -453,7 +506,6 @@ $inits = iniciales($nombreSesion ?: 'Usuario');
   modal.show();
 
   document.getElementById('btnEntrarPanel').addEventListener('click', ()=>{
-    // Cierra y entra al panel
     modal.hide();
     window.location.href='dashboard_unificado.php';
   });
