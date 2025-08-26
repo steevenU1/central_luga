@@ -8,15 +8,16 @@ if (!isset($_SESSION['id_usuario']) || !in_array($_SESSION['rol'], ['Admin','RH'
 include 'db.php';
 
 /* ========================
-   Funciones auxiliares
+   Funciones auxiliares (semana mar→lun)
 ======================== */
 function obtenerSemanaPorIndice($offset = 0) {
-    $hoy = new DateTime();
-    $diaSemana = $hoy->format('N'); // 1=Lunes ... 7=Domingo
-    $dif = $diaSemana - 2; // Martes=2
+    $tz = new DateTimeZone('America/Mexico_City');
+    $hoy = new DateTime('now', $tz);
+    $diaSemana = (int)$hoy->format('N'); // 1=Lun ... 7=Dom
+    $dif = $diaSemana - 2; // martes=2
     if ($dif < 0) $dif += 7;
 
-    $inicio = new DateTime();
+    $inicio = new DateTime('now', $tz);
     $inicio->modify("-$dif days")->setTime(0,0,0);
     if ($offset > 0) $inicio->modify("-" . (7*$offset) . " days");
 
@@ -30,6 +31,8 @@ $semanaSeleccionada = isset($_GET['semana']) ? (int)$_GET['semana'] : 0;
 list($inicioSemanaObj, $finSemanaObj) = obtenerSemanaPorIndice($semanaSeleccionada);
 $inicioSemana = $inicioSemanaObj->format('Y-m-d 00:00:00');
 $finSemana    = $finSemanaObj->format('Y-m-d 23:59:59');
+$iniISO       = $inicioSemanaObj->format('Y-m-d');
+$finISO       = $finSemanaObj->format('Y-m-d');
 
 /* ========================
    Configuración CSV
@@ -39,6 +42,9 @@ header('Content-Type: text/csv; charset=utf-8');
 header('Content-Disposition: attachment; filename="'.$filename.'"');
 $output = fopen('php://output', 'w');
 
+// BOM para que Excel respete UTF-8
+fwrite($output, "\xEF\xBB\xBF");
+
 /* ========================
    ENCABEZADO RESUMEN
 ======================== */
@@ -46,7 +52,7 @@ fputcsv($output, ['REPORTE DE NÓMINA SEMANAL']);
 fputcsv($output, ['Semana', $inicioSemanaObj->format('d/m/Y') . ' - ' . $finSemanaObj->format('d/m/Y')]);
 fputcsv($output, []); // línea en blanco
 
-// Encabezados resumen por empleado (incluye conteos)
+// Encabezados resumen por empleado (incluye Bruto, Descuentos y Neto)
 fputcsv($output, [
     'Empleado', 'Rol', 'Sucursal',
     'Sueldo Base',
@@ -54,25 +60,65 @@ fputcsv($output, [
     '# SIMs',   'Com. SIMs',
     '# Pospago','Com. Pospago',
     'Com. Gerente',
-    'Total a Pagar'
+    'Total Bruto', 'Descuentos', 'Total Neto'
 ]);
 
-$totalGlobal = 0.0;
+$totalGlobalBruto = 0.0;
+$totalGlobalDesc  = 0.0;
+$totalGlobalNeto  = 0.0;
 
 /* ========================
-   Consulta de usuarios (excluye almacén)
+   Consulta de usuarios (excluye almacén y, si existe, subdistribuidor)
 ======================== */
+// Detecta si existe una columna de subtipo; prueba varios nombres.
+$subdistCol = null;
+foreach (['subtipo_sucursal','subtipo','sub_tipo','tipo_subsucursal'] as $c) {
+    $rs = $conn->query("SHOW COLUMNS FROM sucursales LIKE '$c'");
+    if ($rs && $rs->num_rows > 0) { $subdistCol = $c; break; }
+}
+
+$where = "s.tipo_sucursal <> 'Almacen'";
+if ($subdistCol) {
+    // Excluir explícitamente subdistribuidores
+    $where .= " AND (s.`$subdistCol` IS NULL OR LOWER(s.`$subdistCol`) <> 'subdistribuidor')";
+}
+
 $sqlUsuarios = "
     SELECT u.id, u.nombre, u.rol, u.sueldo, s.nombre AS sucursal, u.id_sucursal
     FROM usuarios u
     INNER JOIN sucursales s ON s.id=u.id_sucursal
-    WHERE s.tipo_sucursal <> 'Almacen'
+    WHERE $where
     ORDER BY s.nombre, FIELD(u.rol,'Gerente','Ejecutivo'), u.nombre
 ";
 $resUsuarios = $conn->query($sqlUsuarios);
 
-/* Guardaremos el detalle para escribirlo al final */
-$detalleFilas = []; // cada elemento es una fila detalla por venta/rubro
+/* Guardaremos detalles para escribirlos al final */
+$detalleFilas = [];      // detalle por venta/rubro (equipos / sims / pospago / gerente)
+$descuentoFilas = [];    // detalle de descuentos (concepto y monto) por colaborador
+
+// Helper: obtener SUMA de descuentos de la semana por usuario
+function obtenerDescuentosSemana($conn, $idUsuario, $iniISO, $finISO) {
+    $sql = "SELECT IFNULL(SUM(monto),0) AS total
+            FROM descuentos_nomina
+            WHERE id_usuario=? AND semana_inicio=? AND semana_fin=?";
+    $stmt = $conn->prepare($sql);
+    $stmt->bind_param("iss", $idUsuario, $iniISO, $finISO);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    return (float)($row['total'] ?? 0);
+}
+
+// Helper: obtener filas de descuentos (para sección detalle)
+function obtenerFilasDescuentos($conn, $idUsuario, $iniISO, $finISO) {
+    $sql = "SELECT concepto, monto, creado_en
+            FROM descuentos_nomina
+            WHERE id_usuario=? AND semana_inicio=? AND semana_fin=?
+            ORDER BY creado_en DESC, id DESC";
+    $stmt = $conn->prepare($sql);
+    $stmt->bind_param("iss", $idUsuario, $iniISO, $finISO);
+    $stmt->execute();
+    return $stmt->get_result();
+}
 
 while ($u = $resUsuarios->fetch_assoc()) {
     $id_usuario   = (int)$u['id'];
@@ -355,10 +401,32 @@ while ($u = $resUsuarios->fetch_assoc()) {
     }
 
     /* ========================
-       5) TOTAL empleado y fila RESUMEN
+       5) Descuentos capturados (semana)
 ======================== */
-    $total = (float)$u['sueldo'] + $equipos_com + $sims_com + $pos_com + $com_ger;
-    $totalGlobal += $total;
+    $descuentos = obtenerDescuentosSemana($conn, $id_usuario, $iniISO, $finISO);
+
+    // Además, juntamos filas de detalle de descuentos para la sección específica
+    $rsDesc = obtenerFilasDescuentos($conn, $id_usuario, $iniISO, $finISO);
+    while ($d = $rsDesc->fetch_assoc()) {
+        $descuentoFilas[] = [
+            $u['nombre'],
+            $rol,
+            $u['sucursal'],
+            $d['concepto'],
+            number_format((float)$d['monto'], 2, '.', ''),
+            (new DateTime($d['creado_en']))->format('Y-m-d H:i')
+        ];
+    }
+
+    /* ========================
+       6) Totales empleado y fila RESUMEN
+======================== */
+    $total_bruto = (float)$u['sueldo'] + $equipos_com + $sims_com + $pos_com + $com_ger;
+    $total_neto  = $total_bruto - $descuentos;
+
+    $totalGlobalBruto += $total_bruto;
+    $totalGlobalDesc  += $descuentos;
+    $totalGlobalNeto  += $total_neto;
 
     fputcsv($output, [
         $u['nombre'],
@@ -372,15 +440,21 @@ while ($u = $resUsuarios->fetch_assoc()) {
         $pos_cnt,
         number_format($pos_com, 2, '.', ''),
         number_format($com_ger, 2, '.', ''),
-        number_format($total, 2, '.', '')
+        number_format($total_bruto, 2, '.', ''),
+        number_format($descuentos, 2, '.', ''),
+        number_format($total_neto, 2, '.', '')
     ]);
 }
 
 /* ========================
-   Fila de total global
+   Totales globales
 ======================== */
 fputcsv($output, []);
-fputcsv($output, ['TOTAL GLOBAL', '', '', '', '', '', '', '', '', '', '', number_format($totalGlobal,2,'.','')]);
+fputcsv($output, ['TOTALES GLOBALES', '', '', '', '', '', '', '', '', '', '',
+    number_format($totalGlobalBruto,2,'.',''),
+    number_format($totalGlobalDesc,2,'.',''),
+    number_format($totalGlobalNeto,2,'.','')
+]);
 
 /* ========================
    Sección DETALLE POR VENTA
@@ -399,6 +473,24 @@ fputcsv($output, [
 
 foreach ($detalleFilas as $fila) {
     fputcsv($output, $fila);
+}
+
+/* ========================
+   Sección DETALLE DE DESCUENTOS
+======================== */
+fputcsv($output, []); // línea en blanco
+fputcsv($output, ['DETALLE DE DESCUENTOS (Semana ' . $inicioSemanaObj->format('d/m/Y') . ' - ' . $finSemanaObj->format('d/m/Y') . ')']);
+fputcsv($output, [
+    'Empleado', 'Rol', 'Sucursal',
+    'Concepto', 'Monto', 'Creado en'
+]);
+
+if (count($descuentoFilas) === 0) {
+    fputcsv($output, ['(Sin descuentos registrados en esta semana)']);
+} else {
+    foreach ($descuentoFilas as $fila) {
+        fputcsv($output, $fila);
+    }
 }
 
 fclose($output);

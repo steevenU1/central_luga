@@ -9,21 +9,21 @@ include 'db.php';
 include 'navbar.php';
 
 /* ========================
-   FUNCIONES AUXILIARES (solo UI de semanas)
+   Semanas (mar→lun)
 ======================== */
 function obtenerSemanaPorIndice($offset = 0) {
-    $hoy = new DateTime();
-    $diaSemana = $hoy->format('N'); // 1=Lunes ... 7=Domingo
+    $tz = new DateTimeZone('America/Mexico_City');
+    $hoy = new DateTime('now', $tz);
+    $diaSemana = (int)$hoy->format('N'); // 1=Lun ... 7=Dom
     $dif = $diaSemana - 2; // martes=2
     if ($dif < 0) $dif += 7;
 
-    $inicio = new DateTime();
-    $inicio->modify("-$dif days")->setTime(0,0,0);
-    if ($offset > 0) $inicio->modify("-" . (7*$offset) . " days");
+    $inicio = new DateTime('now', $tz);
+    $inicio->modify('-'.$dif.' days')->setTime(0,0,0);
+    if ($offset > 0) $inicio->modify('-'.(7*$offset).' days');
 
     $fin = clone $inicio;
-    $fin->modify("+6 days")->setTime(23,59,59);
-
+    $fin->modify('+6 days')->setTime(23,59,59);
     return [$inicio, $fin];
 }
 
@@ -31,21 +31,20 @@ $semanaSeleccionada = isset($_GET['semana']) ? (int)$_GET['semana'] : 0;
 list($inicioSemanaObj, $finSemanaObj) = obtenerSemanaPorIndice($semanaSeleccionada);
 $inicioSemana = $inicioSemanaObj->format('Y-m-d 00:00:00');
 $finSemana    = $finSemanaObj->format('Y-m-d 23:59:59');
+$iniISO       = $inicioSemanaObj->format('Y-m-d');
+$finISO       = $finSemanaObj->format('Y-m-d');
 
 /* ========================
-   CONSULTA DE USUARIOS
-   (Excluye almacenes y, si existe la columna, subdistribuidores)
+   Usuarios (excluye almacén y subdistribuidor si existe)
 ======================== */
-// Detecta si existe una columna de subtipo; prueba varios nombres comunes.
 $subdistCol = null;
 foreach (['subtipo_sucursal','subtipo','sub_tipo','tipo_subsucursal'] as $c) {
     $rs = $conn->query("SHOW COLUMNS FROM sucursales LIKE '$c'");
     if ($rs && $rs->num_rows > 0) { $subdistCol = $c; break; }
 }
-
 $where = "s.tipo_sucursal <> 'Almacen'";
 if ($subdistCol) {
-    $where .= " AND (s.`$subdistCol` IS NULL OR s.`$subdistCol` <> 'Subdistribuidor')";
+    $where .= " AND (s.`$subdistCol` IS NULL OR LOWER(s.`$subdistCol`) <> 'subdistribuidor')";
 }
 
 $sqlUsuarios = "
@@ -57,97 +56,99 @@ $sqlUsuarios = "
 ";
 $resUsuarios = $conn->query($sqlUsuarios);
 
-$nomina = [];
+/* ========================
+   Confirmaciones (semana)
+======================== */
+$confMap = []; // id_usuario => ['confirmado'=>0/1,'confirmado_en'=>..., 'comentario'=>...]
+$stmtC = $conn->prepare("
+  SELECT id_usuario, confirmado, confirmado_en, comentario
+  FROM nomina_confirmaciones
+  WHERE semana_inicio=? AND semana_fin=?
+");
+$stmtC->bind_param("ss", $iniISO, $finISO);
+$stmtC->execute();
+$rC = $stmtC->get_result();
+while ($row = $rC->fetch_assoc()) {
+    $confMap[(int)$row['id_usuario']] = $row;
+}
 
+/* ========================
+   Helpers
+======================== */
+function obtenerDescuentosSemana($conn, $idUsuario, DateTime $ini, DateTime $fin): float {
+    $sql = "SELECT IFNULL(SUM(monto),0) AS total
+            FROM descuentos_nomina
+            WHERE id_usuario=?
+              AND semana_inicio=? AND semana_fin=?";
+    $stmt = $conn->prepare($sql);
+    $iniISO = $ini->format('Y-m-d');
+    $finISO = $fin->format('Y-m-d');
+    $stmt->bind_param("iss", $idUsuario, $iniISO, $finISO);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    return (float)($row['total'] ?? 0);
+}
+
+/* ========================
+   Armar nómina (igual que antes, con neto)
+======================== */
+$nomina = [];
 while ($u = $resUsuarios->fetch_assoc()) {
     $id_usuario  = (int)$u['id'];
     $id_sucursal = (int)$u['id_sucursal'];
 
-    /* ========================
-       1) Comisiones de EQUIPOS (ejecutivo)
-======================== */
-    $sqlEquipos = "
-        SELECT IFNULL(SUM(v.comision),0) AS total_comision
-        FROM ventas v
-        WHERE v.id_usuario=? 
-          AND v.fecha_venta BETWEEN ? AND ?
-    ";
-    $stmtEquip = $conn->prepare($sqlEquipos);
-    $stmtEquip->bind_param("iss", $id_usuario, $inicioSemana, $finSemana);
-    $stmtEquip->execute();
-    $com_equipos = (float)($stmtEquip->get_result()->fetch_assoc()['total_comision'] ?? 0);
+    // Comisiones EQUIPOS
+    $stmt = $conn->prepare("SELECT IFNULL(SUM(v.comision),0) AS total_comision FROM ventas v WHERE v.id_usuario=? AND v.fecha_venta BETWEEN ? AND ?");
+    $stmt->bind_param("iss", $id_usuario, $inicioSemana, $finSemana);
+    $stmt->execute();
+    $com_equipos = (float)($stmt->get_result()->fetch_assoc()['total_comision'] ?? 0);
 
-    /* ========================
-       2) Comisiones de SIMs PREPAGO (ejecutivo)
-======================== */
+    // SIMs PREPAGO
     $com_sims = 0.0;
     if ($u['rol'] != 'Gerente') {
-        $sqlSims = "
-            SELECT IFNULL(SUM(vs.comision_ejecutivo),0) AS com_sims
-            FROM ventas_sims vs
-            WHERE vs.id_usuario=?
-              AND vs.fecha_venta BETWEEN ? AND ?
-              AND vs.tipo_venta IN ('Nueva','Portabilidad')
-        ";
-        $stmtSims = $conn->prepare($sqlSims);
-        $stmtSims->bind_param("iss", $id_usuario, $inicioSemana, $finSemana);
-        $stmtSims->execute();
-        $com_sims = (float)($stmtSims->get_result()->fetch_assoc()['com_sims'] ?? 0);
+        $stmt = $conn->prepare("SELECT IFNULL(SUM(vs.comision_ejecutivo),0) AS com_sims FROM ventas_sims vs WHERE vs.id_usuario=? AND vs.fecha_venta BETWEEN ? AND ? AND vs.tipo_venta IN ('Nueva','Portabilidad')");
+        $stmt->bind_param("iss", $id_usuario, $inicioSemana, $finSemana);
+        $stmt->execute();
+        $com_sims = (float)($stmt->get_result()->fetch_assoc()['com_sims'] ?? 0);
     }
 
-    /* ========================
-       3) Comisiones de POSPAGO (ejecutivo)
-======================== */
+    // POSPAGO
     $com_pospago = 0.0;
     if ($u['rol'] != 'Gerente') {
-        $sqlPos = "
-            SELECT IFNULL(SUM(vs.comision_ejecutivo),0) AS com_pos
-            FROM ventas_sims vs
-            WHERE vs.id_usuario=?
-              AND vs.fecha_venta BETWEEN ? AND ?
-              AND vs.tipo_venta='Pospago'
-        ";
-        $stmtPos = $conn->prepare($sqlPos);
-        $stmtPos->bind_param("iss", $id_usuario, $inicioSemana, $finSemana);
-        $stmtPos->execute();
-        $com_pospago = (float)($stmtPos->get_result()->fetch_assoc()['com_pos'] ?? 0);
+        $stmt = $conn->prepare("SELECT IFNULL(SUM(vs.comision_ejecutivo),0) AS com_pos FROM ventas_sims vs WHERE vs.id_usuario=? AND vs.fecha_venta BETWEEN ? AND ? AND vs.tipo_venta='Pospago'");
+        $stmt->bind_param("iss", $id_usuario, $inicioSemana, $finSemana);
+        $stmt->execute();
+        $com_pospago = (float)($stmt->get_result()->fetch_assoc()['com_pos'] ?? 0);
     }
 
-    /* ========================
-       4) Comisión de GERENTE (por sucursal)
-======================== */
+    // GERENTE
     $com_ger = 0.0;
     if ($u['rol'] == 'Gerente') {
-        $sqlComGerV = "
-            SELECT IFNULL(SUM(v.comision_gerente),0) AS com_ger_vtas
-            FROM ventas v
-            WHERE v.id_sucursal=? 
-              AND v.fecha_venta BETWEEN ? AND ?
-        ";
-        $stmtGerV = $conn->prepare($sqlComGerV);
-        $stmtGerV->bind_param("iss", $id_sucursal, $inicioSemana, $finSemana);
-        $stmtGerV->execute();
-        $com_ger_vtas = (float)($stmtGerV->get_result()->fetch_assoc()['com_ger_vtas'] ?? 0);
+        $stmt = $conn->prepare("SELECT IFNULL(SUM(v.comision_gerente),0) AS com_ger_vtas FROM ventas v WHERE v.id_sucursal=? AND v.fecha_venta BETWEEN ? AND ?");
+        $stmt->bind_param("iss", $id_sucursal, $inicioSemana, $finSemana);
+        $stmt->execute();
+        $com_ger_vtas = (float)($stmt->get_result()->fetch_assoc()['com_ger_vtas'] ?? 0);
 
-        $sqlComGerS = "
-            SELECT IFNULL(SUM(vs.comision_gerente),0) AS com_ger_sims
-            FROM ventas_sims vs
-            WHERE vs.id_sucursal=? 
-              AND vs.fecha_venta BETWEEN ? AND ?
-        ";
-        $stmtGerS = $conn->prepare($sqlComGerS);
-        $stmtGerS->bind_param("iss", $id_sucursal, $inicioSemana, $finSemana);
-        $stmtGerS->execute();
-        $com_ger_sims = (float)($stmtGerS->get_result()->fetch_assoc()['com_ger_sims'] ?? 0);
+        $stmt = $conn->prepare("SELECT IFNULL(SUM(vs.comision_gerente),0) AS com_ger_sims FROM ventas_sims vs WHERE vs.id_sucursal=? AND vs.fecha_venta BETWEEN ? AND ?");
+        $stmt->bind_param("iss", $id_sucursal, $inicioSemana, $finSemana);
+        $stmt->execute();
+        $com_ger_sims = (float)($stmt->get_result()->fetch_assoc()['com_ger_sims'] ?? 0);
 
         $com_ger = $com_ger_vtas + $com_ger_sims;
     }
 
-    /* ========================
-       5) Totales
-======================== */
-    $total_ejecutivo = (float)$u['sueldo'] + $com_equipos + $com_sims + $com_pospago;
-    $total           = $total_ejecutivo + $com_ger;
+    // Descuentos
+    $descuentos = obtenerDescuentosSemana($conn, $id_usuario, $inicioSemanaObj, $finSemanaObj);
+
+    // Totales
+    $total_bruto = (float)$u['sueldo'] + $com_equipos + $com_sims + $com_pospago + $com_ger;
+    $total_neto  = $total_bruto - $descuentos;
+
+    // Confirmación
+    $confRow = $confMap[$id_usuario] ?? null;
+    $confirmado = $confRow ? (int)$confRow['confirmado'] : 0;
+    $confirmado_en = $confRow['confirmado_en'] ?? null;
+    $comentario = $confRow['comentario'] ?? '';
 
     $nomina[] = [
         'id_usuario'   => $id_usuario,
@@ -160,14 +161,27 @@ while ($u = $resUsuarios->fetch_assoc()) {
         'com_sims'     => $com_sims,
         'com_pospago'  => $com_pospago,
         'com_ger'      => $com_ger,
-        'total'        => $total
+        'descuentos'   => $descuentos,
+        'total_neto'   => $total_neto,
+        'confirmado'   => $confirmado,
+        'confirmado_en'=> $confirmado_en,
+        'comentario'   => $comentario
     ];
 }
 
-// Totales para tarjetas-resumen (no afecta lógica)
-$empleados = count($nomina);
-$totalGlobalHeader = 0;
-foreach($nomina as $n){ $totalGlobalHeader += $n['total']; }
+/* ========================
+   Totales y métricas
+======================== */
+$empleados        = count($nomina);
+$totalGlobalNeto  = 0;
+$totalGlobalDesc  = 0;
+$confirmados      = 0;
+foreach($nomina as $n){
+  $totalGlobalNeto += $n['total_neto'];
+  $totalGlobalDesc += $n['descuentos'];
+  if ((int)$n['confirmado'] === 1) $confirmados++;
+}
+$pendientes = max($empleados - $confirmados, 0);
 ?>
 <!DOCTYPE html>
 <html lang="es">
@@ -186,13 +200,31 @@ foreach($nomina as $n){ $totalGlobalHeader += $n['total']; }
     .page-title{ display:flex; gap:.75rem; align-items:center; }
     .page-title .emoji{ font-size:1.6rem; }
     .card-soft{ background:var(--card-bg); border:1px solid #eef2f7; border-radius:1rem; box-shadow:0 6px 18px rgba(16,24,40,.06); }
-    .chip{ display:inline-flex; gap:.5rem; align-items:center; background:var(--chip); border-radius:999px; padding:.4rem .7rem; font-size:.9rem; }
+    .chip{ display:inline-flex; gap:.4rem; align-items:center; background:var(--chip); border-radius:999px; padding:.25rem .55rem; font-size:.82rem; }
     .controls-right{ display:flex; gap:.5rem; flex-wrap:wrap; }
     .table thead th{ position:sticky; top:0; z-index:5; background:#fff; border-bottom:1px solid #e5e7eb; }
+
+    /* ======= Compactar tabla (sin scroll horizontal) ======= */
+    .table-nomina{ font-size: .82rem; }
+    .table-nomina th, .table-nomina td{ padding: .35rem .4rem; white-space: nowrap; vertical-align: middle; }
+    .num{ text-align: right; font-variant-numeric: tabular-nums; }
     .th-sort{ cursor:pointer; white-space:nowrap; }
-    .badge-role{ background:#eef2ff; color:#3730a3; border:1px solid #e0e7ff; }
-    .badge-suc{ background:#f0fdf4; color:#14532d; border:1px solid #bbf7d0; }
-    .summary-cards .card-soft{ min-width: 220px; }
+    .status-pill{ border-radius: 999px; font-size: .7rem; padding: .18rem .45rem; }
+    .header-mini{ font-size:.85rem; }
+    .no-x-scroll .table-responsive{ overflow-x: visible; } /* desktop: evita scroll */
+
+    /* Badges Rol/Sucursal con colores (fix) */
+    .badge-role{
+      background:#eef2ff; color:#3730a3; border:1px solid #e0e7ff;
+    }
+    .badge-suc{
+      background:#f0fdf4; color:#14532d; border:1px solid #bbf7d0;
+    }
+
+    @media (max-width: 1200px){
+      .table-nomina{ font-size:.78rem; }
+      .status-pill{ font-size:.66rem; }
+    }
     @media print{
       .no-print{ display:none !important; }
       body{ background:#fff; }
@@ -210,7 +242,7 @@ foreach($nomina as $n){ $totalGlobalHeader += $n['total']; }
       <span class="emoji">📋</span>
       <div>
         <h3 class="mb-0">Reporte de Nómina Semanal</h3>
-        <div class="text-muted small">
+        <div class="text-muted small header-mini">
           Semana del <strong><?= $inicioSemanaObj->format('d/m/Y') ?></strong> al <strong><?= $finSemanaObj->format('d/m/Y') ?></strong>
         </div>
       </div>
@@ -235,6 +267,9 @@ foreach($nomina as $n){ $totalGlobalHeader += $n['total']; }
         <a href="exportar_nomina_excel.php?semana=<?= $semanaSeleccionada ?>" class="btn btn-success btn-sm">
           <i class="bi bi-file-earmark-excel me-1"></i> Exportar Excel
         </a>
+        <a href="descuentos_nomina_admin.php?semana=<?= $semanaSeleccionada ?>" class="btn btn-outline-primary btn-sm">
+          <i class="bi bi-cash-coin me-1"></i> Descuentos
+        </a>
         <button class="btn btn-outline-secondary btn-sm" type="button" onclick="window.print()">
           <i class="bi bi-printer me-1"></i> Imprimir
         </button>
@@ -242,31 +277,41 @@ foreach($nomina as $n){ $totalGlobalHeader += $n['total']; }
     </div>
   </div>
 
-  <!-- Summary -->
-  <div class="summary-cards d-flex flex-wrap gap-3 mb-3">
+  <!-- Summary cards -->
+  <div class="d-flex flex-wrap gap-3 mb-3">
     <div class="card-soft p-3">
       <div class="text-muted small mb-1">Empleados</div>
-      <div class="h4 mb-0"><?= number_format($empleados) ?></div>
+      <div class="h5 mb-0"><?= number_format($empleados) ?></div>
     </div>
     <div class="card-soft p-3">
-      <div class="text-muted small mb-1">Total Global</div>
-      <div class="h4 mb-0">$<?= number_format($totalGlobalHeader,2) ?></div>
+      <div class="text-muted small mb-1">Global (Neto)</div>
+      <div class="h5 mb-0">$<?= number_format($totalGlobalNeto,2) ?></div>
     </div>
     <div class="card-soft p-3">
-      <div class="text-muted small mb-1">Rango</div>
-      <div class="mb-0"><span class="chip"><i class="bi bi-calendar-week me-1"></i><?= $inicioSemanaObj->format('d M') ?> – <?= $finSemanaObj->format('d M Y') ?></span></div>
+      <div class="text-muted small mb-1">Descuentos</div>
+      <div class="h5 mb-0 text-danger">-$<?= number_format($totalGlobalDesc,2) ?></div>
     </div>
+    <div class="card-soft p-3">
+      <div class="text-muted small mb-1">Confirmados</div>
+      <div class="h5 mb-0 text-success"><?= number_format($confirmados) ?></div>
+    </div>
+    <div class="card-soft p-3">
+      <div class="text-muted small mb-1">Pendientes</div>
+      <div class="h5 mb-0 text-danger"><?= number_format($pendientes) ?></div>
+    </div>
+
+    <!-- Filtros compactos -->
     <div class="card-soft p-3 no-print" style="flex:1">
       <div class="row g-2 align-items-end">
-        <div class="col-12 col-md-6">
-          <label class="form-label mb-1 small text-muted">Filtrar por rol</label>
+        <div class="col-12 col-md-4">
+          <label class="form-label mb-1 small text-muted">Rol</label>
           <select id="fRol" class="form-select form-select-sm">
             <option value="">Todos</option>
             <option value="Ejecutivo">Ejecutivo</option>
             <option value="Gerente">Gerente</option>
           </select>
         </div>
-        <div class="col-12 col-md-6">
+        <div class="col-12 col-md-8">
           <label class="form-label mb-1 small text-muted">Buscar</label>
           <input id="fSearch" type="search" class="form-control form-control-sm" placeholder="Empleado, sucursal...">
         </div>
@@ -274,30 +319,30 @@ foreach($nomina as $n){ $totalGlobalHeader += $n['total']; }
     </div>
   </div>
 
-  <!-- Tabla -->
-  <div class="card-soft p-0">
+  <!-- Tabla compacta (sin scroll horizontal en desktop) -->
+  <div class="card-soft p-0 no-x-scroll">
     <div class="table-responsive">
-      <table id="tablaNomina" class="table table-hover align-middle mb-0">
+      <table id="tablaNomina" class="table table-hover table-sm table-nomina mb-0">
         <thead>
           <tr>
             <th>Empleado</th>
-            <th class="th-sort" data-key="rol">Rol <i class="bi bi-arrow-down-up ms-1"></i></th>
-            <th class="th-sort" data-key="sucursal">Sucursal <i class="bi bi-arrow-down-up ms-1"></i></th>
-            <th class="text-end th-sort" data-key="sueldo">Sueldo Base <i class="bi bi-arrow-down-up ms-1"></i></th>
-            <th class="text-end th-sort" data-key="equipos">Com. Equipos <i class="bi bi-arrow-down-up ms-1"></i></th>
-            <th class="text-end th-sort" data-key="sims">Com. SIMs <i class="bi bi-arrow-down-up ms-1"></i></th>
-            <th class="text-end th-sort" data-key="pospago">Com. Pospago <i class="bi bi-arrow-down-up ms-1"></i></th>
-            <th class="text-end th-sort" data-key="gerente">Com. Gerente <i class="bi bi-arrow-down-up ms-1"></i></th>
-            <th class="text-end th-sort" data-key="total">Total a Pagar <i class="bi bi-arrow-down-up ms-1"></i></th>
+            <th class="th-sort" data-key="rol">Rol</th>
+            <th class="th-sort" data-key="sucursal">Sucursal</th>
+            <th class="th-sort num" data-key="sueldo">Sueldo</th>
+            <th class="th-sort num" data-key="equipos">Eq.</th>
+            <th class="th-sort num" data-key="sims">SIMs</th>
+            <th class="th-sort num" data-key="pospago">Pos.</th>
+            <th class="th-sort num" data-key="gerente">Ger.</th>
+            <th class="th-sort num" data-key="descuentos">Desc.</th>
+            <th class="th-sort num" data-key="neto">Neto</th>
+            <th class="th-sort" data-key="confirmado">Conf.</th>
             <th class="no-print"></th>
           </tr>
         </thead>
         <tbody>
-          <?php 
-          $totalGlobal = 0;
-          foreach ($nomina as $n): 
-              $totalGlobal += $n['total'];
+          <?php foreach ($nomina as $n):
               $isGer = ($n['rol'] === 'Gerente');
+              $isOk  = (int)$n['confirmado'] === 1;
           ?>
           <tr
             data-rol="<?= htmlspecialchars($n['rol'], ENT_QUOTES, 'UTF-8') ?>"
@@ -307,34 +352,55 @@ foreach($nomina as $n){ $totalGlobalHeader += $n['total']; }
             data-sims="<?= (float)$n['com_sims'] ?>"
             data-pospago="<?= (float)$n['com_pospago'] ?>"
             data-gerente="<?= (float)$n['com_ger'] ?>"
-            data-total="<?= (float)$n['total'] ?>"
+            data-descuentos="<?= (float)$n['descuentos'] ?>"
+            data-neto="<?= (float)$n['total_neto'] ?>"
+            data-confirmado="<?= $isOk ? 1 : 0 ?>"
           >
             <td>
               <div class="fw-semibold"><?= htmlspecialchars($n['nombre'], ENT_QUOTES, 'UTF-8') ?></div>
               <div class="small text-muted">
                 <?php if ($isGer): ?>
-                  <a href="auditar_comisiones_gerente.php?semana=<?= $semanaSeleccionada ?>&id_sucursal=<?= (int)$n['id_sucursal'] ?>">🔍 Detalle</a>
+                  <a href="auditar_comisiones_gerente.php?semana=<?= $semanaSeleccionada ?>&id_sucursal=<?= (int)$n['id_sucursal'] ?>" title="Detalle gerente">🔍</a>
                 <?php else: ?>
-                  <a href="auditar_comisiones_ejecutivo.php?semana=<?= $semanaSeleccionada ?>&id_usuario=<?= (int)$n['id_usuario'] ?>">🔍 Detalle</a>
+                  <a href="auditar_comisiones_ejecutivo.php?semana=<?= $semanaSeleccionada ?>&id_usuario=<?= (int)$n['id_usuario'] ?>" title="Detalle ejecutivo">🔍</a>
                 <?php endif; ?>
               </div>
             </td>
-            <td><span class="badge badge-role rounded-pill"><?= htmlspecialchars($n['rol'], ENT_QUOTES, 'UTF-8') ?></span></td>
-            <td><span class="badge badge-suc rounded-pill"><?= htmlspecialchars($n['sucursal'], ENT_QUOTES, 'UTF-8') ?></span></td>
-            <td class="text-end">$<?= number_format($n['sueldo'],2) ?></td>
-            <td class="text-end">$<?= number_format($n['com_equipos'],2) ?></td>
-            <td class="text-end">$<?= number_format($n['com_sims'],2) ?></td>
-            <td class="text-end">$<?= number_format($n['com_pospago'],2) ?></td>
-            <td class="text-end">$<?= number_format($n['com_ger'],2) ?></td>
-            <td class="text-end fw-semibold">$<?= number_format($n['total'],2) ?></td>
-            <td class="no-print"></td>
+            <td><span class="badge-role rounded-pill"><?= htmlspecialchars($n['rol'], ENT_QUOTES, 'UTF-8') ?></span></td>
+            <td><span class="badge-suc rounded-pill"><?= htmlspecialchars($n['sucursal'], ENT_QUOTES, 'UTF-8') ?></span></td>
+            <td class="num">$<?= number_format($n['sueldo'],2) ?></td>
+            <td class="num">$<?= number_format($n['com_equipos'],2) ?></td>
+            <td class="num">$<?= number_format($n['com_sims'],2) ?></td>
+            <td class="num">$<?= number_format($n['com_pospago'],2) ?></td>
+            <td class="num">$<?= number_format($n['com_ger'],2) ?></td>
+            <td class="num text-danger">-$<?= number_format($n['descuentos'],2) ?></td>
+            <td class="num fw-semibold">$<?= number_format($n['total_neto'],2) ?></td>
+            <td>
+              <?php if ($isOk): ?>
+                <span class="status-pill bg-success text-white" title="<?= $n['confirmado_en'] ? date('d/m/Y H:i', strtotime($n['confirmado_en'])) : '' ?>">✔</span>
+              <?php else: ?>
+                <span class="status-pill bg-warning">Pend.</span>
+              <?php endif; ?>
+            </td>
+            <td class="no-print">
+              <a class="btn btn-outline-primary btn-sm" 
+                 href="descuentos_nomina_admin.php?semana=<?= $semanaSeleccionada ?>&id_usuario=<?= (int)$n['id_usuario'] ?>"
+                 title="Capturar descuentos">
+                 <i class="bi bi-pencil-square"></i>
+              </a>
+            </td>
           </tr>
           <?php endforeach; ?>
         </tbody>
         <tfoot class="table-light">
           <tr>
-            <td colspan="8" class="text-end"><strong>Total Global</strong></td>
-            <td class="text-end"><strong>$<?= number_format($totalGlobal,2) ?></strong></td>
+            <td colspan="8" class="text-end"><strong>Totales</strong></td>
+            <td class="num text-danger"><strong>-$<?= number_format($totalGlobalDesc,2) ?></strong></td>
+            <td class="num"><strong>$<?= number_format($totalGlobalNeto,2) ?></strong></td>
+            <td class="text-start">
+              <span class="status-pill bg-success text-white me-1">Conf: <?= number_format($confirmados) ?></span>
+              <span class="status-pill bg-danger text-white">Pend: <?= number_format($pendientes) ?></span>
+            </td>
             <td></td>
           </tr>
         </tfoot>
@@ -343,7 +409,7 @@ foreach($nomina as $n){ $totalGlobalHeader += $n['total']; }
   </div>
 
   <div class="mt-2 text-muted small">
-    * Los importes de comisiones ya consideran el recálculo semanal correspondiente.
+    * Totales netos = sueldo + comisiones – descuentos. Confirmación visible en <em>Mi Nómina</em> desde el martes posterior al cierre (mar→lun).
   </div>
 </div>
 
@@ -354,8 +420,8 @@ foreach($nomina as $n){ $totalGlobalHeader += $n['total']; }
   const tbody = document.querySelector('#tablaNomina tbody');
 
   function applyFilters(){
-    const rol = (fRol.value||'').toLowerCase();
-    const q = (fSearch.value||'').toLowerCase();
+    const rol = (fRol?.value||'').toLowerCase();
+    const q = (fSearch?.value||'').toLowerCase();
     [...tbody.rows].forEach(tr=>{
       const trRol = (tr.dataset.rol||'').toLowerCase();
       const text = (tr.textContent||'').toLowerCase();
