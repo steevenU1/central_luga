@@ -1,5 +1,6 @@
 <?php
 // asistencia.php — compatible con diferencias de esquema (estatus / latitud_salida / longitud_salida)
+// Candado: salida mínima después de X minutos desde entrada
 session_start();
 if (!isset($_SESSION['id_usuario'])) { header("Location: index.php"); exit(); }
 
@@ -12,6 +13,9 @@ if (isset($_GET['debug'])) {
   error_reporting(E_ALL);
   mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
 }
+
+/* ========= Configuración de reglas ========= */
+const MIN_SALIDA_MIN = 60; // ← Candado: minutos mínimos desde entrada para permitir salida
 
 /* ========= Helpers ========= */
 function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
@@ -139,7 +143,7 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['action']) && in_array($
                     (id_usuario,id_sucursal,fecha,hora_entrada,estatus,retardo,retardo_minutos,latitud,longitud,ip,metodo)
                     VALUES (?,?,?,NOW(),?,?,?,?,?,?,?)";
             $st  = $conn->prepare($sql);
-            $st->bind_param('iissiiddss',  // i,i,s,s,i,i,d,d,s,s  => "iissiiddss"
+            $st->bind_param('iissiiddss',
               $idUsuario, $idSucursal, $hoyYmd, $estatus, $retardo, $retMin, $lat, $lng, $ip, $metodo
             );
           } else {
@@ -148,7 +152,7 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['action']) && in_array($
                     (id_usuario,id_sucursal,fecha,hora_entrada,retardo,retardo_minutos,latitud,longitud,ip,metodo)
                     VALUES (?,?,?,NOW(),?,?,?,?,?,?)";
             $st  = $conn->prepare($sql);
-            $st->bind_param('iisiiddss',   // i,i,s,i,i,d,d,s,s  => "iisiiddss"
+            $st->bind_param('iisiiddss',
               $idUsuario, $idSucursal, $hoyYmd, $retardo, $retMin, $lat, $lng, $ip, $metodo
             );
           }
@@ -167,48 +171,63 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['action']) && in_array($
   }
 
   if ($action === 'checkout') {
-    $st = $conn->prepare("SELECT id FROM asistencias WHERE id_usuario=? AND fecha=? AND hora_salida IS NULL ORDER BY id ASC LIMIT 1");
+    // Traer entrada abierta y minutos transcurridos desde hora_entrada
+    $st = $conn->prepare("
+      SELECT id, TIMESTAMPDIFF(MINUTE, hora_entrada, NOW()) AS mins_desde_entrada
+      FROM asistencias
+      WHERE id_usuario=? AND fecha=? AND hora_salida IS NULL
+      ORDER BY id ASC LIMIT 1
+    ");
     $st->bind_param('is',$idUsuario,$hoyYmd); $st->execute();
     $abierta = $st->get_result()->fetch_assoc(); $st->close();
 
     if (!$abierta) {
       $msg = "<div class='alert alert-warning mb-3'>No hay una entrada abierta hoy para cerrar.</div>";
     } else {
-      $latOut = ($_POST['lat_out']!=='') ? (float)$_POST['lat_out'] : null;
-      $lngOut = ($_POST['lng_out']!=='') ? (float)$_POST['lng_out'] : null;
-      if ($latOut===null || $lngOut===null) {
-        $msg = "<div class='alert alert-danger mb-3'>Debes permitir tu <b>ubicación</b> para registrar la salida.</div>";
+      $minsDesdeEntrada = (int)($abierta['mins_desde_entrada'] ?? 0);
+      if ($minsDesdeEntrada < MIN_SALIDA_MIN) {
+        $faltan = MAX(0, MIN_SALIDA_MIN - $minsDesdeEntrada);
+        $msg = "<div class='alert alert-warning mb-3'>
+                  Para registrar la salida se requiere un mínimo de <b>".MIN_SALIDA_MIN." min</b> desde tu entrada.
+                  Te faltan <b>{$faltan} min</b>.
+                </div>";
       } else {
-        $idAsist = (int)$abierta['id'];
-
-        if ($tieneColsSalida) {
-          // Guardar coordenadas de salida en columnas dedicadas
-          $sql = "UPDATE asistencias
-                  SET hora_salida=NOW(),
-                      duracion_minutos=TIMESTAMPDIFF(MINUTE,hora_entrada,NOW()),
-                      latitud_salida=?, longitud_salida=?, ip=?, metodo=?
-                  WHERE id=? AND hora_salida IS NULL";
-          $st  = $conn->prepare($sql);
-          $ipNow = client_ip();
-          $st->bind_param('ddssi',$latOut,$lngOut,$ipNow,$metodo,$idAsist);
+        $latOut = ($_POST['lat_out']!=='') ? (float)$_POST['lat_out'] : null;
+        $lngOut = ($_POST['lng_out']!=='') ? (float)$_POST['lng_out'] : null;
+        if ($latOut===null || $lngOut===null) {
+          $msg = "<div class='alert alert-danger mb-3'>Debes permitir tu <b>ubicación</b> para registrar la salida.</div>";
         } else {
-          // Entorno sin columnas *_salida: solo actualiza hora/ip/metodo (no pisa lat/long de entrada)
-          $sql = "UPDATE asistencias
-                  SET hora_salida=NOW(),
-                      duracion_minutos=TIMESTAMPDIFF(MINUTE,hora_entrada,NOW()),
-                      ip=?, metodo=?
-                  WHERE id=? AND hora_salida IS NULL";
-          $st  = $conn->prepare($sql);
-          $ipNow = client_ip();
-          $st->bind_param('ssi',$ipNow,$metodo,$idAsist);
-        }
+          $idAsist = (int)$abierta['id'];
 
-        if ($st->execute() && $st->affected_rows > 0) {
-          $msg = "<div class='alert alert-success mb-3'>✅ Salida registrada.</div>";
-        } else {
-          $msg = "<div class='alert alert-danger mb-3'>No se pudo registrar la salida.</div>";
+          if ($tieneColsSalida) {
+            // Guardar coordenadas de salida en columnas dedicadas
+            $sql = "UPDATE asistencias
+                    SET hora_salida=NOW(),
+                        duracion_minutos=TIMESTAMPDIFF(MINUTE,hora_entrada,NOW()),
+                        latitud_salida=?, longitud_salida=?, ip=?, metodo=?
+                    WHERE id=? AND hora_salida IS NULL";
+            $st  = $conn->prepare($sql);
+            $ipNow = client_ip();
+            $st->bind_param('ddssi',$latOut,$lngOut,$ipNow,$metodo,$idAsist);
+          } else {
+            // Entorno sin columnas *_salida: solo actualiza hora/ip/metodo (no pisa lat/long de entrada)
+            $sql = "UPDATE asistencias
+                    SET hora_salida=NOW(),
+                        duracion_minutos=TIMESTAMPDIFF(MINUTE,hora_entrada,NOW()),
+                        ip=?, metodo=?
+                    WHERE id=? AND hora_salida IS NULL";
+            $st  = $conn->prepare($sql);
+            $ipNow = client_ip();
+            $st->bind_param('ssi',$ipNow,$metodo,$idAsist);
+          }
+
+          if ($st->execute() && $st->affected_rows > 0) {
+            $msg = "<div class='alert alert-success mb-3'>✅ Salida registrada.</div>";
+          } else {
+            $msg = "<div class='alert alert-danger mb-3'>No se pudo registrar la salida.</div>";
+          }
+          $st->close();
         }
-        $st->close();
       }
     }
   }
@@ -218,7 +237,7 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['action']) && in_array($
 $st=$conn->prepare("SELECT * FROM asistencias WHERE id_usuario=? AND fecha=? ORDER BY id DESC LIMIT 1");
 $st->bind_param('is',$idUsuario,$hoyYmd); $st->execute(); $asistHoy=$st->get_result()->fetch_assoc(); $st->close();
 
-$st=$conn->prepare("SELECT id FROM asistencias WHERE id_usuario=? AND fecha=? AND hora_salida IS NULL LIMIT 1");
+$st=$conn->prepare("SELECT id, hora_entrada FROM asistencias WHERE id_usuario=? AND fecha=? AND hora_salida IS NULL LIMIT 1");
 $st->bind_param('is',$idUsuario,$hoyYmd); $st->execute(); $abiertaHoy=$st->get_result()->fetch_assoc(); $st->close();
 
 $tieneRegistroHoy = (bool)$asistHoy;
@@ -230,6 +249,23 @@ $retardoMinHoy    = $tieneRegistroHoy ? (int)($asistHoy['retardo_minutos'] ?? 0)
 
 $puedeCheckIn  = !$tieneRegistroHoy && !$bloqueadoParaCheckIn;
 $puedeCheckOut = $abiertaHoy !== null;
+
+/* ==== Cálculo para UI: bloqueo de salida anticipada (no sustituye validación de servidor) ==== */
+$minsDesdeEntradaUI = null; $bloqueoAnticipadoUI = false; $faltanUI = 0;
+if ($puedeCheckOut && $entradaHoy && !$salidaHoy) {
+  // hora_entrada puede ser DATETIME o TIME; normalizamos con la fecha de hoy si es TIME
+  $entradaStr = (string)$entradaHoy;
+  if (strlen($entradaStr) <= 8) { // HH:MM:SS
+    $entradaDT = strtotime($hoyYmd.' '.$entradaStr);
+  } else {
+    $entradaDT = strtotime($entradaStr);
+  }
+  if ($entradaDT) {
+    $minsDesdeEntradaUI = (int)floor((time() - $entradaDT) / 60);
+    $bloqueoAnticipadoUI = ($minsDesdeEntradaUI < MIN_SALIDA_MIN);
+    if ($bloqueoAnticipadoUI) $faltanUI = max(0, MIN_SALIDA_MIN - $minsDesdeEntradaUI);
+  }
+}
 
 /* ========= Historial (últimos 20) ========= */
 $st=$conn->prepare("
@@ -399,6 +435,11 @@ require_once __DIR__.'/navbar.php';
             </li>
             <li><b>Salida:</b> <?= $salidaHoy ? h($salidaHoy) : '<span class="text-muted">—</span>' ?></li>
             <li><b>Duración:</b> <?= $duracionHoy!==null ? (int)$duracionHoy.' min' : '<span class="text-muted">—</span>' ?></li>
+            <?php if ($bloqueoAnticipadoUI): ?>
+              <li class="text-danger"><i class="bi bi-hourglass-split me-1"></i>
+                Te faltan <b><?= (int)$faltanUI ?></b> min para poder registrar la salida (mínimo <?= MIN_SALIDA_MIN ?> min).
+              </li>
+            <?php endif; ?>
           </ul>
           <div class="help-text">
             <?php if ($sucCerrada): ?>
@@ -427,7 +468,11 @@ require_once __DIR__.'/navbar.php';
               <input type="hidden" name="action" value="checkout">
               <input type="hidden" name="lat_out" id="lat_out">
               <input type="hidden" name="lng_out" id="lng_out">
-              <button class="btn btn-danger btn-lg" id="btnOut" <?= $puedeCheckOut?'':'disabled' ?>>
+              <?php
+                $btnOutDisabled = !$puedeCheckOut || $bloqueoAnticipadoUI;
+                $btnOutTitle = $bloqueoAnticipadoUI ? "Debes esperar {$faltanUI} min (mínimo ".MIN_SALIDA_MIN." min desde tu entrada)" : "";
+              ?>
+              <button class="btn btn-danger btn-lg" id="btnOut" <?= $btnOutDisabled?'disabled':'' ?> title="<?= h($btnOutTitle) ?>">
                 <i class="bi bi-box-arrow-right me-1"></i> Salir
               </button>
             </form>

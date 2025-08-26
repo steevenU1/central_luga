@@ -50,7 +50,6 @@ function pickDateCol(mysqli $conn, string $table, array $candidates=['fecha','cr
   foreach ($candidates as $c) {
     if (column_exists($conn, $table, $c)) return $c;
   }
-  // Si no hay, regresamos 'fecha' por compatibilidad y dejamos que falle visible en debug
   return 'fecha';
 }
 function pickDateColWithAlias(mysqli $conn, string $table, string $alias, array $candidates=['fecha','creado_en','fecha_evento','dia','timestamp']): string {
@@ -69,7 +68,6 @@ function stmt_all_assoc(mysqli_stmt $stmt): array {
   foreach ($fields as $f) { $row[$f->name] = null; $bind[] = &$row[$f->name]; }
   call_user_func_array([$stmt, 'bind_result'], $bind);
   while ($stmt->fetch()) {
-    // Hacemos copia "by value"
     $rows[] = array_combine(array_keys($row), array_map(function($v){ return $v; }, array_values($row)));
   }
   return $rows;
@@ -81,6 +79,7 @@ $weekIso = $_GET['week'] ?? currentOpWeekIso();
 $tuesdayStart = opWeekStartFromWeekInput($weekIso) ?: new DateTime('tuesday this week');
 $start = $tuesdayStart->format('Y-m-d');
 $end   = (clone $tuesdayStart)->modify('+6 day')->format('Y-m-d');
+$today = (new DateTime('today'))->format('Y-m-d'); // para no contar faltas en días futuros
 
 /* ===== Sucursales 'tienda' 'propia' ===== */
 $sucursales = [];
@@ -90,9 +89,12 @@ if ($resSuc) { while ($r = $resSuc->fetch_assoc()) $sucursales[] = $r; }
 $sucursal_id = isset($_GET['sucursal_id']) ? (int)$_GET['sucursal_id'] : 0;
 $qsExport = http_build_query(['week'=>$weekIso,'sucursal_id'=>$sucursal_id]);
 
-/* ===== Usuarios activos (opcional por sucursal) ===== */
+/* ===== Usuarios activos — SOLO Gerente/Ejecutivo ===== */
 $paramsU=[]; $typesU='';
-$whereU=" WHERE u.activo=1 AND s.tipo_sucursal='tienda' AND s.subtipo='propia' ";
+$whereU=" WHERE u.activo=1 
+          AND s.tipo_sucursal='tienda' 
+          AND s.subtipo='propia'
+          AND u.rol IN ('Gerente','Ejecutivo') ";
 if ($sucursal_id>0){ $whereU.=' AND u.id_sucursal=? '; $typesU.='i'; $paramsU[]=$sucursal_id; }
 $sqlUsers="SELECT u.id,u.nombre,u.id_sucursal,s.nombre AS sucursal 
            FROM usuarios u 
@@ -106,7 +108,7 @@ $usuarios = stmt_all_assoc($stmt);
 $stmt->close();
 $userIds=array_map(fn($u)=>(int)$u['id'],$usuarios); if(!$userIds)$userIds=[0];
 
-/* ===== Horarios por sucursal (dos esquemas posibles) ===== */
+/* ===== Horarios por sucursal ===== */
 $horarios=[];
 $horTable = table_exists($conn,'sucursales_horario') ? 'sucursales_horario' : (table_exists($conn,'horarios_sucursal') ? 'horarios_sucursal' : null);
 if ($horTable === 'sucursales_horario') {
@@ -121,7 +123,7 @@ if ($horTable === 'sucursales_horario') {
   }
 }
 
-/* ===== Descansos semana (si existe tabla) ===== */
+/* ===== Descansos semana ===== */
 $descansos=[];
 if (table_exists($conn,'descansos_programados')) {
   $inList=implode(',',array_fill(0,count($userIds),'?'));
@@ -136,7 +138,7 @@ if (table_exists($conn,'descansos_programados')) {
   $stmt->close();
 }
 
-/* ===== Permisos aprobados (si existe tabla) ===== */
+/* ===== Permisos aprobados ===== */
 $permAprob=[];
 if (table_exists($conn,'permisos_solicitudes')) {
   $permDateCol = pickDateCol($conn, 'permisos_solicitudes', ['fecha','dia','fecha_solicitada','fecha_permiso','creado_en']);
@@ -151,14 +153,15 @@ if (table_exists($conn,'permisos_solicitudes')) {
   $stmt->close();
 }
 
-/* ===== Asistencias detalle (columna fecha compatible) ===== */
+/* ===== Asistencias detalle — con nombre de usuario ===== */
 $typesA=str_repeat('i',count($userIds)).'ss';
 $asisDateRaw = pickDateColWithAlias($conn, 'asistencias', 'a', ['fecha','creado_en','fecha_evento','dia','timestamp']);
 $asistDet=[];
 $sqlA="
-  SELECT a.*, {$asisDateRaw} AS fecha, s.nombre AS sucursal
+  SELECT a.*, {$asisDateRaw} AS fecha, s.nombre AS sucursal, u.nombre AS usuario
   FROM asistencias a
   JOIN sucursales s ON s.id=a.id_sucursal
+  JOIN usuarios u   ON u.id=a.id_usuario
   WHERE a.id_usuario IN (%s) AND DATE({$asisDateRaw}) BETWEEN ? AND ?
   ORDER BY {$asisDateRaw} ASC, a.hora_entrada ASC, a.id ASC
 ";
@@ -212,11 +215,18 @@ foreach($usuarios as $u){
   $retSemanaUsuario=0;
 
   foreach($days as $d){
-    $f=$d->format('Y-m-d'); $dow=(int)$d->format('N');
+    $f=$d->format('Y-m-d');
+    $isFuture = ($f > $today); // no contar faltas en futuro
+    $dow=(int)$d->format('N');
     $hor=$horarios[$sid][$dow]??null; $cerrado=$hor?((int)$hor['cerrado']===1):false;
     $isDesc=!empty($descansos[$uid][$f]); $isPerm=!empty($permAprob[$uid][$f]);
     $a=$asistByUserDay[$uid][$f]??null;
     $esLaborable = !$cerrado && !$isDesc && !$isPerm;
+
+    if ($isFuture) {
+      $fila['dias'][]=['fecha'=>$f,'estado'=>'PENDIENTE','entrada'=>null,'salida'=>null,'retardo_min'=>0,'dur'=>0];
+      continue;
+    }
 
     if($a){
       $ret=(int)($a['retardo']??0); $retMin=(int)($a['retardo_minutos']??0); $dur=(int)($a['duracion_minutos']??0);
@@ -229,7 +239,7 @@ foreach($usuarios as $u){
       if($isDesc){ $estado='DESCANSO'; $fila['desc']++; $totDesc++; }
       elseif($cerrado){ $estado='CERRADA'; }
       elseif($isPerm){ $estado='PERMISO'; $fila['perm']++; $totPerm++; }
-      else { $estado='FALTA'; $fila['fal']++; $totFal++; if($esLaborable) $laborables++; }
+      else { $estado='FALTA'; $fila['fal']++; if($esLaborable) $laborables++; $totFal++; }
       $fila['dias'][]=['fecha'=>$f,'estado'=>$estado,'entrada'=>null,'salida'=>null,'retardo_min'=>0,'dur'=>0];
     }
   }
@@ -260,7 +270,8 @@ if ($isExport) {
       $row=[$fila['sucursal'],$fila['usuario']];
       foreach($fila['dias'] as $d){
         $estado=$d['estado'];
-        if($estado==='RETARDO'){ $row[]='RETARDO +'.($d['retardo_min']??0).'m'; }
+        if ($estado==='PENDIENTE'){ $row[]='—'; }
+        elseif($estado==='RETARDO'){ $row[]='RETARDO +'.($d['retardo_min']??0).'m'; }
         else { $row[]=$estado; }
       }
       $hrs=$fila['min']>0?round($fila['min']/60,2):0;
@@ -277,9 +288,17 @@ if ($isExport) {
     foreach($asistDet as $a){
       $estado=((int)($a['retardo']??0)===1)?'RETARDO':'OK';
       fputcsv($out,[
-        $a['sucursal'],$a['id_usuario'],$a['fecha'],$a['hora_entrada'],$a['hora_salida'],
-        (int)($a['duracion_minutos']??0),$estado,(int)($a['retardo_minutos']??0),
-        $a['latitud']??'',$a['longitud']??'',$a['ip']??''
+        $a['sucursal'],
+        $a['usuario'], // nombre en CSV
+        $a['fecha'],
+        $a['hora_entrada'],
+        $a['hora_salida'],
+        (int)($a['duracion_minutos']??0),
+        $estado,
+        (int)($a['retardo_minutos']??0),
+        $a['latitud']??'',
+        $a['longitud']??'',
+        $a['ip']??''
       ]);
     }
     fclose($out); exit;
@@ -331,6 +350,7 @@ require_once __DIR__.'/navbar.php';
     .pill-rest{ background:#f3f4f6; color:#374151; border:1px solid #e5e7eb; }
     .pill-closed{ background:#ede9fe; color:#5b21b6; border:1px solid #ddd6fe; }
     .pill-perm{ background:#e2f0d9; color:#2b6a2b; border:1px solid #c7e3be; }
+    .pill-future{ background:#eef2ff; color:#3730a3; border:1px solid #c7d2fe; } /* PENDIENTE */
     .thead-sticky th{ position:sticky; top:0; background:#111827; color:#fff; z-index:2; }
     .kpi{ border:0; border-radius:1rem; padding:1rem 1.25rem; display:flex; gap:.9rem; align-items:center; }
     .kpi i{ font-size:1.3rem; opacity:.9; }
@@ -446,6 +466,7 @@ require_once __DIR__.'/navbar.php';
                 elseif($estado==='DESCANSO'){ $pill='pill-rest'; }
                 elseif($estado==='CERRADA'){ $pill='pill-closed'; }
                 elseif($estado==='PERMISO'){ $pill='pill-perm'; }
+                elseif($estado==='PENDIENTE'){ $pill='pill-future'; $txt='Pendiente'; }
               ?>
                 <td class="text-center">
                   <span class="pill <?= $pill ?>" title="<?= 'Entrada: '.($d['entrada']??'—').' | Salida: '.($d['salida']??'—').' | Dur: '.$d['dur'].'m' ?>"><?= h($txt) ?></span>
@@ -474,15 +495,18 @@ require_once __DIR__.'/navbar.php';
       <div class="table-responsive">
         <table class="table table-hover table-xs align-middle mb-0">
           <thead class="table-dark">
-            <tr><th>Sucursal</th><th>Usuario(ID)</th><th>Fecha</th><th>Entrada</th><th>Salida</th><th class="text-end">Duración (min)</th><th>Estado</th><th>Retardo(min)</th><th>Mapa</th><th>IP</th></tr>
+            <tr><th>Sucursal</th><th>Usuario</th><th>Fecha</th><th>Entrada</th><th>Salida</th><th class="text-end">Duración (min)</th><th>Estado</th><th>Retardo(min)</th><th>Mapa</th><th>IP</th></tr>
           </thead>
           <tbody>
           <?php if(!$asistDet): ?>
             <tr><td colspan="10" class="text-muted">Sin registros.</td></tr>
           <?php else: foreach($asistDet as $a): $estado=((int)($a['retardo']??0)===1)?'RETARDO':'OK'; ?>
             <tr class="<?= $a['hora_salida'] ? '' : 'table-warning' ?>">
-              <td><?= h($a['sucursal']) ?></td><td><?= (int)$a['id_usuario'] ?></td><td><?= h($a['fecha']) ?></td>
-              <td><?= h($a['hora_entrada']) ?></td><td><?= $a['hora_salida']?h($a['hora_salida']):'<span class="text-muted">—</span>' ?></td>
+              <td><?= h($a['sucursal']) ?></td>
+              <td><?= h($a['usuario']) ?></td>
+              <td><?= h($a['fecha']) ?></td>
+              <td><?= h($a['hora_entrada']) ?></td>
+              <td><?= $a['hora_salida']?h($a['hora_salida']):'<span class="text-muted">—</span>' ?></td>
               <td class="text-end"><?= (int)($a['duracion_minutos']??0) ?></td>
               <td><?= $estado==='RETARDO'?'<span class="pill pill-ret">RETARDO</span>':'<span class="pill pill-ok">OK</span>' ?></td>
               <td><?= (int)($a['retardo_minutos']??0) ?></td>
