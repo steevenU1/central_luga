@@ -1,78 +1,133 @@
 <?php
+// generar_traspaso_eulalia.php
 session_start();
-if (!isset($_SESSION['id_usuario']) || !in_array($_SESSION['rol'], ['Admin','Gerente'])) {
-  header("Location: 403.php");
-  exit();
+if (!isset($_SESSION['id_usuario']) || !in_array(($_SESSION['rol'] ?? ''), ['Admin','Gerente'], true)) {
+  header("Location: 403.php"); exit();
 }
 
-include 'db.php';
+require_once __DIR__.'/db.php';
 
 $mensaje = '';
 
 // ===============================
-// 1) ID de "Eulalia" (origen)
+// 1) Resolver ID de "Eulalia" (Almacén central) de forma tolerante
 // ===============================
 $idEulalia = 0;
-if ($stmt = $conn->prepare("SELECT id FROM sucursales WHERE nombre='Eulalia' LIMIT 1")) {
+
+// a) intento exacto con las variantes más comunes
+if ($stmt = $conn->prepare("SELECT id FROM sucursales WHERE LOWER(nombre) IN ('eulalia','luga eulalia') LIMIT 1")) {
   $stmt->execute();
   $res = $stmt->get_result();
   if ($row = $res->fetch_assoc()) $idEulalia = (int)$row['id'];
   $stmt->close();
 }
+
+// b) fallback: por LIKE insensible a mayúsculas
 if ($idEulalia <= 0) {
-  echo "<div class='container my-4'><div class='alert alert-danger shadow-sm'>No se encontró la sucursal de inventario central 'Eulalia'. Verifica el catálogo de sucursales.</div></div>";
+  $rs = $conn->query("SELECT id FROM sucursales WHERE LOWER(nombre) LIKE '%eulalia%' ORDER BY LENGTH(nombre) ASC LIMIT 1");
+  if ($rs && $r = $rs->fetch_assoc()) $idEulalia = (int)$r['id'];
+}
+
+if ($idEulalia <= 0) {
+  echo "<div class='container my-4'><div class='alert alert-danger shadow-sm'>No se encontró la sucursal de inventario central “Eulalia”. Verifica el catálogo de sucursales.</div></div>";
   exit();
 }
 
 // ===============================
 // 2) Procesar TRASPASO (POST)
 // ===============================
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['equipos'])) {
-  $equiposSeleccionados = $_POST['equipos'];
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+  $equiposSeleccionados = isset($_POST['equipos']) && is_array($_POST['equipos']) ? $_POST['equipos'] : [];
   $idSucursalDestino    = (int)($_POST['sucursal_destino'] ?? 0);
-  $idUsuario            = (int)$_SESSION['id_usuario'];
+  $idUsuario            = (int)($_SESSION['id_usuario'] ?? 0);
 
   if ($idSucursalDestino <= 0) {
     $mensaje = "<div class='alert alert-warning alert-dismissible fade show shadow-sm' role='alert'>
                   Selecciona una sucursal destino.
                   <button type='button' class='btn-close' data-bs-dismiss='alert' aria-label='Cerrar'></button>
                 </div>";
-  } elseif (count($equiposSeleccionados) > 0) {
-    // CABECERA
-    $stmt = $conn->prepare("
-      INSERT INTO traspasos (id_sucursal_origen, id_sucursal_destino, usuario_creo, estatus)
-      VALUES (?,?,?, 'Pendiente')
-    ");
-    $stmt->bind_param("iii", $idEulalia, $idSucursalDestino, $idUsuario);
-    $stmt->execute();
-    $idTraspaso = $stmt->insert_id;
-    $stmt->close();
-
-    // DETALLE + inventario en tránsito
-    $stmtDetalle = $conn->prepare("INSERT INTO detalle_traspaso (id_traspaso, id_inventario) VALUES (?, ?)");
-    $stmtUpdate  = $conn->prepare("UPDATE inventario SET estatus='En tránsito' WHERE id=?");
-
-    foreach ($equiposSeleccionados as $idInventario) {
-      $idInventario = (int)$idInventario;
-      $stmtDetalle->bind_param("ii", $idTraspaso, $idInventario);
-      $stmtDetalle->execute();
-
-      $stmtUpdate->bind_param("i", $idInventario);
-      $stmtUpdate->execute();
-    }
-    $stmtDetalle->close();
-    $stmtUpdate->close();
-
-    $mensaje = "<div class='alert alert-success alert-dismissible fade show shadow-sm' role='alert'>
-                  <i class='bi bi-check-circle me-1'></i>
-                  <strong>Traspaso #{$idTraspaso}</strong> generado con éxito. Los equipos ahora están en tránsito.
-                  <button type='button' class='btn-close' data-bs-dismiss='alert' aria-label='Cerrar'></button>
-                </div>";
-  } else {
+  } elseif (empty($equiposSeleccionados)) {
     $mensaje = "<div class='alert alert-warning alert-dismissible fade show shadow-sm' role='alert'>
                   No seleccionaste ningún equipo para traspasar.
                   <button type='button' class='btn-close' data-bs-dismiss='alert' aria-label='Cerrar'></button>
                 </div>";
+  } elseif ($idSucursalDestino === $idEulalia) {
+    $mensaje = "<div class='alert alert-warning alert-dismissible fade show shadow-sm' role='alert'>
+                  El destino no puede ser Eulalia.
+                  <button type='button' class='btn-close' data-bs-dismiss='alert' aria-label='Cerrar'></button>
+                </div>";
+  } else {
+    // Normaliza IDs
+    $idsInv = array_values(array_unique(array_map('intval', $equiposSeleccionados)));
+    if (!empty($idsInv)) {
+      $conn->begin_transaction();
+      try {
+        // CABECERA del traspaso (fecha_traspaso = DEFAULT current_timestamp())
+        $stmt = $conn->prepare("
+          INSERT INTO traspasos (id_sucursal_origen, id_sucursal_destino, usuario_creo, estatus)
+          VALUES (?,?,?, 'Pendiente')
+        ");
+        $stmt->bind_param("iii", $idEulalia, $idSucursalDestino, $idUsuario);
+        $stmt->execute();
+        $idTraspaso = (int)$stmt->insert_id;
+        $stmt->close();
+
+        // Validar que TODOS los inventarios sigan en Eulalia y 'Disponible'
+        $placeholders = implode(',', array_fill(0, count($idsInv), '?'));
+        $typesIds = str_repeat('i', count($idsInv));
+        $sqlVal = "
+          SELECT i.id
+          FROM inventario i
+          WHERE i.id_sucursal=? AND i.estatus='Disponible' AND i.id IN ($placeholders)
+        ";
+        $stmtVal = $conn->prepare($sqlVal);
+        $typesFull = 'i' . $typesIds; // primero id_sucursal, luego lista de IDs
+        $stmtVal->bind_param($typesFull, $idEulalia, ...$idsInv);
+        $stmtVal->execute();
+        $rsVal = $stmtVal->get_result();
+        $validos = [];
+        while ($r = $rsVal->fetch_assoc()) $validos[] = (int)$r['id'];
+        $stmtVal->close();
+
+        if (count($validos) !== count($idsInv)) {
+          $conn->rollback();
+          $mensaje = "<div class='alert alert-danger alert-dismissible fade show shadow-sm' role='alert'>
+                        Algunos equipos ya no están disponibles en Eulalia o cambiaron de estatus. Refresca e intenta de nuevo.
+                        <button type='button' class='btn-close' data-bs-dismiss='alert' aria-label='Cerrar'></button>
+                      </div>";
+        } else {
+          // Inserta detalle y pone En tránsito (blindando id_sucursal y estatus)
+          $stmtDet = $conn->prepare("INSERT INTO detalle_traspaso (id_traspaso, id_inventario) VALUES (?,?)");
+          $stmtUpd = $conn->prepare("UPDATE inventario SET estatus='En tránsito' WHERE id=? AND id_sucursal=? AND estatus='Disponible'");
+
+          foreach ($validos as $idInv) {
+            $stmtDet->bind_param("ii", $idTraspaso, $idInv);
+            $stmtDet->execute();
+
+            $stmtUpd->bind_param("ii", $idInv, $idEulalia);
+            $stmtUpd->execute();
+            if ($stmtUpd->affected_rows !== 1) {
+              throw new Exception("Fallo al actualizar inventario #$idInv");
+            }
+          }
+          $stmtDet->close();
+          $stmtUpd->close();
+
+          $conn->commit();
+          $mensaje = "<div class='alert alert-success alert-dismissible fade show shadow-sm' role='alert'>
+                        <i class='bi bi-check-circle me-1'></i>
+                        <strong>Traspaso #{$idTraspaso}</strong> generado con éxito. Los equipos ahora están <b>En tránsito</b>.
+                        <button type='button' class='btn-close' data-bs-dismiss='alert' aria-label='Cerrar'></button>
+                      </div>";
+        }
+      } catch (Throwable $e) {
+        $conn->rollback();
+        $mensaje = "<div class='alert alert-danger alert-dismissible fade show shadow-sm' role='alert'>
+                      Error al generar traspaso: ".htmlspecialchars($e->getMessage(), ENT_QUOTES, 'UTF-8')."
+                      <button type='button' class='btn-close' data-bs-dismiss='alert' aria-label='Cerrar'></button>
+                    </div>";
+      }
+    }
   }
 }
 
@@ -84,7 +139,7 @@ SELECT i.id, p.marca, p.modelo, p.color, p.imei1, p.imei2
 FROM inventario i
 INNER JOIN productos p ON p.id = i.id_producto
 WHERE i.id_sucursal=? AND i.estatus='Disponible'
-ORDER BY i.fecha_ingreso ASC
+ORDER BY i.fecha_ingreso ASC, i.id ASC
 ";
 $stmt = $conn->prepare($sql);
 $stmt->bind_param("i", $idEulalia);
@@ -94,10 +149,15 @@ $inventario = $result->fetch_all(MYSQLI_ASSOC);
 $stmt->close();
 
 // ===============================
-// 4) Sucursales DESTINO (Tiendas)
+// 4) Sucursales DESTINO (solo Tiendas; excluir Eulalia)
 // ===============================
 $sucursales = [];
-$resSuc = $conn->query("SELECT id, nombre FROM sucursales WHERE tipo_sucursal='Tienda' ORDER BY nombre ASC");
+$resSuc = $conn->query("
+  SELECT id, nombre
+  FROM sucursales
+  WHERE LOWER(tipo_sucursal)='tienda' AND id <> {$idEulalia}
+  ORDER BY nombre ASC
+");
 while ($row = $resSuc->fetch_assoc()) $sucursales[] = $row;
 ?>
 <!DOCTYPE html>
@@ -112,7 +172,6 @@ while ($row = $resSuc->fetch_assoc()) $sucursales[] = $row;
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
 
   <style>
-    /* ====== Estilos CLAROS como en Nano ====== */
     body { background:#f7f8fb; }
     .page-header{
       background:linear-gradient(180deg,#ffffff,#f4f6fb);
@@ -120,42 +179,29 @@ while ($row = $resSuc->fetch_assoc()) $sucursales[] = $row;
       box-shadow:0 6px 20px rgba(18,38,63,.06);
     }
     .muted{ color:#6c757d; }
-
     .card{ border:1px solid #eef0f6; border-radius:16px; overflow:hidden; }
     .card-header{ background:#fff; border-bottom:1px solid #eef0f6; }
-
     .form-select,.form-control{ border-radius:12px; border-color:#e6e9f2; }
     .form-select:focus,.form-control:focus{ box-shadow:0 0 0 .25rem rgba(13,110,253,.08); border-color:#c6d4ff; }
-
-    /* Buscador sticky arriba de la tabla */
     .search-wrap{
       position:sticky; top:82px; z-index:7;
       background:linear-gradient(180deg,#ffffff 40%,rgba(255,255,255,.7));
       padding:10px; border-bottom:1px solid #eef0f6; border-radius:12px;
     }
-
-    /* Tabla con thead sticky */
     #tablaInventario thead.sticky{ position:sticky; top:0; z-index:5; background:#fff; }
     #tablaInventario tbody tr:hover{ background:#f1f5ff !important; }
     #tablaInventario th{ white-space:nowrap; }
-
     .chip{ border:1px solid #e6e9f2; border-radius:999px; padding:.25rem .6rem; background:#fff; font-size:.8rem; }
     .table code{ color:inherit; background:#f8fafc; padding:2px 6px; border-radius:6px; }
-
-    /* Carrito/selección sticky como en Nano */
     .sticky-aside{ position:sticky; top:92px; }
-
-    .btn-soft{ background:#eef4ff; color:#2c5bff; border:1px solid #dfe8ff; }
-    .btn-soft:hover{ background:#e5eeff; }
   </style>
 </head>
 <body>
 
-<?php include 'navbar.php'; ?>
+<?php include __DIR__.'/navbar.php'; ?>
 
 <div class="container my-4">
 
-  <!-- Header -->
   <div class="page-header d-flex align-items-center justify-content-between mb-3">
     <div>
       <h1 class="h4 mb-1"><i class="bi bi-arrow-left-right me-2"></i>Generar traspaso</h1>
@@ -219,7 +265,7 @@ while ($row = $resSuc->fetch_assoc()) $sucursales[] = $row;
                 </div>
                 <div class="form-check">
                   <input class="form-check-input" type="checkbox" id="checkAll">
-                  <label class="form-check-label" for="checkAll">Seleccionar todos</label>
+                  <label class="form-check-label" for="checkAll">Seleccionar visibles</label>
                 </div>
               </div>
 
@@ -316,7 +362,7 @@ while ($row = $resSuc->fetch_assoc()) $sucursales[] = $row;
           <div class="d-flex align-items-center gap-2">
             <i class="bi bi-check2-square text-info"></i><strong>Selección actual</strong>
           </div>
-          <span class="badge bg-dark" id="badgeCount">0</span>
+        <span class="badge bg-dark" id="badgeCount">0</span>
         </div>
         <div class="card-body p-0">
           <div class="table-responsive" style="max-height:360px; overflow:auto;">
@@ -330,7 +376,7 @@ while ($row = $resSuc->fetch_assoc()) $sucursales[] = $row;
         </div>
         <div class="card-footer d-flex justify-content-between align-items-center">
           <small class="text-muted" id="miniDestinoFooter">Revisa la selección antes de confirmar</small>
-          <button class="btn btn-primary btn-sm" id="btnAbrirModal">
+          <button class="btn btn-primary btn-sm" id="btnAbrirModal" disabled>
             <i class="bi bi-clipboard-check me-1"></i>Confirmar (<span id="btnCount">0</span>)
           </button>
         </div>
@@ -339,8 +385,8 @@ while ($row = $resSuc->fetch_assoc()) $sucursales[] = $row;
   </div>
 </div>
 
-<!-- Bootstrap JS -->
-<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
+<!-- Bootstrap JS (bundle para Modal/Toast/Collapse) -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 
 <script>
 // ------- Filtro -------
@@ -355,7 +401,7 @@ document.getElementById('btnLimpiarBusqueda').addEventListener('click', () => {
   buscador.value = ''; buscador.dispatchEvent(new Event('keyup')); buscador.focus();
 });
 
-// ------- Seleccionar todos (solo visibles) -------
+// ------- Seleccionar visibles -------
 document.getElementById('checkAll').addEventListener('change', function(){
   const checked = this.checked;
   document.querySelectorAll('#tablaInventario tbody tr').forEach(tr=>{
@@ -404,7 +450,7 @@ document.getElementById('sucursal_destino').addEventListener('change', function(
   document.getElementById('miniDestinoFooter').textContent = `Destino: ${txt}`;
 });
 
-// ------- Modal resumen (misma lógica) -------
+// ------- Modal resumen -------
 const modalResumen = new bootstrap.Modal(document.getElementById('modalResumen'));
 function openResumen(){
   const sel = document.getElementById('sucursal_destino');
