@@ -7,18 +7,19 @@ if (!isset($_SESSION['id_usuario'])) {
 
 include 'db.php';
 
-// 📄 Configuración para exportar a Excel
+// 📄 Headers Excel
+while (ob_get_level()) { ob_end_clean(); }
 header("Content-Type: application/vnd.ms-excel; charset=UTF-8");
 header("Content-Disposition: attachment; filename=historial_ventas.xls");
 header("Pragma: no-cache");
 header("Expires: 0");
+echo "\xEF\xBB\xBF"; // BOM
 
-echo "\xEF\xBB\xBF"; // BOM para UTF-8
+$rolUsuario   = $_SESSION['rol'] ?? '';
+$id_sucursal  = $_SESSION['id_sucursal'] ?? 0;
+$id_usuario   = $_SESSION['id_usuario'] ?? 0;
 
-$rolUsuario  = $_SESSION['rol'];
-$id_sucursal = $_SESSION['id_sucursal'];
-
-// 🔹 Calcular semana martes-lunes desde parámetro GET
+// 🔹 Semana martes-lunes
 function obtenerSemanaPorIndice($offset = 0) {
     $hoy = new DateTime();
     $diaSemana = $hoy->format('N'); // lunes=1, domingo=7
@@ -48,8 +49,12 @@ $where  = " WHERE DATE(v.fecha_venta) BETWEEN ? AND ? ";
 $params = [$fechaInicio, $fechaFin];
 $types  = "ss";
 
-// Si NO es admin, filtramos por sucursal
-if ($rolUsuario != 'Admin') {
+// Filtro por rol (igual que vista)
+if ($rolUsuario === 'Ejecutivo') {
+    $where   .= " AND v.id_usuario = ? ";
+    $params[] = $id_usuario;
+    $types   .= "i";
+} elseif ($rolUsuario === 'Gerente') {
     $where   .= " AND v.id_sucursal = ? ";
     $params[] = $id_sucursal;
     $types   .= "i";
@@ -58,23 +63,34 @@ if ($rolUsuario != 'Admin') {
 // Tipo de venta
 if (!empty($_GET['tipo_venta'])) {
     $where   .= " AND v.tipo_venta = ? ";
-    $params[] = $_GET['tipo_enta'] ?? $_GET['tipo_venta']; // tolerante
+    $params[] = $_GET['tipo_venta']; // (typo corregido)
     $types   .= "s";
 }
 
-// Usuario (solo si no es Admin)
-if (!empty($_GET['usuario']) && $rolUsuario != 'Admin') {
+// Usuario (si se filtra manualmente y no rompe la lógica de rol)
+if (!empty($_GET['usuario'])) {
     $where   .= " AND v.id_usuario = ? ";
-    $params[] = $_GET['usuario'];
+    $params[] = (int)$_GET['usuario'];
     $types   .= "i";
 }
 
+// Buscar (cliente/tel/tag/IMEI) — opcional
+if (!empty($_GET['buscar'])) {
+    $busqueda = "%".$_GET['buscar']."%";
+    $where .= " AND (v.nombre_cliente LIKE ? OR v.telefono_cliente LIKE ? OR v.tag LIKE ?
+                     OR EXISTS(SELECT 1 FROM detalle_venta dv WHERE dv.id_venta=v.id AND dv.imei1 LIKE ?))";
+    array_push($params, $busqueda, $busqueda, $busqueda, $busqueda);
+    $types .= "ssss";
+}
+
 // =====================
-//   Consulta ventas
+//   Consulta ventas (con enganche + comentarios)
 // =====================
 $sqlVentas = "
     SELECT v.id, v.tag, v.nombre_cliente, v.telefono_cliente, v.tipo_venta,
            v.precio_venta, v.fecha_venta, v.comision,
+           v.enganche, v.forma_pago_enganche, v.enganche_efectivo, v.enganche_tarjeta,
+           v.comentarios,
            u.nombre AS usuario,
            s.nombre AS sucursal
     FROM ventas v
@@ -121,6 +137,11 @@ echo "<thead>
             <th>Tipo Venta</th>
             <th>Precio Venta</th>
             <th>Comisión Total Venta</th>
+            <th>Enganche</th>
+            <th>Forma Enganche</th>
+            <th>Enganche Efectivo</th>
+            <th>Enganche Tarjeta</th>
+            <th>Comentarios</th>
             <th>Marca</th>
             <th>Modelo</th>
             <th>Color</th>
@@ -133,6 +154,7 @@ echo "<thead>
       <tbody>";
 
 while ($venta = $ventas->fetch_assoc()) {
+    $coment = trim((string)$venta['comentarios']);
     if (isset($detalles[$venta['id']])) {
         foreach ($detalles[$venta['id']] as $equipo) {
             echo "<tr>
@@ -146,6 +168,11 @@ while ($venta = $ventas->fetch_assoc()) {
                     <td>{$venta['tipo_venta']}</td>
                     <td>{$venta['precio_venta']}</td>
                     <td>{$venta['comision']}</td>
+                    <td>{$venta['enganche']}</td>
+                    <td>{$venta['forma_pago_enganche']}</td>
+                    <td>{$venta['enganche_efectivo']}</td>
+                    <td>{$venta['enganche_tarjeta']}</td>
+                    <td>".htmlspecialchars($coment, ENT_QUOTES, 'UTF-8')."</td>
                     <td>{$equipo['marca']}</td>
                     <td>{$equipo['modelo']}</td>
                     <td>{$equipo['color']}</td>
@@ -167,11 +194,16 @@ while ($venta = $ventas->fetch_assoc()) {
                 <td>{$venta['tipo_venta']}</td>
                 <td>{$venta['precio_venta']}</td>
                 <td>{$venta['comision']}</td>
-                <td></td><td></td><td></td><td></td><td></td><td></td><td></td>
+                <td>{$venta['enganche']}</td>
+                <td>{$venta['forma_pago_enganche']}</td>
+                <td>{$venta['enganche_efectivo']}</td>
+                <td>{$venta['enganche_tarjeta']}</td>
+                <td>".htmlspecialchars($coment, ENT_QUOTES, 'UTF-8')."</td>
+                <td></td><td></td><td></td><td></td>
+                <td></td><td></td><td></td>
               </tr>";
     }
 }
 
 echo "</tbody></table>";
 exit;
-?>

@@ -117,10 +117,12 @@ $stmtMonto->execute();
 $totalMonto = (float)($stmtMonto->get_result()->fetch_assoc()['total_monto'] ?? 0);
 $stmtMonto->close();
 
-// 🔹 Ventas (igual)
+// 🔹 Ventas (AQUÍ agregamos enganche y comentarios)
 $sqlVentas = "
     SELECT v.id, v.tag, v.nombre_cliente, v.telefono_cliente, v.tipo_venta,
            v.precio_venta, v.fecha_venta,
+           v.enganche, v.forma_pago_enganche, v.enganche_efectivo, v.enganche_tarjeta,
+           v.comentarios,
            u.id AS id_usuario, u.nombre AS usuario
     FROM ventas v
     INNER JOIN usuarios u ON v.id_usuario = u.id
@@ -177,6 +179,7 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
     .accordion-button{ gap:.5rem; }
     .venta-head .tag{ font-weight:700; }
     .sticky-tools{ position:sticky; top:0; z-index:2; background:var(--surface); }
+    .comentarios-box{ background:#fffdf6; border:1px dashed #ffdca8; border-radius:12px; padding:.6rem .8rem; color:#7a591f; }
   </style>
 </head>
 <body>
@@ -256,7 +259,6 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
     <div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
       <h5 class="m-0"><i class="bi bi-funnel me-2"></i>Filtros</h5>
       <div class="d-flex gap-2">
-        <!-- Navegación de semanas (front) -->
         <?php
           $prev = max(0, $semanaSeleccionada - 1);
           $next = $semanaSeleccionada + 1;
@@ -287,7 +289,7 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
           <option value="">Todas</option>
           <option value="Contado" <?= (($_GET['tipo_venta'] ?? '')=='Contado')?'selected':'' ?>>Contado</option>
           <option value="Financiamiento" <?= (($_GET['tipo_venta'] ?? '')=='Financiamiento')?'selected':'' ?>>Financiamiento</option>
-          <option value="Financiamiento+Combo" <?= (($_GET['tipo_venta'] ?? '')=='Financiamiento+Combo')?'selected':'' ?>>Financiamiento + Combo</option>
+          <option value="Financiamiento+Combo" <?= (($_GET['tipo_venta'] ?? '')=='Financiamiento')?'selected':'' ?>>Financiamiento + Combo</option>
         </select>
       </div>
 
@@ -325,12 +327,10 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
     <div class="accordion mt-3" id="ventasAccordion">
       <?php $idx = 0; while ($venta = $ventas->fetch_assoc()): $idx++; ?>
         <?php
-          // permisos para eliminar (igual lógica)
           $puedeEliminar = false;
           if ($_SESSION['rol'] == 'Admin') $puedeEliminar = true;
           elseif (in_array($_SESSION['rol'], ['Ejecutivo','Gerente']) && $_SESSION['id_usuario'] == $venta['id_usuario']) $puedeEliminar = true;
 
-          // chip de tipo
           $chipIcon = 'bi-tag';
           if ($venta['tipo_venta'] === 'Contado') $chipIcon = 'bi-cash-coin';
           elseif ($venta['tipo_venta'] === 'Financiamiento') $chipIcon = 'bi-bank';
@@ -349,6 +349,12 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
                 <span class="ms-2"><i class="bi bi-calendar-event"></i> <?= h($venta['fecha_venta']) ?></span>
                 <span class="ms-2"><i class="bi bi-person"></i> <?= h($venta['usuario']) ?></span>
                 <span class="ms-2 fw-semibold"><i class="bi bi-currency-dollar"></i> $<?= number_format((float)$venta['precio_venta'],2) ?></span>
+                <span class="ms-2 chip chip-success">
+                  <i class="bi bi-wallet2"></i> Enganche: $<?= number_format((float)$venta['enganche'],2) ?>
+                  <?php if (!empty($venta['forma_pago_enganche'])): ?>
+                    &nbsp;(<em><?= h($venta['forma_pago_enganche']) ?></em>)
+                  <?php endif; ?>
+                </span>
               </div>
             </button>
           </h2>
@@ -412,6 +418,23 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
                   </tbody>
                 </table>
               </div>
+
+              <!-- Desglose de enganche (si existe) -->
+              <?php if ((float)$venta['enganche'] > 0): ?>
+                <div class="mt-3 small-muted">
+                  <strong>Desglose enganche:</strong>
+                  Efectivo $<?= number_format((float)$venta['enganche_efectivo'],2) ?> ·
+                  Tarjeta $<?= number_format((float)$venta['enganche_tarjeta'],2) ?>
+                </div>
+              <?php endif; ?>
+
+              <!-- Comentarios -->
+              <?php if (trim((string)$venta['comentarios']) !== ''): ?>
+                <div class="mt-3 comentarios-box">
+                  <i class="bi bi-chat-text me-1"></i>
+                  <strong>Comentarios:</strong> <?= nl2br(h($venta['comentarios'])) ?>
+                </div>
+              <?php endif; ?>
 
             </div>
           </div>
