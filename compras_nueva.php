@@ -104,7 +104,7 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
     <div class="toolbar">
       <a href="proveedores.php" target="_blank" class="btn btn-light btn-sm rounded-pill border"><i class="bi bi-person-plus me-1"></i>Alta proveedor</a>
       <a href="modelos.php" target="_blank" class="btn btn-light btn-sm rounded-pill border"><i class="bi bi-phone me-1"></i>Nuevo modelo</a>
-      <a href="compras_listado.php" class="btn btn-outline-secondary btn-sm rounded-pill"><i class="bi bi-list-ul me-1"></i>Ver compras</a>
+      <a href="compras_resumen.php" class="btn btn-outline-secondary btn-sm rounded-pill"><i class="bi bi-list-ul me-1"></i>Ver compras</a>
     </div>
   </div>
 

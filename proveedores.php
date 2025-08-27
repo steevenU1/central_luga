@@ -109,7 +109,8 @@ if ($permEscritura && $_SERVER['REQUEST_METHOD']==='POST') {
   $email       = texto($_POST['email'] ?? '', 120);
   $direccion   = texto($_POST['direccion'] ?? '', 1000);
   $credito_lim = money_in($_POST['credito_limite'] ?? '0');
-  $dias_cred   = ($_POST['dias_credito'] !== '' ? (int)$_POST['dias_credito'] : null);
+  // ✅ Forzar a 0 cuando viene vacío
+  $dias_cred   = ($_POST['dias_credito'] !== '' ? (int)$_POST['dias_credito'] : 0);
   $notas       = texto($_POST['notas'] ?? '', 2000);
 
   if ($nombre === '') {
@@ -119,7 +120,8 @@ if ($permEscritura && $_SERVER['REQUEST_METHOD']==='POST') {
       $stmt = $conn->prepare("UPDATE proveedores
         SET nombre=?, rfc=?, contacto=?, telefono=?, email=?, direccion=?, credito_limite=?, dias_credito=?, notas=?
         WHERE id=?");
-      $stmt->bind_param("ssssssdiss", $nombre, $rfc, $contacto, $telefono, $email, $direccion, $credito_lim, $dias_cred, $notas, $id);
+      // ✅ Tipos corregidos: último es id (i)
+      $stmt->bind_param("ssssssdisi", $nombre, $rfc, $contacto, $telefono, $email, $direccion, $credito_lim, $dias_cred, $notas, $id);
       $ok = $stmt->execute(); $stmt->close();
       $mensaje = $ok ? "<div class='alert alert-success'>Proveedor actualizado.</div>" : "<div class='alert alert-danger'>Error al actualizar.</div>";
     } else {
@@ -131,7 +133,8 @@ if ($permEscritura && $_SERVER['REQUEST_METHOD']==='POST') {
         $stmt = $conn->prepare("INSERT INTO proveedores
           (nombre, rfc, contacto, telefono, email, direccion, credito_limite, dias_credito, notas, activo)
           VALUES (?,?,?,?,?,?,?,?,?,1)");
-        $stmt->bind_param("ssssssdiss", $nombre, $rfc, $contacto, $telefono, $email, $direccion, $credito_lim, $dias_cred, $notas);
+        // ✅ 9 placeholders → 9 tipos
+        $stmt->bind_param("ssssssdis", $nombre, $rfc, $contacto, $telefono, $email, $direccion, $credito_lim, $dias_cred, $notas);
         $ok = $stmt->execute(); $stmt->close();
         $mensaje = $ok ? "<div class='alert alert-success'>Proveedor creado.</div>" : "<div class='alert alert-danger'>Error al crear.</div>";
       }
@@ -239,11 +242,15 @@ $countProv = $proveedores ? $proveedores->num_rows : 0;
       width:48px;height:48px; display:grid;place-items:center;
       background:rgba(255,255,255,.15); border-radius:14px;
     }
+
+    /* ✅ Pills con texto negro y fondo claro para mejor contraste */
     .chip{
-      background:rgba(255,255,255,.16);
-      border:1px solid rgba(255,255,255,.25);
-      color:#fff; padding:.35rem .6rem; border-radius:999px; font-weight:600;
+      color:#111 !important;
+      background:rgba(255,255,255,.92) !important;
+      border:1px solid rgba(0,0,0,.12) !important;
+      padding:.35rem .6rem; border-radius:999px; font-weight:600;
     }
+    .chip .bi{ color:inherit !important; }
 
     .card-elev{
       border:0; border-radius:1rem;
@@ -257,11 +264,29 @@ $countProv = $proveedores ? $proveedores->num_rows : 0;
     .table thead th{
       letter-spacing:.4px; text-transform:uppercase; font-size:.78rem;
     }
-    .status-badge{
-      font-weight:600; font-size:.75rem;
+
+    /* ✅ Badges de estado: usar variables Bootstrap para asegurar texto oscuro */
+    .badge.status-badge{
+      --bs-badge-padding-x: .6rem;
+      --bs-badge-padding-y: .35rem;
+      --bs-badge-font-weight: 600;
+      --bs-badge-border-radius: 999px;
+      border: 1px solid transparent;
     }
-    .status-on{ background:#dcfce7; color:#166534; border:1px solid #bbf7d0; }
-    .status-off{ background:#e5e7eb; color:#374151; border:1px solid #d1d5db; }
+    .badge.status-on{
+      --bs-badge-color: #111;     /* texto */
+      --bs-badge-bg: #dcfce7;     /* fondo */
+      color: var(--bs-badge-color) !important;
+      background-color: var(--bs-badge-bg) !important;
+      border-color: #bbf7d0 !important;
+    }
+    .badge.status-off{
+      --bs-badge-color: #111;     /* texto */
+      --bs-badge-bg: #e5e7eb;     /* fondo */
+      color: var(--bs-badge-color) !important;
+      background-color: var(--bs-badge-bg) !important;
+      border-color: #d1d5db !important;
+    }
 
     .modal-header{ border-bottom:0; }
     .modal-footer{ border-top:0; }
@@ -279,7 +304,7 @@ $countProv = $proveedores ? $proveedores->num_rows : 0;
       <div class="icon"><i class="bi bi-building-gear fs-4"></i></div>
       <div class="flex-grow-1">
         <h2 class="mb-1 fw-bold">Catálogo de Proveedores</h2>
-        <div class="opacity-75">Gestion de proveedores y deuda.</div>
+        <div class="opacity-75">Gestión de proveedores y deuda.</div>
       </div>
       <div class="d-flex flex-wrap gap-2">
         <span class="chip"><i class="bi bi-people me-1"></i> <?= (int)$countProv ?> registros</span>
@@ -340,6 +365,7 @@ $countProv = $proveedores ? $proveedores->num_rows : 0;
               <th>Teléfono</th>
               <th>Email</th>
               <th>Alta</th>
+              <th class="text-center">Días crédito</th> <!-- ✅ Nueva columna -->
               <th class="text-end">Crédito</th>
               <th class="text-end">Deuda</th>
               <th class="text-end">Disp.</th>
@@ -354,6 +380,7 @@ $countProv = $proveedores ? $proveedores->num_rows : 0;
               $disp     = $credito - $deuda;
               $dispCls  = ($disp < 0) ? 'text-danger fw-bold' : 'text-success';
               $isOn     = ((int)$p['activo']===1);
+              $diasCred = (int)$p['dias_credito'];
             ?>
             <tr>
               <td><?= esc($p['nombre']) ?></td>
@@ -362,6 +389,7 @@ $countProv = $proveedores ? $proveedores->num_rows : 0;
               <td><?= esc($p['telefono']) ?></td>
               <td><?= esc($p['email']) ?></td>
               <td><?= esc($p['creado']) ?></td>
+              <td class="text-center"><?= $diasCred ?></td> <!-- ✅ Mostrar días -->
               <td class="text-end">$<?= number_format($credito,2) ?></td>
               <td class="text-end">$<?= number_format($deuda,2) ?></td>
               <td class="text-end <?= $dispCls ?>">$<?= number_format($disp,2) ?></td>
@@ -402,7 +430,7 @@ $countProv = $proveedores ? $proveedores->num_rows : 0;
               </td>
             </tr>
           <?php endwhile; else: ?>
-            <tr><td colspan="11" class="text-center text-muted py-4">Sin proveedores</td></tr>
+            <tr><td colspan="12" class="text-center text-muted py-4">Sin proveedores</td></tr>
           <?php endif; ?>
           </tbody>
         </table>
@@ -667,4 +695,3 @@ document.querySelectorAll('.btnVer').forEach(btn => {
 
 </body>
 </html>
-

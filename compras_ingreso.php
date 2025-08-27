@@ -58,7 +58,8 @@ function sugerirPrecioLista(mysqli $conn, ?string $codigoProd, string $marca, st
   $q2 = $conn->prepare("SELECT precio_lista FROM productos
                         WHERE marca=? AND modelo=? AND ram=? AND capacidad=? AND precio_lista IS NOT NULL AND precio_lista>0
                         ORDER BY id DESC LIMIT 1");
-  $q2->bind_param("ssss", $marca, $modelo, $ram, $capacidad);
+  $marcaQ = $marca; $modeloQ = $modelo; $ramQ = $ram; $capQ = $capacidad;
+  $q2->bind_param("ssss", $marcaQ, $modeloQ, $ramQ, $capQ);
   $q2->execute(); $q2->bind_result($pl2);
   if ($q2->fetch()) { $q2->close(); return ['precio'=>(float)$pl2, 'fuente'=>'último por modelo (RAM/cap)']; }
   $q2->close();
@@ -80,11 +81,32 @@ function ultimoSubtipo(mysqli $conn, ?string $codigoProd, string $marca, string 
   }
   $q2 = $conn->prepare("SELECT subtipo FROM productos
                         WHERE marca=? AND modelo=? AND ram=? AND capacidad=? AND subtipo IS NOT NULL AND subtipo<>'' ORDER BY id DESC LIMIT 1");
-  $q2->bind_param("ssss", $marca, $modelo, $ram, $capacidad);
+  $marcaQ = $marca; $modeloQ = $modelo; $ramQ = $ram; $capQ = $capacidad;
+  $q2->bind_param("ssss", $marcaQ, $modeloQ, $ramQ, $capQ);
   $q2->execute(); $q2->bind_result($st2);
   if ($q2->fetch()) { $q2->close(); return ['subtipo'=>$st2, 'fuente'=>'por modelo (RAM/cap)']; }
   $q2->close();
   return ['subtipo'=>null, 'fuente'=>null];
+}
+
+/* ============================
+   Validación Luhn (estricta)
+============================ */
+if (!function_exists('luhn_ok')) {
+  function luhn_ok(string $s): bool {
+    $s = preg_replace('/\D+/', '', $s);
+    if (strlen($s) !== 15) return false;
+    $sum = 0;
+    for ($i=0; $i<15; $i++) {
+      $d = (int)$s[$i];
+      if (($i % 2) === 1) { // posiciones 2,4,6... desde la izquierda
+        $d *= 2;
+        if ($d > 9) $d -= 9;
+      }
+      $sum += $d;
+    }
+    return ($sum % 10) === 0;
+  }
 }
 
 /* ============================
@@ -122,7 +144,7 @@ $codigoCat = null;
 $cat = [
   'codigo_producto'=>null,'nombre_comercial'=>null,'descripcion'=>null,'compania'=>null,'financiera'=>null,
   'fecha_lanzamiento'=>null,'precio_lista'=>null,'tipo_producto'=>null,'gama'=>null,'ciclo_vida'=>null,
-  'abc'=>null,'operador'=>null,'resurtible'=>null,'subtipo'=>null // ← incluimos subtipo del catálogo
+  'abc'=>null,'operador'=>null,'resurtible'=>null,'subtipo'=>null
 ];
 
 if (!empty($det['id_modelo'])) {
@@ -149,16 +171,17 @@ if (!empty($det['id_modelo'])) {
 // Costos del detalle
 $costo       = (float)$det['precio_unitario']; // sin IVA
 $ivaPct      = (float)$det['iva_porcentaje'];  // %
-$costoConIva = round($costo * (1 + $ivaPct/100), 2);
+$startupIva  = 1 + ($ivaPct/100);
+$costoConIva = round($costo * $startupIva, 2);
 
 // Datos del detalle
 $marcaDet  = (string)$det['marca'];
 $modeloDet = (string)$det['modelo'];
-$ramDet    = (string)($det['ram'] ?? '');  // RAM por renglón
+$ramDet    = (string)($det['ram'] ?? '');
 $capDet    = (string)$det['capacidad'];
 $colorDet  = (string)$det['color'];
 
-// Sugerencias (preferir precio_lista del catálogo si existe)
+// Sugerencias
 $precioCat = isset($cat['precio_lista']) && $cat['precio_lista'] !== null ? (float)$cat['precio_lista'] : null;
 $sugerencia = sugerirPrecioLista($conn, $codigoCat, $marcaDet, $modeloDet, $ramDet, $capDet, $costoConIva, $precioCat);
 $precioSugerido = $sugerencia['precio'];
@@ -228,6 +251,14 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
         }
         if ($imei2 === '') $imei2 = null;
 
+        // Luhn estricto (si hay valor)
+        if ($imei1 !== null && !luhn_ok($imei1)) {
+          throw new Exception("IMEI1 inválido (Luhn) en la fila ".($i+1).".");
+        }
+        if ($imei2 !== null && !luhn_ok($imei2)) {
+          throw new Exception("IMEI2 inválido (Luhn) en la fila ".($i+1).".");
+        }
+
         // Duplicados: contra imei1 o imei2 existentes
         if ($imei1 !== null) {
           $st = $conn->prepare("SELECT COUNT(*) c FROM productos WHERE imei1=? OR imei2=?");
@@ -267,7 +298,6 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
         $marca = $marcaDet; $modelo = $modeloDet; $color = $colorDet; $ram = $ramDet; $cap = $capDet;
         $prov  = ($proveedorCompra !== '') ? $proveedorCompra : null;
 
-        // Types: 1-8 s, 9-10 d, 11 s, 12 d, 13-24 s
         $stmtP->bind_param(
           "ssssssssddsdssssssssssss",
           $codigoCat, $marca, $modelo, $color, $ram, $cap,
@@ -377,7 +407,7 @@ include 'navbar.php';
       <?php if ($pendientes <= 0): ?>
         <div class="alert alert-success">Este renglón ya está completamente ingresado.</div>
       <?php else: ?>
-        <form method="POST">
+        <form id="formIngreso" method="POST" autocomplete="off">
           <input type="hidden" name="n" value="<?= $pendientes ?>">
 
           <!-- Subtipo por renglón -->
@@ -392,6 +422,7 @@ include 'navbar.php';
                 list="dlSubtipos"
                 placeholder="Ej. Liberado, Telcel, Kit, etc."
                 value="<?= esc($subtipoForm) ?>"
+                autocomplete="off"
               >
               <datalist id="dlSubtipos">
                 <?php foreach ($subtipos as $st): ?>
@@ -414,6 +445,7 @@ include 'navbar.php';
                 placeholder="Ej. 3999.00"
                 value="<?= esc($precioListaForm) ?>"
                 required
+                autocomplete="off"
               >
               <small class="text-muted">
                 Sugerido: $<?= number_format((float)$precioSugerido, 2) ?> (<?= esc($fuenteSugerido) ?>).
@@ -437,6 +469,8 @@ include 'navbar.php';
                     <td><?= $i+1 ?></td>
                     <td>
                       <input
+                        id="imei1-<?= $i ?>"
+                        data-index="<?= $i ?>"
                         class="form-control"
                         name="imei1[]"
                         <?= $requiereImei ? 'required' : '' ?>
@@ -446,10 +480,14 @@ include 'navbar.php';
                         pattern="[0-9]{15}"
                         placeholder="15 dígitos"
                         title="Debe contener exactamente 15 dígitos"
+                        autocomplete="off"
+                        <?= $i===0 ? 'autofocus' : '' ?>
                       >
                     </td>
                     <td>
                       <input
+                        id="imei2-<?= $i ?>"
+                        data-index="<?= $i ?>"
                         class="form-control"
                         name="imei2[]"
                         inputmode="numeric"
@@ -458,6 +496,7 @@ include 'navbar.php';
                         pattern="[0-9]{15}"
                         placeholder="15 dígitos (opcional)"
                         title="Si lo capturas, deben ser 15 dígitos"
+                        autocomplete="off"
                       >
                     </td>
                   </tr>
@@ -467,7 +506,7 @@ include 'navbar.php';
           </div>
 
           <div class="text-end">
-            <button class="btn btn-success">Ingresar a inventario</button>
+            <button id="btnSubmit" type="submit" class="btn btn-success">Ingresar a inventario</button>
             <a href="compras_ver.php?id=<?= (int)$compraId ?>" class="btn btn-outline-secondary">Cancelar</a>
           </div>
         </form>
@@ -475,3 +514,144 @@ include 'navbar.php';
     </div>
   </div>
 </div>
+
+<!-- ===== UX anti-auto-submit por pistola + validación Luhn (cliente) ===== -->
+<script>
+(function() {
+  const form = document.getElementById('formIngreso');
+  if (!form) return;
+
+  const total = <?= (int)$pendientes ?>;
+  const btnSubmit = document.getElementById('btnSubmit');
+
+  // Anti-doble envío
+  form.addEventListener('submit', (e)=>{
+    if (form.dataset.busy === '1') { e.preventDefault(); e.stopPropagation(); return; }
+    form.dataset.busy = '1';
+    if (btnSubmit){ btnSubmit.disabled = true; btnSubmit.innerHTML = 'Ingresando...'; }
+  }, { capture: true });
+
+  // Normaliza a solo dígitos y corta a 15
+  function normalize15(input) {
+    const v = input.value.replace(/\D+/g, '').slice(0, 15);
+    if (v !== input.value) input.value = v;
+    return v;
+  }
+
+  // Luhn cliente (estricto: 15 dígitos)
+  function imeiLuhnOk(s){
+    s = (s||'').replace(/\D+/g,'');
+    if (s.length !== 15) return false;
+    let sum = 0;
+    for (let i=0;i<15;i++){
+      let d = s.charCodeAt(i) - 48;
+      if ((i % 2) === 1){ d *= 2; if (d > 9) d -= 9; }
+      sum += d;
+    }
+    return (sum % 10) === 0;
+  }
+
+  // 1) Bloquear Enter dentro de inputs (evitar envío accidental)
+  form.addEventListener('keydown', function(e) {
+    if (e.key !== 'Enter') return;
+    const isTextInput = e.target.matches('input[name="imei1[]"], input[name="imei2[]"], input[name="precio_lista"], input[name="subtipo"]');
+    if (!isTextInput) return;
+    // Permitir Ctrl/Cmd+Enter para enviar intencionalmente
+    if (e.ctrlKey || e.metaKey) { return; }
+    e.preventDefault();
+
+    // Navegación de foco
+    const t = e.target;
+    if (t.name === 'imei1[]') {
+      const idx = parseInt(t.dataset.index, 10) || 0;
+      const imei2 = document.getElementById('imei2-' + idx);
+      if (imei2) imei2.focus();
+    } else if (t.name === 'imei2[]') {
+      const idx = parseInt(t.dataset.index, 10) || 0;
+      const next = document.getElementById('imei1-' + (idx + 1));
+      if (next) next.focus();
+      else if (btnSubmit) btnSubmit.focus();
+    } else {
+      const first = document.getElementById('imei1-0');
+      if (first) first.focus();
+    }
+  });
+
+  // 2) Autolímite, Luhn y salto de foco al llegar a 15
+  for (let i = 0; i < total; i++) {
+    const i1 = document.getElementById('imei1-' + i);
+    const i2 = document.getElementById('imei2-' + i);
+
+    if (i1) {
+      i1.addEventListener('input', function() {
+        const v = normalize15(i1);
+        if (v.length === 15) {
+          // validar Luhn visualmente
+          if (!imeiLuhnOk(v)) { i1.classList.add('is-invalid'); i1.setCustomValidity('IMEI inválido (Luhn).'); }
+          else { i1.classList.remove('is-invalid'); i1.setCustomValidity(''); }
+          if (i2) i2.focus();
+        } else {
+          i1.classList.remove('is-invalid');
+          i1.setCustomValidity('');
+        }
+      });
+      i1.addEventListener('blur', function(){
+        const v = (i1.value||'').replace(/\D+/g,'');
+        if (v && v.length === 15 && !imeiLuhnOk(v)) {
+          i1.classList.add('is-invalid'); i1.setCustomValidity('IMEI inválido (Luhn).');
+        }
+      });
+    }
+    if (i2) {
+      i2.addEventListener('input', function() {
+        const v = normalize15(i2);
+        if (v.length === 15) {
+          if (!imeiLuhnOk(v)) { i2.classList.add('is-invalid'); i2.setCustomValidity('IMEI inválido (Luhn).'); }
+          else { i2.classList.remove('is-invalid'); i2.setCustomValidity(''); }
+          const next = document.getElementById('imei1-' + (i + 1));
+          if (next) next.focus();
+          else if (btnSubmit) btnSubmit.focus();
+        } else {
+          i2.classList.remove('is-invalid');
+          i2.setCustomValidity('');
+        }
+      });
+      i2.addEventListener('blur', function(){
+        const v = (i2.value||'').replace(/\D+/g,'');
+        if (v && v.length === 15 && !imeiLuhnOk(v)) {
+          i2.classList.add('is-invalid'); i2.setCustomValidity('IMEI inválido (Luhn).');
+        }
+      });
+    }
+  }
+
+  // 3) Validación de bloqueo antes de enviar (si hay alguno inválido)
+  form.addEventListener('submit', function(e){
+    let bad = false;
+    form.querySelectorAll('input[name="imei1[]"], input[name="imei2[]"]').forEach(inp=>{
+      const v = (inp.value||'').replace(/\D+/g,'');
+      if (v && (!/^\d{15}$/.test(v) || !imeiLuhnOk(v))) {
+        inp.classList.add('is-invalid');
+        inp.setCustomValidity('IMEI inválido (Luhn).');
+        bad = true;
+      } else {
+        inp.classList.remove('is-invalid');
+        inp.setCustomValidity('');
+      }
+    });
+    if (bad) {
+      e.preventDefault(); e.stopPropagation();
+      alert('Corrige los IMEI marcados en rojo (15 dígitos y válido por Luhn).');
+      form.dataset.busy = ''; // reactivar por si bloqueó
+      if (btnSubmit){ btnSubmit.disabled = false; btnSubmit.innerHTML = 'Ingresar a inventario'; }
+    }
+  }, { capture: true });
+
+  // 4) Atajo Ctrl/Cmd+Enter para enviar
+  document.addEventListener('keydown', function(e) {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      if (form && form.dataset.busy !== '1') form.requestSubmit();
+    }
+  });
+})();
+</script>

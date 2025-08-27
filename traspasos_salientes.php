@@ -16,21 +16,24 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'eliminado') {
     $mensaje = "<div class='alert alert-success'>✅ Traspaso eliminado correctamente.</div>";
 }
 
+// Escapar seguro
+function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
+
 // Utilidad: detectar si existe una columna (para usar bitácoras si existen)
 function hasColumn(mysqli $conn, string $table, string $column): bool {
-    $table = $conn->real_escape_string($table);
+    $table  = $conn->real_escape_string($table);
     $column = $conn->real_escape_string($column);
     $rs = $conn->query("SHOW COLUMNS FROM `$table` LIKE '$column'");
     return $rs && $rs->num_rows > 0;
 }
-$hasDT_Resultado      = hasColumn($conn, 'detalle_traspaso', 'resultado');
-$hasDT_FechaResultado = hasColumn($conn, 'detalle_traspaso', 'fecha_resultado');
-$hasT_FechaRecep      = hasColumn($conn, 'traspasos', 'fecha_recepcion');
-$hasT_UsuarioRecibio  = hasColumn($conn, 'traspasos', 'usuario_recibio');
+$hasDT_Resultado       = hasColumn($conn, 'detalle_traspaso', 'resultado');
+$hasDT_FechaResultado  = hasColumn($conn, 'detalle_traspaso', 'fecha_resultado');
+$hasT_FechaRecep       = hasColumn($conn, 'traspasos', 'fecha_recepcion');
+$hasT_UsuarioRecibio   = hasColumn($conn, 'traspasos', 'usuario_recibio');
 
-// -------------------------------
-// PENDIENTES (enviados y no recibidos)
-// -------------------------------
+/* =========================================================
+   PENDIENTES (salientes de la SUCURSAL, no por usuario)
+========================================================= */
 $sqlPend = "
     SELECT t.id, t.fecha_traspaso, s.nombre AS sucursal_destino, u.nombre AS usuario_creo
     FROM traspasos t
@@ -45,14 +48,13 @@ $stmtPend->execute();
 $traspasosPend = $stmtPend->get_result();
 $stmtPend->close();
 
-// -------------------------------
-/* HISTÓRICO: filtros */
-function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
-
-$desde    = $_GET['desde']   ?? date('Y-m-01');
-$hasta    = $_GET['hasta']   ?? date('Y-m-d');
-$estatus  = $_GET['estatus'] ?? 'Todos'; // Todos / Pendiente / Parcial / Completado / Rechazado
-$idDest   = (int)($_GET['destino'] ?? 0);
+/* =========================================================
+   HISTÓRICO: filtros (también por SUCURSAL origen)
+========================================================= */
+$desde   = $_GET['desde']   ?? date('Y-m-01');
+$hasta   = $_GET['hasta']   ?? date('Y-m-d');
+$estatus = $_GET['estatus'] ?? 'Todos'; // Todos / Pendiente / Parcial / Completado / Rechazado
+$idDest  = (int)($_GET['destino'] ?? 0);
 
 // Para combo de destinos (solo los que han recibido algo de mi suc)
 $destinos = [];
@@ -81,7 +83,6 @@ if ($estatus !== 'Todos') {
     $params[] = $estatus;
     $types   .= "s";
 }
-
 if ($idDest > 0) {
     $whereH .= " AND t.id_sucursal_destino = ?";
     $params[] = $idDest;
@@ -93,8 +94,8 @@ $sqlHist = "
       t.id, t.fecha_traspaso, t.estatus,
       s.nombre  AS sucursal_destino,
       u.nombre  AS usuario_creo".
-      ($hasT_FechaRecep  ? ", t.fecha_recepcion" : "").
-      ($hasT_UsuarioRecibio ? ", u2.nombre AS usuario_recibio" : "").
+      ($hasT_FechaRecep       ? ", t.fecha_recepcion" : "").
+      ($hasT_UsuarioRecibio   ? ", u2.nombre AS usuario_recibio" : "").
     "
     FROM traspasos t
     INNER JOIN sucursales s ON s.id = t.id_sucursal_destino
@@ -103,7 +104,6 @@ $sqlHist = "
     "WHERE $whereH
     ORDER BY t.fecha_traspaso DESC, t.id DESC
 ";
-
 $stmtHist = $conn->prepare($sqlHist);
 $stmtHist->bind_param($types, ...$params);
 $stmtHist->execute();
@@ -114,8 +114,8 @@ $stmtHist->close();
 <html lang="es">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1"> <!-- ✅ Ajuste responsive para navbar y layout -->
-  <title>Traspasos Salientes Pendientes</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Traspasos Salientes</title>
   <link rel="icon" type="image/x-icon" href="./img/favicon.ico">
 
   <!-- Bootstrap 5 -->
@@ -162,6 +162,13 @@ $stmtHist->close();
       background: linear-gradient(135deg, #22c55e 0%, #0ea5e9 55%, #6366f1 100%);
       color:#fff; padding:1rem 1.25rem; box-shadow: 0 20px 45px rgba(2,8,20,.12), 0 3px 10px rgba(2,8,20,.06);
     }
+
+    /* Botonera de acciones */
+    .actions{ gap:.5rem; display:flex; flex-wrap:wrap; }
+
+    /* Modal acuse */
+    #acuseFrame{ width:100%; height:70vh; border:0; }
+    #acuseSpinner{ height:70vh; }
   </style>
 </head>
 <body class="bg-light">
@@ -170,12 +177,14 @@ $stmtHist->close();
 
 <div class="container my-4">
   <div class="page-title mb-3">
-    <h2 class="mb-0">📦 Traspasos Salientes Pendientes</h2>
-    <p class="mb-0 opacity-75">Traspasos enviados por tu sucursal que aún no han sido confirmados por el destino.</p>
+    <h2 class="mb-0">📦 Traspasos Salientes</h2>
+    <p class="mb-0 opacity-75">Traspasos enviados por tu <b>sucursal</b> (no solo por tu usuario).</p>
   </div>
 
   <?= $mensaje ?>
 
+  <!-- ========================= PENDIENTES ========================= -->
+  <h4 class="mb-3">⏳ Pendientes de recepción</h4>
   <?php if ($traspasosPend->num_rows > 0): ?>
     <?php while($traspaso = $traspasosPend->fetch_assoc()): ?>
       <?php
@@ -226,13 +235,21 @@ $stmtHist->close();
             </table>
           </div>
         </div>
-        <div class="card-footer text-muted d-flex justify-content-between align-items-center flex-wrap gap-2">
-          <span>Esperando confirmación de <b><?= h($traspaso['sucursal_destino']) ?></b>...</span>
-          <form method="POST" action="eliminar_traspaso.php"
-                onsubmit="return confirm('¿Eliminar este traspaso? Esta acción no se puede deshacer.')">
-            <input type="hidden" name="id_traspaso" value="<?= $idTraspaso ?>">
-            <button type="submit" class="btn btn-sm btn-danger">🗑️ Eliminar Traspaso</button>
-          </form>
+        <div class="card-footer d-flex justify-content-between align-items-center flex-wrap gap-2">
+          <span class="text-muted">Esperando confirmación de <b><?= h($traspaso['sucursal_destino']) ?></b>...</span>
+          <div class="actions">
+            <!-- 🖨️ Reimprimir acuse (abre modal) -->
+            <button type="button" class="btn btn-sm btn-outline-secondary btn-acuse" data-id="<?= $idTraspaso ?>">
+              🖨️ Reimprimir acuse
+            </button>
+
+            <!-- 🗑️ Eliminar -->
+            <form method="POST" action="eliminar_traspaso.php"
+                  onsubmit="return confirm('¿Eliminar este traspaso? Esta acción no se puede deshacer.')">
+              <input type="hidden" name="id_traspaso" value="<?= $idTraspaso ?>">
+              <button type="submit" class="btn btn-sm btn-danger">🗑️ Eliminar Traspaso</button>
+            </form>
+          </div>
         </div>
       </div>
     <?php endwhile; ?>
@@ -240,9 +257,7 @@ $stmtHist->close();
     <div class="alert alert-info">No hay traspasos salientes pendientes para tu sucursal.</div>
   <?php endif; ?>
 
-  <!-- ===========================================================
-       HISTÓRICO
-  ============================================================ -->
+  <!-- ========================= HISTÓRICO ========================= -->
   <hr class="my-4">
   <h3>📜 Histórico de traspasos salientes</h3>
   <form method="GET" class="row g-2 mb-3">
@@ -258,10 +273,7 @@ $stmtHist->close();
     <div class="col-md-3">
       <label class="form-label">Estatus</label>
       <select name="estatus" class="form-select">
-        <?php
-          $opts = ['Todos','Pendiente','Parcial','Completado','Rechazado'];
-          foreach ($opts as $op):
-        ?>
+        <?php foreach (['Todos','Pendiente','Parcial','Completado','Rechazado'] as $op): ?>
           <option value="<?= $op ?>" <?= $op===$estatus?'selected':'' ?>><?= $op ?></option>
         <?php endforeach; ?>
       </select>
@@ -305,7 +317,6 @@ $stmtHist->close();
         $rec   = (int)($cnt['recibidos'] ?? 0);
         $rej   = (int)($cnt['rechazados'] ?? 0);
       } else {
-        // Si no hay columna resultado, al menos contamos piezas
         $q = $conn->prepare("SELECT COUNT(*) AS total FROM detalle_traspaso WHERE id_traspaso=?");
         $q->bind_param("i", $idT);
         $q->execute();
@@ -397,6 +408,14 @@ $stmtHist->close();
             </div>
           </div>
         </div>
+        <div class="card-footer d-flex justify-content-end">
+          <div class="actions">
+            <!-- 🖨️ Reimprimir acuse (abre modal) -->
+            <button type="button" class="btn btn-sm btn-outline-secondary btn-acuse" data-id="<?= $idT ?>">
+              🖨️ Reimprimir acuse
+            </button>
+          </div>
+        </div>
       </div>
     <?php endwhile; ?>
   <?php else: ?>
@@ -404,7 +423,76 @@ $stmtHist->close();
   <?php endif; ?>
 </div>
 
-<!-- Si tu navbar no carga el JS de Bootstrap, descomenta la siguiente línea -->
+<!-- ====================== MODAL ACUSE ====================== -->
+<div class="modal fade" id="acuseModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-scrollable modal-xl">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Acuse de traspaso</h5>
+        <div class="d-flex align-items-center gap-2">
+          <button type="button" class="btn btn-sm btn-primary" id="btnPrintAcuse">Imprimir</button>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+        </div>
+      </div>
+      <div class="modal-body p-0">
+        <div class="d-flex justify-content-center align-items-center" id="acuseSpinner">
+          <div class="spinner-border" role="status" aria-hidden="true"></div>
+          <span class="ms-2">Cargando acuse…</span>
+        </div>
+        <iframe id="acuseFrame" class="d-none" src="about:blank"></iframe>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Bootstrap JS (necesario para modal) -->
 <!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
+<script>
+// Modal + iframe loader
+(function(){
+  const acuseModalEl = document.getElementById('acuseModal');
+  const acuseModal   = new bootstrap.Modal(acuseModalEl);
+  const frame        = document.getElementById('acuseFrame');
+  const spinner      = document.getElementById('acuseSpinner');
+  const btnPrint     = document.getElementById('btnPrintAcuse');
+
+  // Abrir modal y cargar acuse en iframe
+  document.querySelectorAll('.btn-acuse').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const id = btn.dataset.id;
+      spinner.classList.remove('d-none');
+      frame.classList.add('d-none');
+      // Agrega &inline=1 por si quieres estilo compacto en acuse_traspaso.php
+      frame.src = 'acuse_traspaso.php?id=' + encodeURIComponent(id) + '&inline=1';
+      acuseModal.show();
+    });
+  });
+
+  // Quitar spinner cuando cargue el iframe
+  frame.addEventListener('load', ()=>{
+    spinner.classList.add('d-none');
+    frame.classList.remove('d-none');
+  });
+
+  // Imprimir contenido del iframe
+  btnPrint.addEventListener('click', ()=>{
+    try{
+      if (frame && frame.contentWindow) {
+        frame.contentWindow.focus();
+        frame.contentWindow.print();
+      }
+    }catch(e){
+      alert('No se pudo imprimir el acuse. Intenta abrirlo directamente.');
+    }
+  });
+
+  // Limpiar src al cerrar para liberar memoria (opcional)
+  acuseModalEl.addEventListener('hidden.bs.modal', ()=>{
+    frame.src = 'about:blank';
+    spinner.classList.remove('d-none');
+    frame.classList.add('d-none');
+  });
+})();
+</script>
 </body>
 </html>

@@ -11,8 +11,25 @@ if (!isset($_SESSION['id_usuario']) || !in_array($_SESSION['rol'], ['Admin'])) {
 
 require_once __DIR__ . '/db.php';
 
-$anio = isset($_GET['anio']) ? (int)$_GET['anio'] : (int)date('Y');
-$mes  = isset($_GET['mes'])  ? (int)$_GET['mes']  : (int)date('n');
+// Asegurar zona horaria MX para el cálculo del "mes siguiente"
+if (function_exists('date_default_timezone_set')) {
+  date_default_timezone_set('America/Mexico_City');
+}
+
+/* =============================
+   Periodo (mes/año) por defecto
+   =============================
+   Si NO vienen ambos parámetros en la URL, usamos el mes siguiente al día de hoy.
+*/
+$anio = isset($_GET['anio']) ? (int)$_GET['anio'] : null;
+$mes  = isset($_GET['mes'])  ? (int)$_GET['mes']  : null;
+
+if ($anio === null || $mes === null) {
+  $dt = new DateTime('now');
+  $dt->modify('first day of next month');
+  $anio = (int)$dt->format('Y');
+  $mes  = (int)$dt->format('n');
+}
 
 $whereSuc = "
   LOWER(s.tipo_sucursal) <> 'almacen'
@@ -135,7 +152,7 @@ $ped = $conn->query("
   ORDER BY s.nombre, p.id DESC
 ");
 
-/* Stats por estatus (KPIs) */
+/* Stats por estatus (KPIs) — incluye Borrador para contarlo en chips */
 $statsRes = $conn->query("
   SELECT p.estatus, COUNT(*) AS c
   FROM insumos_pedidos p
@@ -144,14 +161,14 @@ $statsRes = $conn->query("
     AND $whereSuc
   GROUP BY p.estatus
 ");
-$stats = ['Enviado' => 0, 'Aprobado' => 0, 'Rechazado' => 0, 'Surtido' => 0];
+$stats = ['Borrador' => 0, 'Enviado' => 0, 'Aprobado' => 0, 'Rechazado' => 0, 'Surtido' => 0];
 $totalPed = 0;
 while ($r = $statsRes->fetch_assoc()) {
   $stats[$r['estatus']] = (int)$r['c'];
   $totalPed += (int)$r['c'];
 }
 
-/* Concentrado general (por insumo) */
+/* Concentrado general (por insumo) — solo Enviado/Aprobado */
 $conGeneral = $conn->query("
   SELECT 
     COALESCE(cat.nombre,'Sin categoría') AS categoria,
@@ -175,7 +192,7 @@ while ($r = $conGeneral->fetch_assoc()) {
   $sumGeneral += (float)$r['total_cant'];
 }
 
-/* Concentrado por sucursal (preview en tab) */
+/* Concentrado por sucursal (preview en tab) — solo Enviado/Aprobado */
 $conSuc = $conn->query("
   SELECT 
     s.nombre AS sucursal,
@@ -270,11 +287,14 @@ $meses = [1 => 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', '
           </div>
           <div class="col-12 col-md text-md-end">
             <div class="d-inline-flex flex-wrap gap-2">
-              <span class="chip filter-chip active" data-status="todos"><i class="bi bi-list-task"></i>&nbsp;Todos (<?= $totalPed ?>)</span>
+              <!-- Nuevo flujo: Activos por defecto (sin Borrador) -->
+              <span class="chip filter-chip active" data-status="activos"><i class="bi bi-lightning-charge"></i>&nbsp;Activos (<?= max(0, $totalPed - $stats['Borrador']) ?>)</span>
+              <span class="chip filter-chip" data-status="todos"><i class="bi bi-list-task"></i>&nbsp;Todos (<?= $totalPed ?>)</span>
               <span class="chip filter-chip" data-status="Enviado"><i class="bi bi-send"></i>&nbsp;Enviados (<?= $stats['Enviado'] ?>)</span>
               <span class="chip filter-chip" data-status="Aprobado"><i class="bi bi-check2-circle"></i>&nbsp;Aprobados (<?= $stats['Aprobado'] ?>)</span>
               <span class="chip filter-chip" data-status="Rechazado"><i class="bi bi-x-circle"></i>&nbsp;Rechazados (<?= $stats['Rechazado'] ?>)</span>
               <span class="chip filter-chip" data-status="Surtido"><i class="bi bi-box-seam"></i>&nbsp;Surtidos (<?= $stats['Surtido'] ?>)</span>
+              <span class="chip filter-chip" data-status="Borrador"><i class="bi bi-pencil-square"></i>&nbsp;Borradores (<?= $stats['Borrador'] ?>)</span>
             </div>
           </div>
         </form>
@@ -359,6 +379,7 @@ $meses = [1 => 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', '
           <div class="text-muted">No hay pedidos en este periodo.</div>
         <?php else:
           $statusMap = [
+            'Borrador'  => 'warning',
             'Enviado'   => 'primary',
             'Aprobado'  => 'success',
             'Rechazado' => 'secondary',
@@ -546,38 +567,44 @@ $meses = [1 => 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', '
 
     // DataTables para concentrados
     $(function() {
-      $('#tablaGeneral').DataTable({
-        pageLength: 25,
-        order: [[0, 'asc'], [1, 'asc']],
-        responsive: true,
-        language: { url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/es-ES.json' },
-        columnDefs: [{ targets: 3, className: 'text-end' }]
-      });
+      if ($('#tablaGeneral').length) {
+        $('#tablaGeneral').DataTable({
+          pageLength: 25,
+          order: [[0, 'asc'], [1, 'asc']],
+          responsive: true,
+          language: { url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/es-ES.json' },
+          columnDefs: [{ targets: 3, className: 'text-end' }]
+        });
+      }
 
-      $('#tablaSuc').DataTable({
-        pageLength: 25,
-        order: [[0, 'asc'], [1, 'asc'], [2, 'asc']],
-        responsive: true,
-        language: { url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/es-ES.json' },
-        columnDefs: [{ targets: 4, className: 'text-end' }]
-      });
+      if ($('#tablaSuc').length) {
+        $('#tablaSuc').DataTable({
+          pageLength: 25,
+          order: [[0, 'asc'], [1, 'asc'], [2, 'asc']],
+          responsive: true,
+          language: { url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/es-ES.json' },
+          columnDefs: [{ targets: 4, className: 'text-end' }]
+        });
+      }
     });
 
     // Filtros por estatus (chips) + buscador
     const chips = document.querySelectorAll('.filter-chip');
     const cards = document.querySelectorAll('.pedido-card');
     const buscar = document.getElementById('buscarPedido');
-    let filtroStatus = 'todos';
+
+    // Por defecto: "activos" (ocultar Borrador)
+    let filtroStatus = 'activos';
     let filtroText = '';
 
     chips.forEach(ch => ch.addEventListener('click', () => {
       chips.forEach(c => c.classList.remove('active'));
       ch.classList.add('active');
-      filtroStatus = ch.dataset.status || 'todos';
+      filtroStatus = ch.dataset.status || 'activos';
       aplicarFiltros();
     }));
 
-    buscar.addEventListener('input', () => {
+    buscar && buscar.addEventListener('input', () => {
       filtroText = (buscar.value || '').toLowerCase();
       aplicarFiltros();
     });
@@ -591,8 +618,17 @@ $meses = [1 => 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', '
     }
 
     function aplicaStatus(card) {
-      if (filtroStatus === 'todos') return true;
-      return (card.dataset.status === filtroStatus);
+      const st = card.dataset.status;
+      switch (filtroStatus) {
+        case 'activos':   return st !== 'Borrador';
+        case 'todos':     return true;
+        case 'Borrador':  return st === 'Borrador';
+        case 'Enviado':
+        case 'Aprobado':
+        case 'Rechazado':
+        case 'Surtido':   return st === filtroStatus;
+        default:          return true;
+      }
     }
 
     function aplicarFiltros() {
@@ -604,13 +640,12 @@ $meses = [1 => 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', '
       });
     }
 
-    // Toggle robusto de detalles (sin usar data-bs-toggle)
+    // Toggle robusto de detalles (si Bootstrap JS está presente)
     document.querySelectorAll('.toggle-detalle').forEach(btn => {
       const sel = btn.getAttribute('data-target');
       const el = document.querySelector(sel);
       if (!el) return;
 
-      // Si Bootstrap JS no está global, evita error
       if (typeof bootstrap === 'undefined' || !bootstrap.Collapse) return;
 
       const inst = bootstrap.Collapse.getOrCreateInstance(el, { toggle: false });
@@ -623,6 +658,9 @@ $meses = [1 => 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', '
           : '<i class="bi bi-chevron-up me-1"></i><span class="lbl">Ocultar</span>';
       });
     });
+
+    // Aplicar filtros al cargar (para esconder borradores de inicio)
+    aplicarFiltros();
   </script>
 
 </body>

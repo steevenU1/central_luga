@@ -310,7 +310,20 @@ foreach ($usuariosActivos as $u) {
       border:0; border-radius:1rem;
       box-shadow:0 10px 24px rgba(2,8,20,.06), 0 2px 8px rgba(2,8,20,.05);
     }
-    .badge-role{ background:#eef2ff; color:#1e40af; border:1px solid #dbeafe; }
+
+    /* 🩹 Píldoras/pills claras con texto oscuro para máxima legibilidad */
+    .badge-role{
+      background:#e9eefb;           /* fondo claro */
+      color:#111 !important;         /* texto negro forzado */
+      border:1px solid #cbd5e1;      /* borde sutil */
+      font-weight:600;
+      padding:.35rem .6rem;
+    }
+    /* por si en algún lugar usan text-bg-light/ bg-light como pill */
+    .badge.text-bg-light, .badge.bg-light, .badge.bg-info-subtle, .badge.bg-warning-subtle {
+      color:#111 !important;
+    }
+
     .table-sm td, .table-sm th{vertical-align: middle;}
     .badge-status{font-size:.85rem}
   </style>

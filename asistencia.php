@@ -67,6 +67,77 @@ $isManager  = in_array($rolUser, ['Gerente','Admin','GerenteZona'], true);
 
 $msg = '';
 
+/* ========= Acceso por SUBTIPO de sucursal ========= */
+/* Garantiza tener id_sucursal en sesión (fallback a usuarios.id_sucursal) */
+if ($idSucursal <= 0) {
+  $st = $conn->prepare("SELECT id_sucursal FROM usuarios WHERE id=? LIMIT 1");
+  $st->bind_param('i', $idUsuario);
+  $st->execute();
+  if ($u = $st->get_result()->fetch_assoc()) {
+    $idSucursal = (int)$u['id_sucursal'];
+    $_SESSION['id_sucursal'] = $idSucursal;
+  }
+  $st->close();
+}
+
+/* Lee nombre y subtipo de la sucursal */
+$nombreSucursalActual = '';
+$subtipoSucursal      = '';
+$esSucursalPropia     = false;
+
+if ($idSucursal > 0) {
+  $st = $conn->prepare("SELECT nombre, subtipo FROM sucursales WHERE id=? LIMIT 1");
+  $st->bind_param('i', $idSucursal);
+  $st->execute();
+  if ($s = $st->get_result()->fetch_assoc()) {
+    $nombreSucursalActual = trim($s['nombre'] ?? '');
+    $subtipoSucursal      = trim($s['subtipo'] ?? '');
+    $esSucursalPropia     = (strcasecmp($subtipoSucursal, 'Propia') === 0);
+  }
+  $st->close();
+}
+
+if (isset($_GET['debug'])) {
+  error_log("asistencia.php DEBUG => id_usuario={$idUsuario}, id_sucursal={$idSucursal}, sucursal='{$nombreSucursalActual}', subtipo='{$subtipoSucursal}', esPropia=" . ($esSucursalPropia ? '1' : '0'));
+}
+
+/* Si NO es Propia ⇒ mostrar aviso y terminar (sin UI de marcaje) */
+if (!$esSucursalPropia) {
+  require_once __DIR__.'/navbar.php';
+  ?>
+  <!DOCTYPE html>
+  <html lang="es">
+  <head>
+    <meta charset="UTF-8">
+    <title>Asistencia</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css">
+  </head>
+  <body>
+    <div class="container my-5">
+      <div class="alert alert-info shadow-sm">
+        <i class="bi bi-info-circle me-2"></i>
+        Para tu sucursal no es necesario registrar asistencia.
+        <div class="small text-muted mt-1">
+          Sucursal: <b><?= h($nombreSucursalActual ?: '—') ?></b>
+          <?php if ($subtipoSucursal !== ''): ?> · Subtipo: <b><?= h($subtipoSucursal) ?></b><?php endif; ?>
+        </div>
+      </div>
+      <?php if (isset($_GET['debug'])): ?>
+        <pre class="small text-muted border rounded p-2 bg-light">DEBUG
+id_usuario: <?= (int)$idUsuario . "\n" ?>
+id_sucursal: <?= (int)$idSucursal . "\n" ?>
+subtipo: <?= h($subtipoSucursal ?: '—') . "\n" ?>
+permitido: NO (solo 'Propia')</pre>
+      <?php endif; ?>
+    </div>
+  </body>
+  </html>
+  <?php
+  exit;
+}
+
 /* ========= Datos de hoy y de semana operativa ========= */
 $hoyYmd       = date('Y-m-d');
 $horarioHoy   = horarioSucursalParaFecha($conn, $idSucursal, $hoyYmd);
@@ -147,7 +218,7 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['action']) && in_array($
               $idUsuario, $idSucursal, $hoyYmd, $estatus, $retardo, $retMin, $lat, $lng, $ip, $metodo
             );
           } else {
-            // Inserta sin 'estatus' (producción)
+            // Inserta sin 'estatus'
             $sql = "INSERT INTO asistencias
                     (id_usuario,id_sucursal,fecha,hora_entrada,retardo,retardo_minutos,latitud,longitud,ip,metodo)
                     VALUES (?,?,?,NOW(),?,?,?,?,?,?)";
@@ -158,7 +229,7 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['action']) && in_array($
           }
 
           if ($st->execute()) {
-            $msg = "<div class='alert alert-success mb-3'>✅ Entrada registrada"
+            $msg = "<div class='alert alert-success mb-3'>✅ Entrada registrado"
                  . ($retardo ? " <span class='badge bg-warning text-dark'>Retardo +{$retMin}m</span>" : '')
                  . "</div>";
           } else {
@@ -240,26 +311,20 @@ $st->bind_param('is',$idUsuario,$hoyYmd); $st->execute(); $asistHoy=$st->get_res
 $st=$conn->prepare("SELECT id, hora_entrada FROM asistencias WHERE id_usuario=? AND fecha=? AND hora_salida IS NULL LIMIT 1");
 $st->bind_param('is',$idUsuario,$hoyYmd); $st->execute(); $abiertaHoy=$st->get_result()->fetch_assoc(); $st->close();
 
-$tieneRegistroHoy = (bool)$asistHoy;
-$entradaHoy       = $tieneRegistroHoy ? $asistHoy['hora_entrada'] : null;
-$salidaHoy        = $tieneRegistroHoy ? $asistHoy['hora_salida']  : null;
-$duracionHoy      = $tieneRegistroHoy ? ($asistHoy['duracion_minutos'] ?? null) : null;
-$retardoHoy       = $tieneRegistroHoy ? (int)($asistHoy['retardo'] ?? 0) : 0;
-$retardoMinHoy    = $tieneRegistroHoy ? (int)($asistHoy['retardo_minutos'] ?? 0) : 0;
-
-$puedeCheckIn  = !$tieneRegistroHoy && !$bloqueadoParaCheckIn;
+$puedeCheckIn  = !$asistHoy && !$bloqueadoParaCheckIn;
 $puedeCheckOut = $abiertaHoy !== null;
 
-/* ==== Cálculo para UI: bloqueo de salida anticipada (no sustituye validación de servidor) ==== */
+$entradaHoy       = $asistHoy['hora_entrada'] ?? null;
+$salidaHoy        = $asistHoy['hora_salida']  ?? null;
+$duracionHoy      = $asistHoy['duracion_minutos'] ?? null;
+$retardoHoy       = (int)($asistHoy['retardo'] ?? 0);
+$retardoMinHoy    = (int)($asistHoy['retardo_minutos'] ?? 0);
+
+/* ==== Cálculo para UI: bloqueo de salida anticipada ==== */
 $minsDesdeEntradaUI = null; $bloqueoAnticipadoUI = false; $faltanUI = 0;
 if ($puedeCheckOut && $entradaHoy && !$salidaHoy) {
-  // hora_entrada puede ser DATETIME o TIME; normalizamos con la fecha de hoy si es TIME
   $entradaStr = (string)$entradaHoy;
-  if (strlen($entradaStr) <= 8) { // HH:MM:SS
-    $entradaDT = strtotime($hoyYmd.' '.$entradaStr);
-  } else {
-    $entradaDT = strtotime($entradaStr);
-  }
+  $entradaDT  = (strlen($entradaStr) <= 8) ? strtotime($hoyYmd.' '.$entradaStr) : strtotime($entradaStr);
   if ($entradaDT) {
     $minsDesdeEntradaUI = (int)floor((time() - $entradaDT) / 60);
     $bloqueoAnticipadoUI = ($minsDesdeEntradaUI < MIN_SALIDA_MIN);

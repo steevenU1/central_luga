@@ -14,7 +14,7 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 // Parámetros
 // =====================
 $tzOffset        = '-06:00'; // Hora CDMX
-$diasProductivos = 5;        // 6 semanales -> 1.2 diarias
+$diasProductivos = 5;        // para cuotas diarias
 
 $hoyLocal  = (new DateTime('now',       new DateTimeZone('America/Mexico_City')))->format('Y-m-d');
 $ayerLocal = (new DateTime('yesterday', new DateTimeZone('America/Mexico_City')))->format('Y-m-d');
@@ -22,37 +22,35 @@ $ayerLocal = (new DateTime('yesterday', new DateTimeZone('America/Mexico_City'))
 $fecha = $_GET['fecha'] ?? $ayerLocal;
 if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $fecha)) $fecha = $ayerLocal;
 
+/* ==================================================================
+   Subconsulta re-usable (AGREGADA POR VENTA para el día seleccionado)
+================================================================== */
+$subVentasAggDay = "
+  SELECT
+      v.id,
+      v.id_usuario,
+      v.id_sucursal,
+      CASE
+        WHEN LOWER(v.tipo_venta)='financiamiento+combo' THEN 2
+        ELSE SUM(CASE WHEN LOWER(p.tipo_producto) IN ('modem','mifi') THEN 0 ELSE 1 END)
+      END AS unidades,
+      SUM(CASE WHEN LOWER(p.tipo_producto) IN ('modem','mifi') THEN 0 ELSE dv.precio_unitario END) AS monto
+  FROM ventas v
+  LEFT JOIN detalle_venta dv ON dv.id_venta = v.id
+  LEFT JOIN productos p     ON p.id       = dv.id_producto
+  WHERE DATE(CONVERT_TZ(v.fecha_venta,'+00:00', ? )) = ?
+  GROUP BY v.id
+";
+
 // =====================
-// TARJETAS GLOBALES  (tickets, ventas$, unidades)
+// TARJETAS GLOBALES
 // =====================
 $sqlGlobal = "
   SELECT
-    COUNT(DISTINCT v.id) AS tickets,
-
-    IFNULL(SUM(
-      CASE
-        WHEN dv.id IS NULL THEN 0
-        WHEN LOWER(p.tipo_producto) IN ('modem','mifi') THEN 0
-        ELSE dv.precio_unitario
-      END
-    ),0) AS ventas_validas,
-
-    IFNULL(SUM(
-      CASE
-        WHEN dv.id IS NULL THEN 0
-        WHEN LOWER(p.tipo_producto) IN ('modem','mifi') THEN 0
-        WHEN v.tipo_venta='Financiamiento+Combo'
-             AND dv.id = (
-               SELECT MIN(dv2.id) FROM detalle_venta dv2 WHERE dv2.id_venta = v.id
-             ) THEN 2
-        ELSE 1
-      END
-    ),0) AS unidades_validas
-
-  FROM ventas v
-  LEFT JOIN detalle_venta dv ON dv.id_venta = v.id
-  LEFT JOIN productos p ON p.id = dv.id_producto
-  WHERE DATE(CONVERT_TZ(v.fecha_venta,'+00:00', ? )) = ?
+    COUNT(*)                            AS tickets,
+    IFNULL(SUM(va.monto),0)             AS ventas_validas,
+    IFNULL(SUM(va.unidades),0)          AS unidades_validas
+  FROM ( $subVentasAggDay ) va
 ";
 $stmt = $conn->prepare($sqlGlobal);
 $stmt->bind_param("ss", $tzOffset, $fecha);
@@ -66,7 +64,7 @@ $unidadesValidas = (int)($glob['unidades_validas'] ?? 0);
 $ticketProm      = $tickets > 0 ? ($ventasValidas / $tickets) : 0.0;
 
 // =====================
-// Cuota diaria GLOBAL (u.) = SUM_suc (cuota_unidades * #ejecutivos_activos) / diasProductivos
+// Cuota diaria GLOBAL (u.)
 // =====================
 $sqlCuotaDiariaGlobalU = "
   SELECT IFNULL(SUM(cuota_calc),0) AS cuota_diaria_global_u FROM (
@@ -127,8 +125,8 @@ $cuotaDiariaGlobalM = (float)($cdgM['cuota_diaria_global_monto'] ?? 0);
 $cumplGlobalM = $cuotaDiariaGlobalM > 0 ? ($ventasValidas / $cuotaDiariaGlobalM) * 100 : 0;
 
 // =====================
-// RANKING EJECUTIVOS
-// Cuota diaria por EJECUTIVO (u.) = cuota_unidades_sucursal / diasProductivos
+// RANKING EJECUTIVOS + GERENTES (por venta)
+// (⚠️ sin columna Rol en SELECT)
 // =====================
 $sqlEjecutivos = "
   SELECT
@@ -145,46 +143,20 @@ $sqlEjecutivos = "
       LIMIT 1
     ) / ?, 0) AS cuota_diaria_ejecutivo,
 
-    (
-      SELECT COUNT(DISTINCT v2.id)
-      FROM ventas v2
-      WHERE v2.id_usuario = u.id
-        AND DATE(CONVERT_TZ(v2.fecha_venta,'+00:00', ? )) = ?
-    ) AS tickets,
-
-    IFNULL(SUM(
-      CASE
-        WHEN dv.id IS NULL THEN 0
-        WHEN LOWER(p.tipo_producto) IN ('modem','mifi') THEN 0
-        ELSE dv.precio_unitario
-      END
-    ),0) AS ventas_validas,
-
-    IFNULL(SUM(
-      CASE
-        WHEN dv.id IS NULL THEN 0
-        WHEN LOWER(p.tipo_producto) IN ('modem','mifi') THEN 0
-        WHEN v.tipo_venta='Financiamiento+Combo'
-             AND dv.id = (
-               SELECT MIN(dv2.id) FROM detalle_venta dv2 WHERE dv2.id_venta = v.id
-             ) THEN 2
-        ELSE 1
-      END
-    ),0) AS unidades_validas
+    IFNULL(COUNT(va.id),0)       AS tickets,
+    IFNULL(SUM(va.monto),0)      AS ventas_validas,
+    IFNULL(SUM(va.unidades),0)   AS unidades_validas
 
   FROM usuarios u
   INNER JOIN sucursales s ON s.id = u.id_sucursal
-  LEFT JOIN ventas v 
-    ON v.id_usuario = u.id 
-    AND DATE(CONVERT_TZ(v.fecha_venta,'+00:00', ? )) = ?
-  LEFT JOIN detalle_venta dv ON dv.id_venta = v.id
-  LEFT JOIN productos p ON p.id = dv.id_producto
-  WHERE s.tipo_sucursal='Tienda' AND u.activo=1 AND u.rol='Ejecutivo'
+  LEFT JOIN ( $subVentasAggDay ) va ON va.id_usuario = u.id
+  WHERE s.tipo_sucursal='Tienda' AND u.activo=1 AND u.rol IN ('Ejecutivo','Gerente')
   GROUP BY u.id
   ORDER BY unidades_validas DESC, ventas_validas DESC
 ";
 $stmt = $conn->prepare($sqlEjecutivos);
-$stmt->bind_param("sissss", $fecha, $diasProductivos, $tzOffset, $fecha, $tzOffset, $fecha);
+/* params: fecha (cuota), dias, tzOffset, fecha (subconsulta) */
+$stmt->bind_param("siss", $fecha, $diasProductivos, $tzOffset, $fecha);
 $stmt->execute();
 $resEj = $stmt->get_result();
 
@@ -192,17 +164,15 @@ $ejecutivos = [];
 while ($r = $resEj->fetch_assoc()) {
     $r['cuota_diaria_ejecutivo'] = (float)$r['cuota_diaria_ejecutivo'];
     $r['unidades_validas'] = (int)$r['unidades_validas'];
-    $r['ventas_validas'] = (float)$r['ventas_validas'];
-    $r['tickets'] = (int)$r['tickets'];
-    $r['cumplimiento'] = $r['cuota_diaria_ejecutivo']>0 ? ($r['unidades_validas'] / $r['cuota_diaria_ejecutivo'] * 100) : 0;
+    $r['ventas_validas']   = (float)$r['ventas_validas'];
+    $r['tickets']          = (int)$r['tickets'];
+    $r['cumplimiento']     = $r['cuota_diaria_ejecutivo']>0 ? ($r['unidades_validas'] / $r['cuota_diaria_ejecutivo'] * 100) : 0;
     $ejecutivos[] = $r;
 }
 $stmt->close();
 
 // =====================
-// RANKING SUCURSALES  (cumplimiento en MONTO)
-// - Cuota diaria ($) = cuota_monto vigente / diasProductivos
-// - % Cumplimiento = ventas_validas ($) / cuota_diaria_monto * 100
+// RANKING SUCURSALES (cumplimiento MONTO) – por venta
 // =====================
 $sqlSucursales = "
   SELECT
@@ -219,39 +189,17 @@ $sqlSucursales = "
       LIMIT 1
     ) / ?, 0) AS cuota_diaria_monto,
 
-    IFNULL(SUM(
-      CASE
-        WHEN dv.id IS NULL THEN 0
-        WHEN LOWER(p.tipo_producto) IN ('modem','mifi') THEN 0
-        ELSE dv.precio_unitario
-      END
-    ),0) AS ventas_validas,
-
-    IFNULL(SUM(
-      CASE
-        WHEN dv.id IS NULL THEN 0
-        WHEN LOWER(p.tipo_producto) IN ('modem','mifi') THEN 0
-        WHEN v.tipo_venta='Financiamiento+Combo'
-             AND dv.id = (
-               SELECT MIN(dv2.id) FROM detalle_venta dv2 WHERE dv2.id_venta = v.id
-             ) THEN 2
-        ELSE 1
-      END
-    ),0) AS unidades_validas
+    IFNULL(SUM(va.monto),0)     AS ventas_validas,
+    IFNULL(SUM(va.unidades),0)  AS unidades_validas
 
   FROM sucursales s
-  LEFT JOIN (
-    SELECT v1.*
-    FROM ventas v1
-    WHERE DATE(CONVERT_TZ(v1.fecha_venta,'+00:00', ? )) = ?
-  ) v ON v.id_sucursal = s.id
-  LEFT JOIN detalle_venta dv ON dv.id_venta = v.id
-  LEFT JOIN productos p ON p.id = dv.id_producto
+  LEFT JOIN ( $subVentasAggDay ) va ON va.id_sucursal = s.id
   WHERE s.tipo_sucursal='Tienda'
   GROUP BY s.id
   ORDER BY ventas_validas DESC
 ";
 $stmt = $conn->prepare($sqlSucursales);
+/* params: fecha (cuota), dias, tzOffset, fecha (subconsulta) */
 $stmt->bind_param("siss", $fecha, $diasProductivos, $tzOffset, $fecha);
 $stmt->execute();
 $resSuc = $stmt->get_result();
@@ -270,26 +218,26 @@ $stmt->close();
 <html lang="es">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1"> <!-- ✅ importante para móvil -->
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Productividad del Día (<?= h($fecha) ?>)</title>
   <link rel="icon" type="image/x-icon" href="./img/favicon.ico">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
 
-  <!-- ===== Overrides del NAVBAR SOLO para esta vista ===== -->
+  <!-- ===== Estilos ===== -->
   <style>
-    /* Aplica a nav con id #topbar (si existe) o a .navbar-luga (de tu navbar.php) */
-    #topbar, .navbar-luga{ font-size:16px; }
+    /* Utilidades */
+    .num { font-variant-numeric: tabular-nums; letter-spacing: -.2px; }
+    .clip { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .progress{height:20px}
+    .progress-bar{font-size:.75rem}
 
-    /* Móvil (≤576px): legibilidad y área táctil */
+    /* Topbar tweaks (ya usabas en otras vistas) */
+    #topbar, .navbar-luga{ font-size:16px; }
     @media (max-width:576px){
       #topbar, .navbar-luga{
-        font-size:16px;         /* 1em interno = 16px */
-        --brand-font:1.00em;    /* título marca un poco mayor */
-        --nav-font:.95em;       /* links/dropdown más legibles */
-        --drop-font:.95em;
-        --icon-em:1.05em;
-        --pad-y:.44em;
-        --pad-x:.62em;
+        font-size:16px;
+        --brand-font:1.00em; --nav-font:.95em; --drop-font:.95em;
+        --icon-em:1.05em; --pad-y:.44em; --pad-x:.62em;
       }
       #topbar .navbar-brand img, .navbar-luga .navbar-brand img{ width:1.8em; height:1.8em; }
       #topbar .btn-asistencia, .navbar-luga .btn-asistencia{ font-size:.95em; padding:.5em .9em !important; border-radius:12px; }
@@ -297,20 +245,42 @@ $stmt->close();
       .navbar-luga .nav-avatar, .navbar-luga .nav-initials{ width:2.1em; height:2.1em; }
       #topbar .navbar-toggler, .navbar-luga .navbar-toggler{ padding:.45em .7em; }
     }
+    @media (max-width:360px){ #topbar, .navbar-luga{ font-size:15px; } }
 
-    /* Ultra compacto (≤360px) */
+    /* 👇 Compactación y nombres completos en móvil */
+    @media (max-width:576px){
+      body { font-size: 14px; }
+      .container { padding-left: 8px; padding-right: 8px; }
+
+      .table { font-size: 12px; table-layout: fixed; }
+      .table thead th { font-size: 11px; }
+      .table td, .table th { padding: .30rem .40rem; }
+
+      /* permitir que NOMBRE y SUCURSAL se envuelvan en varias líneas */
+      .person-name, .suc-col, .suc-name{
+        max-width: none !important;
+        white-space: normal !important;
+        overflow: visible !important;
+        text-overflow: unset !important;
+        word-break: break-word;
+      }
+
+      .clip { max-width: 120px; } /* el resto sí puede recortarse */
+    }
     @media (max-width:360px){
-      #topbar, .navbar-luga{ font-size:15px; }
+      .table { font-size: 11px; }
+      .table td, .table th { padding: .28rem .35rem; }
+      .clip { max-width: 96px; }
     }
   </style>
 </head>
 <body class="bg-light">
 
-<?php include __DIR__ . '/navbar.php'; ?>  <!-- ✅ navbar dentro del body -->
+<?php include __DIR__ . '/navbar.php'; ?>
 
 <div class="container mt-4">
-  <div class="d-flex justify-content-between align-items-center">
-    <h2>📅 Productividad del Día — <?= date('d/m/Y', strtotime($fecha)) ?></h2>
+  <div class="d-flex justify-content-between align-items-center gap-2 flex-wrap">
+    <h2 class="m-0">📅 Productividad del Día — <?= date('d/m/Y', strtotime($fecha)) ?></h2>
     <form method="GET" class="d-flex gap-2">
       <input type="date" name="fecha" class="form-control" value="<?= h($fecha) ?>" max="<?= h($hoyLocal) ?>">
       <button class="btn btn-primary">Ver</button>
@@ -399,53 +369,61 @@ $stmt->close();
 
   <!-- Tabs -->
   <ul class="nav nav-tabs mt-4" id="tabsDia">
-    <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tabEjecutivos">Ejecutivos 👔</button></li>
+    <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tabEjecutivos">Ejecutivos / Gerentes 👔</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tabSucursales">Sucursales 🏢</button></li>
   </ul>
 
   <div class="tab-content">
-    <!-- Ejecutivos -->
+    <!-- Ejecutivos + Gerentes -->
     <div class="tab-pane fade show active" id="tabEjecutivos">
       <div class="card shadow mt-3">
-        <div class="card-header bg-dark text-white">Ranking de Ejecutivos (<?= date('d/m/Y', strtotime($fecha)) ?>)</div>
-        <div class="card-body table-responsive">
-          <table class="table table-striped table-bordered align-middle">
-            <thead class="table-dark">
-              <tr>
-                <th>Ejecutivo</th>
-                <th>Sucursal</th>
-                <th>Unidades</th>
-                <th>Ventas $</th>
-                <th>Tickets</th>
-                <th>Cuota diaria (u.)</th>
-                <th>% Cumplimiento</th>
-                <th>Progreso</th>
-              </tr>
-            </thead>
-            <tbody>
-              <?php foreach ($ejecutivos as $e):
-                $cuotaDiaU = $e['cuota_diaria_ejecutivo'];
-                $cumpl = $e['cumplimiento'];
-                $fila = $cumpl>=100?'table-success':($cumpl>=60?'table-warning':'table-danger');
-                $cls  = $cumpl>=100?'bg-success':($cumpl>=60?'bg-warning':'bg-danger');
-              ?>
-              <tr class="<?= $fila ?>">
-                <td><?= h($e['nombre']) ?></td>
-                <td><?= h($e['sucursal']) ?></td>
-                <td><?= (int)$e['unidades_validas'] ?></td>
-                <td>$<?= number_format($e['ventas_validas'],2) ?></td>
-                <td><?= (int)$e['tickets'] ?></td>
-                <td><?= number_format($cuotaDiaU,2) ?></td>
-                <td><?= number_format($cumpl,1) ?>%</td>
-                <td>
-                  <div class="progress" style="height:20px">
-                    <div class="progress-bar <?= $cls ?>" style="width:<?= min(100,$cumpl) ?>%"></div>
-                  </div>
-                </td>
-              </tr>
-              <?php endforeach;?>
-            </tbody>
-          </table>
+        <div class="card-header bg-dark text-white">Ranking del Día (<?= date('d/m/Y', strtotime($fecha)) ?>)</div>
+        <div class="card-body p-0">
+          <div class="table-responsive-sm">
+            <table class="table table-striped table-bordered table-sm align-middle mb-0">
+              <thead class="table-dark">
+                <tr>
+                  <th>Nombre</th>
+                  <th>Sucursal</th>
+                  <th>Unidades</th>
+                  <!-- oculto en móvil -->
+                  <th class="d-none d-sm-table-cell">Ventas $</th>
+                  <!-- oculto en móvil -->
+                  <th class="d-none d-sm-table-cell">Tickets</th>
+                  <th>Cuota <span class="d-none d-sm-inline">diaria </span>(u.)</th>
+                  <th>% Cumpl.<span class="d-none d-sm-inline">imiento</span></th>
+                  <!-- oculto en móvil -->
+                  <th class="d-none d-sm-table-cell">Progreso</th>
+                </tr>
+              </thead>
+              <tbody>
+                <?php foreach ($ejecutivos as $e):
+                  $cuotaDiaU = $e['cuota_diaria_ejecutivo'];
+                  $cumpl = $e['cumplimiento'];
+                  $fila = $cumpl>=100?'table-success':($cumpl>=60?'table-warning':'table-danger');
+                  $cls  = $cumpl>=100?'bg-success':($cumpl>=60?'bg-warning':'bg-danger');
+                ?>
+                <tr class="<?= $fila ?>">
+                  <td class="person-name" title="<?= h($e['nombre']) ?>"><?= h($e['nombre']) ?></td>
+                  <td class="suc-col" title="<?= h($e['sucursal']) ?>"><?= h($e['sucursal']) ?></td>
+                  <td class="num"><?= (int)$e['unidades_validas'] ?></td>
+                  <!-- oculto en móvil -->
+                  <td class="d-none d-sm-table-cell num">$<?= number_format($e['ventas_validas'],2) ?></td>
+                  <!-- oculto en móvil -->
+                  <td class="d-none d-sm-table-cell num"><?= (int)$e['tickets'] ?></td>
+                  <td class="num"><?= number_format($cuotaDiaU,2) ?></td>
+                  <td class="num"><?= number_format($cumpl,1) ?>%</td>
+                  <!-- oculto en móvil -->
+                  <td class="d-none d-sm-table-cell" style="min-width:160px">
+                    <div class="progress">
+                      <div class="progress-bar <?= $cls ?>" style="width:<?= min(100,$cumpl) ?>%"></div>
+                    </div>
+                  </td>
+                </tr>
+                <?php endforeach;?>
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
     </div>
@@ -454,41 +432,50 @@ $stmt->close();
     <div class="tab-pane fade" id="tabSucursales">
       <div class="card shadow mt-3">
         <div class="card-header bg-dark text-white">Ranking de Sucursales (<?= date('d/m/Y', strtotime($fecha)) ?>)</div>
-        <div class="card-body table-responsive">
-          <table class="table table-striped table-bordered align-middle">
-            <thead class="table-dark">
-              <tr>
-                <th>Sucursal</th>
-                <th>Zona</th>
-                <th>Unidades</th>
-                <th>Ventas $</th>
-                <th>Cuota diaria ($)</th>
-                <th>% Cumplimiento (monto)</th>
-                <th>Progreso</th>
-              </tr>
-            </thead>
-            <tbody>
-              <?php foreach ($sucursales as $s):
-                $cumpl = $s['cumplimiento_monto'];
-                $fila = $cumpl>=100?'table-success':($cumpl>=60?'table-warning':'table-danger');
-                $cls  = $cumpl>=100?'bg-success':($cumpl>=60?'bg-warning':'bg-danger');
-              ?>
-              <tr class="<?= $fila ?>">
-                <td><?= h($s['sucursal']) ?></td>
-                <td>Zona <?= h($s['zona']) ?></td>
-                <td><?= (int)$s['unidades_validas'] ?></td>
-                <td>$<?= number_format($s['ventas_validas'],2) ?></td>
-                <td>$<?= number_format($s['cuota_diaria_monto'],2) ?></td>
-                <td><?= number_format($cumpl,1) ?>%</td>
-                <td>
-                  <div class="progress" style="height:20px">
-                    <div class="progress-bar <?= $cls ?>" style="width:<?= min(100,$cumpl) ?>%"></div>
-                  </div>
-                </td>
-              </tr>
-              <?php endforeach;?>
-            </tbody>
-          </table>
+        <div class="card-body p-0">
+          <div class="table-responsive-sm">
+            <table class="table table-striped table-bordered table-sm align-middle mb-0">
+              <thead class="table-dark">
+                <tr>
+                  <th>Sucursal</th>
+                  <!-- oculto en móvil -->
+                  <th class="d-none d-sm-table-cell">Zona</th>
+                  <!-- oculto en móvil -->
+                  <th class="d-none d-sm-table-cell">Unidades</th>
+                  <th class="w-120">Ventas $</th>
+                  <th>Cuota diaria ($)</th>
+                  <th>% Cumpl. <span class="d-none d-sm-inline">(monto)</span></th>
+                  <!-- oculto en móvil -->
+                  <th class="d-none d-sm-table-cell">Progreso</th>
+                </tr>
+              </thead>
+              <tbody>
+                <?php foreach ($sucursales as $s):
+                  $cumpl = $s['cumplimiento_monto'];
+                  $fila = $cumpl>=100?'table-success':($cumpl>=60?'table-warning':'table-danger');
+                  $cls  = $cumpl>=100?'bg-success':($cumpl>=60?'bg-warning':'bg-danger');
+                ?>
+                <tr class="<?= $fila ?>">
+                  <!-- nombre completo en móvil -->
+                  <td class="suc-name" title="<?= h($s['sucursal']) ?>"><?= h($s['sucursal']) ?></td>
+                  <!-- oculto en móvil -->
+                  <td class="d-none d-sm-table-cell">Zona <?= h($s['zona']) ?></td>
+                  <!-- oculto en móvil -->
+                  <td class="d-none d-sm-table-cell num"><?= (int)$s['unidades_validas'] ?></td>
+                  <td class="num">$<?= number_format($s['ventas_validas'],2) ?></td>
+                  <td class="num">$<?= number_format($s['cuota_diaria_monto'],2) ?></td>
+                  <td class="num"><?= number_format($cumpl,1) ?>%</td>
+                  <!-- oculto en móvil -->
+                  <td class="d-none d-sm-table-cell" style="min-width:160px">
+                    <div class="progress">
+                      <div class="progress-bar <?= $cls ?>" style="width:<?= min(100,$cumpl) ?>%"></div>
+                    </div>
+                  </td>
+                </tr>
+                <?php endforeach;?>
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
     </div>
@@ -496,6 +483,5 @@ $stmt->close();
   </div><!-- /tab-content -->
 </div>
 
-<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script> -->
 </body>
 </html>

@@ -13,8 +13,8 @@ $rolUsuario        = $_SESSION['rol'] ?? '';
 $whereSucursal     = "id_sucursal_destino = $idSucursalUsuario";
 
 $mensaje    = "";
-$acuseUrl   = "";    // ← URL del acuse (solo recibidos)
-$acuseReady = false; // ← bandera para abrir modal auto
+$acuseUrl   = "";
+$acuseReady = false;
 
 /* -----------------------------------------------------------
    Utilidades
@@ -147,8 +147,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['procesar_traspaso']))
                 $conn->commit();
 
                 // ===== Preparar ACUSE (solo recibidos) =====
-                // Preferimos filtrar por "scope=recibidos" usando detalle_traspaso.resultado.
-                // Además enviamos "ids" como respaldo por si aún no agregas esa columna/consulta.
                 if ($ok > 0) {
                     $idsCsv    = implode(',', array_map('intval', $marcados));
                     $acuseUrl  = "acuse_traspaso.php?id={$idTraspaso}&scope=recibidos&ids=" . urlencode($idsCsv) . "&print=1";
@@ -264,10 +262,26 @@ $stRes->close();
       border-radius:12px; background:#eef2ff; color:#312e81;
     }
 
+    /* ===== Cabeceras de cada traspaso: alto contraste ===== */
     .card-header-gradient{
-      background: linear-gradient(135deg,#0f172a 0%,#111827 100%);
-      color:#fff; border-top-left-radius:1rem; border-top-right-radius:1rem;
+      background: linear-gradient(135deg,#1f2937 0%,#0f172a 100%); /* slate-700 → slate-900 */
+      color:#fff !important;
+      border-top-left-radius:1rem; border-top-right-radius:1rem;
+      text-shadow: 0 1px 0 rgba(0,0,0,.35);
     }
+    /* Asegurar que TODO lo que esté dentro salga claro */
+    .card-header-gradient *, 
+    .card-header-gradient .bi,
+    .card-header-gradient strong,
+    .card-header-gradient a {
+      color:#fff !important;
+    }
+    /* Si alguien dejó opacity-75 dentro, suavizamos sin perder legibilidad */
+    .card-header-gradient .opacity-75{
+      opacity:1 !important;
+      color:rgba(255,255,255,.85) !important;
+    }
+
     .table thead th{ letter-spacing:.4px; text-transform:uppercase; font-size:.78rem; }
     .sticky-actions{
       position:sticky; bottom:0; background:#fff; padding:12px; 
@@ -500,7 +514,7 @@ const ACUSE_READY = <?= $acuseReady ? 'true' : 'false' ?>;
 if (ACUSE_READY && ACUSE_URL) {
   const modalAcuse = new bootstrap.Modal(document.getElementById('modalAcuse'));
   const frame = document.getElementById('frameAcuse');
-  frame.src = ACUSE_URL; // incluye &print=1 → acuse_traspaso.php debería disparar window.print() internamente
+  frame.src = ACUSE_URL;
   frame.addEventListener('load', () => { try { frame.contentWindow.focus(); } catch(e){} });
   modalAcuse.show();
 

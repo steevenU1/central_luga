@@ -6,7 +6,6 @@ if (empty($_SESSION['id_usuario'])) {
 }
 
 require_once __DIR__ . '/db.php';
-// NOTE: el navbar se incluye dentro del <body> para evitar glitches en móvil
 
 // 🔹 Nombre de mes en español
 function nombreMes($mes) {
@@ -45,39 +44,40 @@ $qe->close();
 
 $cuotaSemU_porEj = $cuotaMesU_porEj * $factorSem; // (informativo)
 
+/* ==================================================================
+   SUBCONSULTA REUTILIZABLE: ventas agregadas POR VENTA en el mes
+================================================================== */
+$subVentasAggMes = "
+  SELECT
+      v.id,
+      v.id_usuario,
+      v.id_sucursal,
+      DATE(CONVERT_TZ(v.fecha_venta,'+00:00','-06:00')) AS dia,
+      CASE
+        WHEN LOWER(v.tipo_venta)='financiamiento+combo' THEN 2
+        ELSE SUM(CASE WHEN LOWER(p.tipo_producto) IN ('modem','mifi') THEN 0 ELSE 1 END)
+      END AS unidades,
+      SUM(CASE WHEN LOWER(p.tipo_producto) IN ('modem','mifi') THEN 0 ELSE dv.precio_unitario END) AS monto
+  FROM ventas v
+  LEFT JOIN detalle_venta dv ON dv.id_venta = v.id
+  LEFT JOIN productos p      ON p.id       = dv.id_producto
+  WHERE DATE(CONVERT_TZ(v.fecha_venta,'+00:00','-06:00')) BETWEEN ? AND ?
+  GROUP BY v.id
+";
+
 /* ======================================================
    1) Sucursales: ventas, unidades, cuotas mensuales
 ====================================================== */
 $sqlSuc = "
-    SELECT s.id AS id_sucursal, s.nombre AS sucursal, s.zona,
-           IFNULL(SUM(
-                CASE 
-                    WHEN dv.id IS NULL THEN 0
-                    WHEN LOWER(p.tipo_producto) IN ('modem','mifi') THEN 0
-                    WHEN v.tipo_venta='Financiamiento+Combo' 
-                         AND dv.id = (
-                             SELECT MIN(dv2.id) FROM detalle_venta dv2 WHERE dv2.id_venta=v.id
-                         )
-                         THEN 2
-                    ELSE 1
-                END
-           ),0) AS unidades,
-           IFNULL(SUM(
-                CASE 
-                    WHEN dv.id IS NULL THEN 0
-                    WHEN LOWER(p.tipo_producto) IN ('modem','mifi') THEN 0
-                    ELSE dv.precio_unitario
-                END
-           ),0) AS ventas
+    SELECT
+      s.id AS id_sucursal, s.nombre AS sucursal, s.zona,
+      IFNULL(SUM(va.unidades),0) AS unidades,
+      IFNULL(SUM(va.monto),0)    AS ventas
     FROM sucursales s
-    LEFT JOIN ventas v 
-        ON v.id_sucursal = s.id 
-        AND DATE(CONVERT_TZ(v.fecha_venta,'+00:00','-06:00')) BETWEEN ? AND ?
-    LEFT JOIN detalle_venta dv ON dv.id_venta = v.id
-    LEFT JOIN productos p ON p.id = dv.id_producto
+    LEFT JOIN ( $subVentasAggMes ) va ON va.id_sucursal = s.id
     WHERE s.tipo_sucursal='Tienda'
     GROUP BY s.id
-    ORDER BY s.zona, s.nombre
+    ORDER BY ventas DESC
 ";
 $stmt = $conn->prepare($sqlSuc);
 $stmt->bind_param("ss", $inicioMes, $finMes);
@@ -132,7 +132,8 @@ $stmt->close();
 ====================================================== */
 $zonas = [];
 foreach ($sucursales as $s) {
-    $z = $s['zona'];
+    $z = trim((string)($s['zona'] ?? ''));
+    if ($z === '') $z = 'Sin zona';
     if (!isset($zonas[$z])) $zonas[$z] = ['unidades'=>0,'ventas'=>0,'cuota'=>0];
     $zonas[$z]['unidades'] += $s['unidades'];
     $zonas[$z]['ventas']   += $s['ventas'];
@@ -141,40 +142,19 @@ foreach ($sucursales as $s) {
 $porcentajeGlobal = $totalGlobalCuota > 0 ? ($totalGlobalVentas/$totalGlobalCuota*100) : 0;
 
 /* ======================================================
-   3) Ejecutivos: ventas mensuales + % cumplimiento por UNIDADES
+   3) Ejecutivos (+ Gerentes): ventas y cumplimiento por UNIDADES
 ====================================================== */
 $sqlEj = "
     SELECT 
         u.id,
         u.nombre,
         s.nombre AS sucursal,
-        IFNULL(SUM(
-            CASE 
-                WHEN dv.id IS NULL THEN 0
-                WHEN LOWER(p.tipo_producto) IN ('modem','mifi') THEN 0
-                WHEN v.tipo_venta='Financiamiento+Combo' 
-                     AND dv.id = (
-                         SELECT MIN(dv2.id) FROM detalle_venta dv2 WHERE dv2.id_venta=v.id
-                     )
-                     THEN 2
-                ELSE 1
-            END
-        ),0) AS unidades,
-        IFNULL(SUM(
-            CASE 
-                WHEN dv.id IS NULL THEN 0
-                WHEN LOWER(p.tipo_producto) IN ('modem','mifi') THEN 0
-                ELSE dv.precio_unitario
-            END
-        ),0) AS ventas
+        IFNULL(SUM(va.unidades),0) AS unidades,
+        IFNULL(SUM(va.monto),0)    AS ventas
     FROM usuarios u
     INNER JOIN sucursales s ON s.id = u.id_sucursal
-    LEFT JOIN ventas v 
-        ON v.id_usuario = u.id
-        AND DATE(CONVERT_TZ(v.fecha_venta,'+00:00','-06:00')) BETWEEN ? AND ?
-    LEFT JOIN detalle_venta dv ON dv.id_venta = v.id
-    LEFT JOIN productos p ON p.id = dv.id_producto
-    WHERE u.activo = 1 AND u.rol='Ejecutivo'
+    LEFT JOIN ( $subVentasAggMes ) va ON va.id_usuario = u.id
+    WHERE u.activo = 1 AND u.rol IN ('Ejecutivo','Gerente')
     GROUP BY u.id
     ORDER BY unidades DESC, ventas DESC
 ";
@@ -205,10 +185,8 @@ function badgeFila($pct) {
 }
 
 /* ======================================================
-   4) 📈 Serie MENSUAL por SEMANAS (mar–lun) — TODAS
+   4) 📈 Serie MENSUAL por SEMANAS (mar–lun)
 ====================================================== */
-
-// Helper: inicio de semana (martes) para una fecha
 function inicioSemanaMartes(DateTime $dt): DateTime {
     $dow = (int)$dt->format('N'); // 1=Lun..7=Dom
     $diff = $dow - 2;            // Martes=2
@@ -218,16 +196,14 @@ function inicioSemanaMartes(DateTime $dt): DateTime {
     return $start;
 }
 
-// Construir tramos semanales del mes (mar–lun)
 $inicioMesDT = new DateTime($inicioMes.' 00:00:00');
 $finMesDT    = new DateTime($finMes.' 23:59:59');
 
-$wkStart = inicioSemanaMartes(clone $inicioMesDT); // martes anterior o mismo día
-$semanas = []; // ['ini'=>'Y-m-d','fin'=>'Y-m-d','label'=>'Sem N (dd/mm–dd/mm)']
+$wkStart = inicioSemanaMartes(clone $inicioMesDT);
+$semanas = [];
 $idx = 1;
 while ($wkStart <= $finMesDT) {
     $wkFin = (clone $wkStart)->modify('+6 days')->setTime(23,59,59);
-    // recorte al mes para mostrarse en la etiqueta
     $visIni = ($wkStart < $inicioMesDT) ? $inicioMesDT : $wkStart;
     $visFin = ($wkFin   > $finMesDT)    ? $finMesDT    : $wkFin;
     $semanas[] = [
@@ -239,7 +215,6 @@ while ($wkStart <= $finMesDT) {
     $wkStart->modify('+7 days')->setTime(0,0,0);
 }
 
-// Mapa rápido: día → índice semana
 function findWeekIndex(string $dia, array $semanas): ?int {
     foreach ($semanas as $i => $sem) {
         if ($dia >= $sem['ini'] && $dia <= $sem['fin']) return $i;
@@ -247,40 +222,23 @@ function findWeekIndex(string $dia, array $semanas): ?int {
     return null;
 }
 
-// Traer unidades por sucursal y DÍA en el mes, luego agregamos por semana
 $sqlMonthDaily = "
-SELECT s.nombre AS sucursal,
-       DATE(CONVERT_TZ(v.fecha_venta,'+00:00','-06:00')) AS dia,
-       SUM(CASE 
-             WHEN dv.id IS NULL THEN 0
-             WHEN LOWER(p.tipo_producto) IN ('modem','mifi') THEN 0
-             WHEN v.tipo_venta='Financiamiento+Combo' 
-                  AND dv.id = (SELECT MIN(dv2.id) FROM detalle_venta dv2 WHERE dv2.id_venta=v.id)
-                  THEN 2
-             ELSE 1
-           END) AS unidades
-FROM sucursales s
-LEFT JOIN ventas v
-  ON v.id_sucursal = s.id
- AND DATE(CONVERT_TZ(v.fecha_venta,'+00:00','-06:00')) BETWEEN ? AND ?
-LEFT JOIN detalle_venta dv ON dv.id_venta = v.id
-LEFT JOIN productos p ON p.id = dv.id_producto
-WHERE s.tipo_sucursal='Tienda'
-  AND v.id IS NOT NULL          -- ✅ evita filas con fecha NULL
-GROUP BY s.id, dia
+  SELECT s.nombre AS sucursal, va.dia, IFNULL(SUM(va.unidades),0) AS unidades
+  FROM sucursales s
+  LEFT JOIN ( $subVentasAggMes ) va ON va.id_sucursal = s.id
+  WHERE s.tipo_sucursal='Tienda'
+  GROUP BY s.id, va.dia
 ";
 $stMd = $conn->prepare($sqlMonthDaily);
 $stMd->bind_param("ss", $inicioMes, $finMes);
 $stMd->execute();
 $resMd = $stMd->get_result();
 
-$weeklySeries = []; // [sucursal => [indexSemana => unidades]]
+$weeklySeries = [];
 while ($r = $resMd->fetch_assoc()) {
     $suc = $r['sucursal'];
     $dia = $r['dia'];
-    if (empty($dia)) {           // ✅ guard clause extra de seguridad
-        continue;
-    }
+    if (empty($dia)) continue;
     $u   = (int)$r['unidades'];
     $i   = findWeekIndex($dia, $semanas);
     if ($i === null) continue;
@@ -290,7 +248,6 @@ while ($r = $resMd->fetch_assoc()) {
 }
 $stMd->close();
 
-// Garantiza que todas las sucursales existan y rellena ceros
 $labelsSemanas = array_column($semanas, 'label');
 $k = count($labelsSemanas);
 foreach ($sucursales as $s) {
@@ -302,7 +259,6 @@ foreach ($sucursales as $s) {
     ksort($weeklySeries[$name]);
 }
 
-// Construye datasets para Chart.js (todas las sucursales)
 $datasetsMonth = [];
 foreach ($weeklySeries as $sucursalNombre => $serie) {
     $row = [];
@@ -320,45 +276,64 @@ foreach ($weeklySeries as $sucursalNombre => $serie) {
 <html lang="es">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1"> <!-- ✅ importante para móvil -->
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Dashboard Mensual</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
-  <!-- ===== Overrides del NAVBAR SOLO para esta vista ===== -->
   <style>
-    /* Base local del navbar para esta vista */
-    #topbar{ font-size:16px; }
+    /* Utilidades comunes */
+    .w-120 { min-width:120px; }
+    .clip { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .num  { font-variant-numeric: tabular-nums; letter-spacing: -.2px; }
+    .progress{height:18px}
+    .progress-bar{font-size:.75rem}
+    .tab-pane{padding-top:10px}
 
-    /* Móvil (≤576px): mejor legibilidad y área táctil */
+    /* En móvil el nombre de sucursal NO se recorta: se envuelve */
     @media (max-width:576px){
+      .suc-name{
+        max-width: none !important;
+        white-space: normal !important;
+        overflow: visible !important;
+        text-overflow: unset !important;
+        word-break: break-word;
+      }
+    }
+
+    #topbar{ font-size:16px; }
+    @media (max-width:576px){
+      /* Compactación en móvil */
+      body { font-size: 14px; }
+      .container { padding-left: 8px; padding-right: 8px; }
+      .card .card-header { padding: .5rem .65rem; font-size: .95rem; }
+      .card .card-body   { padding: .65rem; }
+
+      .table { font-size: 12px; table-layout: fixed; }
+      .table thead th { font-size: 11px; }
+      .table td, .table th { padding: .30rem .40rem; }
+
+      .clip { max-width: 120px; }
+
+      /* Topbar */
       #topbar{
-        font-size:16px;         /* 1em interno = 16px */
-        --brand-font:1.00em;    /* título marca un poco mayor */
-        --nav-font:.95em;       /* links y dropdown más legibles */
-        --drop-font:.95em;
-        --icon-em:1.05em;
-        --pad-y:.44em;
-        --pad-x:.62em;
+        font-size:16px;
+        --brand-font:1.00em; --nav-font:.95em; --drop-font:.95em;
+        --icon-em:1.05em; --pad-y:.44em; --pad-x:.62em;
       }
       #topbar .navbar-brand img{ width:1.8em; height:1.8em; }
       #topbar .btn-asistencia{ font-size:.95em; padding:.5em .9em !important; border-radius:12px; }
       #topbar .nav-avatar, #topbar .nav-initials{ width:2.1em; height:2.1em; }
       #topbar .navbar-toggler{ padding:.45em .7em; }
     }
-
-    /* Ultra compacto (≤360px) */
     @media (max-width:360px){
-      #topbar{ font-size:15px; }
+      .table { font-size: 11px; }
+      .table td, .table th { padding: .28rem .35rem; }
+      .clip { max-width: 96px; }
     }
-
-    /* Estilos propios de la página */
-    .progress{height:18px}
-    .progress-bar{font-size:.75rem}
-    .tab-pane{padding-top:10px}
   </style>
 </head>
 <body class="bg-light">
 
-<?php include __DIR__ . '/navbar.php'; ?>  <!-- ✅ navbar dentro del body -->
+<?php include __DIR__ . '/navbar.php'; ?>
 
 <div class="container mt-4">
   <h2>📊 Dashboard Mensual - <?= nombreMes($mes)." $anio" ?></h2>
@@ -418,7 +393,7 @@ foreach ($weeklySeries as $sucursalNombre => $serie) {
     </div>
   </div>
 
-  <!-- 👇 Gráfica mensual por SEMANAS (mar–lun) — TODAS las sucursales -->
+  <!-- Gráfica mensual por semanas -->
   <div class="card shadow mb-4">
     <div class="card-header bg-dark text-white">Comportamiento por Semanas del Mes (mar–lun) — Sucursales</div>
     <div class="card-body">
@@ -443,77 +418,95 @@ foreach ($weeklySeries as $sucursalNombre => $serie) {
       <div class="card shadow mt-3">
         <div class="card-header bg-primary text-white">Sucursales</div>
         <div class="card-body p-0">
-          <table class="table table-bordered table-striped table-sm mb-0">
-            <thead class="table-dark">
-              <tr>
-                <th>Sucursal</th><th>Zona</th><th>Unidades</th><th>Cuota Unid.</th>
-                <th>Ventas $</th><th>Cuota $</th><th>% Cumplimiento</th>
-              </tr>
-            </thead>
-            <tbody>
-              <?php foreach ($sucursales as $s): 
-                $fila  = badgeFila($s['cumplimiento']);
-                $estado= $s['cumplimiento']>=100?"✅":($s['cumplimiento']>=60?"⚠️":"❌");
-              ?>
-              <tr class="<?= $fila ?>">
-                <td><?= htmlspecialchars($s['sucursal']) ?></td>
-                <td><?= htmlspecialchars($s['zona']) ?></td>
-                <td><?= (int)$s['unidades'] ?></td>
-                <td><?= (int)$s['cuota_unidades'] ?></td>
-                <td>$<?= number_format($s['ventas'],2) ?></td>
-                <td>$<?= number_format($s['cuota_monto'],2) ?></td>
-                <td><?= round($s['cumplimiento'],1) ?>% <?= $estado ?></td>
-              </tr>
-              <?php endforeach; ?>
-            </tbody>
-          </table>
+          <div class="table-responsive-sm"><!-- scroll solo en ≤576px si hace falta -->
+            <table class="table table-bordered table-striped table-sm mb-0 align-middle">
+              <thead class="table-dark">
+                <tr>
+                  <th>Sucursal</th>
+                  <!-- Oculto en móvil -->
+                  <th class="d-none d-sm-table-cell">Zona</th>
+                  <!-- Oculto en móvil -->
+                  <th class="d-none d-sm-table-cell">Unidades</th>
+                  <th>Cuota Unid.</th>
+                  <th class="w-120">Ventas $</th>
+                  <th>Cuota $</th>
+                  <th>% Cumpl.</th>
+                </tr>
+              </thead>
+              <tbody>
+                <?php foreach ($sucursales as $s): 
+                  $fila  = badgeFila($s['cumplimiento']);
+                  $estado= $s['cumplimiento']>=100?"✅":($s['cumplimiento']>=60?"⚠️":"❌");
+                ?>
+                <tr class="<?= $fila ?>">
+                  <!-- Nombre completo en móvil (sin elipsis) -->
+                  <td class="clip suc-name" title="<?= htmlspecialchars($s['sucursal']) ?>"><?= htmlspecialchars($s['sucursal']) ?></td>
+                  <!-- Oculto en móvil -->
+                  <td class="d-none d-sm-table-cell"><?= htmlspecialchars($s['zona'] ?: 'Sin zona') ?></td>
+                  <!-- Oculto en móvil -->
+                  <td class="d-none d-sm-table-cell num"><?= (int)$s['unidades'] ?></td>
+                  <td class="num"><?= (int)$s['cuota_unidades'] ?></td>
+                  <td class="num">$<?= number_format($s['ventas'],2) ?></td>
+                  <td class="num">$<?= number_format($s['cuota_monto'],2) ?></td>
+                  <td class="num"><?= round($s['cumplimiento'],1) ?>% <?= $estado ?></td>
+                </tr>
+                <?php endforeach; ?>
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
     </div>
 
-    <!-- Ejecutivos -->
+    <!-- Ejecutivos + Gerentes -->
     <div class="tab-pane fade show active" id="tab-ej" role="tabpanel">
       <div class="card shadow mt-3">
         <div class="card-header bg-dark text-white">Productividad mensual por Ejecutivo</div>
         <div class="card-body p-0">
-          <table class="table table-striped table-bordered table-sm mb-0">
-            <thead class="table-dark">
-              <tr>
-                <th>Ejecutivo</th>
-                <th>Sucursal</th>
-                <th>Unidades</th>
-                <th>Ventas $</th>
-                <th>Cuota Mes (u)</th>
-                <th>% Cumpl. (Unid.)</th>
-                <th>Progreso</th>
-              </tr>
-            </thead>
-            <tbody>
-              <?php foreach ($ejecutivos as $e):
-                $pct = $e['cumpl_uni'];
-                $pctRound = ($pct===null) ? null : round($pct,1);
-                $fila = badgeFila($pct);
-                $barClass = ($pct===null) ? 'bg-secondary' : ($pct>=100?'bg-success':($pct>=60?'bg-warning':'bg-danger'));
-              ?>
-              <tr class="<?= $fila ?>">
-                <td><?= htmlspecialchars($e['nombre']) ?></td>
-                <td><?= htmlspecialchars($e['sucursal']) ?></td>
-                <td><?= (int)$e['unidades'] ?></td>
-                <td>$<?= number_format($e['ventas'],2) ?></td>
-                <td><?= number_format($e['cuota_unidades'],2) ?></td>
-                <td><?= $pct===null ? '–' : ($pctRound.'%') ?></td>
-                <td style="min-width:160px">
-                  <div class="progress">
-                    <div class="progress-bar <?= $barClass ?>" role="progressbar"
-                         style="width: <?= $pct===null? 0 : min(100,$pctRound) ?>%">
-                         <?= $pct===null ? 'Sin cuota' : ($pctRound.'%') ?>
+          <div class="table-responsive-sm">
+            <table class="table table-striped table-bordered table-sm mb-0 align-middle">
+              <thead class="table-dark">
+                <tr>
+                  <th>Ejecutivo</th>
+                  <th>Sucursal</th>
+                  <th>Unidades</th>
+                  <!-- Oculto en móvil -->
+                  <th class="d-none d-sm-table-cell">Ventas $</th>
+                  <th>Cuota Mes (u)</th>
+                  <th>% Cumpl. (Unid.)</th>
+                  <!-- Oculto en móvil -->
+                  <th class="d-none d-sm-table-cell">Progreso</th>
+                </tr>
+              </thead>
+              <tbody>
+                <?php foreach ($ejecutivos as $e):
+                  $pct = $e['cumpl_uni'];
+                  $pctRound = ($pct===null) ? null : round($pct,1);
+                  $fila = badgeFila($pct);
+                  $barClass = ($pct===null) ? 'bg-secondary' : ($pct>=100?'bg-success':($pct>=60?'bg-warning':'bg-danger'));
+                ?>
+                <tr class="<?= $fila ?>">
+                  <td class="clip" title="<?= htmlspecialchars($e['nombre']) ?>"><?= htmlspecialchars($e['nombre']) ?></td>
+                  <td class="clip" title="<?= htmlspecialchars($e['sucursal']) ?>"><?= htmlspecialchars($e['sucursal']) ?></td>
+                  <td class="num"><?= (int)$e['unidades'] ?></td>
+                  <!-- Oculto en móvil -->
+                  <td class="d-none d-sm-table-cell num">$<?= number_format($e['ventas'],2) ?></td>
+                  <td class="num"><?= number_format($e['cuota_unidades'],2) ?></td>
+                  <td class="num"><?= $pct===null ? '–' : ($pctRound.'%') ?></td>
+                  <!-- Oculto en móvil -->
+                  <td class="d-none d-sm-table-cell" style="min-width:160px">
+                    <div class="progress">
+                      <div class="progress-bar <?= $barClass ?>" role="progressbar"
+                           style="width: <?= $pct===null? 0 : min(100,$pctRound) ?>%">
+                           <?= $pct===null ? 'Sin cuota' : ($pctRound.'%') ?>
+                      </div>
                     </div>
-                  </div>
-                </td>
-              </tr>
-              <?php endforeach; ?>
-            </tbody>
-          </table>
+                  </td>
+                </tr>
+                <?php endforeach; ?>
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
     </div>
@@ -521,7 +514,6 @@ foreach ($weeklySeries as $sucursalNombre => $serie) {
   </div>
 </div>
 
-<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script> -->
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script>
 // Datos para la gráfica mensual por semanas
@@ -533,7 +525,7 @@ new Chart(document.getElementById('chartMensualSemanas').getContext('2d'), {
   data: { labels: labelsSemanas, datasets: datasetsMonth },
   options: {
     responsive: true,
-    maintainAspectRatio: false, // usa la altura del contenedor (220px)
+    maintainAspectRatio: false,
     interaction: { mode: 'index', intersect: false },
     plugins: { title: { display: false }, legend: { position: 'bottom' } },
     scales: { y: { beginAtZero: true, title: { display: true, text: 'Unidades' } } }
