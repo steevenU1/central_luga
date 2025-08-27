@@ -12,7 +12,9 @@ $idUsuario         = (int)($_SESSION['id_usuario'] ?? 0);
 $rolUsuario        = $_SESSION['rol'] ?? '';
 $whereSucursal     = "id_sucursal_destino = $idSucursalUsuario";
 
-$mensaje = "";
+$mensaje    = "";
+$acuseUrl   = "";    // ← URL del acuse (solo recibidos)
+$acuseReady = false; // ← bandera para abrir modal auto
 
 /* -----------------------------------------------------------
    Utilidades
@@ -144,8 +146,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['procesar_traspaso']))
 
                 $conn->commit();
 
+                // ===== Preparar ACUSE (solo recibidos) =====
+                // Preferimos filtrar por "scope=recibidos" usando detalle_traspaso.resultado.
+                // Además enviamos "ids" como respaldo por si aún no agregas esa columna/consulta.
+                if ($ok > 0) {
+                    $idsCsv    = implode(',', array_map('intval', $marcados));
+                    $acuseUrl  = "acuse_traspaso.php?id={$idTraspaso}&scope=recibidos&ids=" . urlencode($idsCsv) . "&print=1";
+                    $acuseReady= true;
+                }
+
                 $mensaje = "<div class='alert alert-success mt-3'>
                     ✅ Traspaso #".h($idTraspaso)." procesado. Recibidos: <b>".h($ok)."</b> · Rechazados: <b>".h($rej)."</b> · Estatus: <b>".h($estatus)."</b>.
+                    ".($ok>0 ? "<div class='small text-muted mt-1'>Se abrirá un acuse con los equipos <b>recibidos</b>.</div>" : "")."
                 </div>";
             } catch (Throwable $e) {
                 $conn->rollback();
@@ -198,7 +210,7 @@ $stRes->close();
 <html lang="es">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1"> <!-- ✅ Responsive navbar/layout -->
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Traspasos Pendientes</title>
   <link rel="icon" type="image/x-icon" href="./img/favicon.ico">
 
@@ -217,8 +229,6 @@ $stRes->close();
         radial-gradient(1200px 420px at -10% 120%, rgba(25,135,84,.06), transparent),
         #f8fafc;
     }
-
-    /* 🔧 Ajuste del NAVBAR para móvil (sin tocar navbar.php) */
     #topbar, .navbar-luga{ font-size:16px; }
     @media (max-width:576px){
       #topbar, .navbar-luga{
@@ -226,16 +236,8 @@ $stRes->close();
         --brand-font:1.0em; --nav-font:.95em; --drop-font:.95em; --icon-em:1.05em;
         --pad-y:.44em; --pad-x:.62em;
       }
-      #topbar .navbar-brand img, .navbar-luga .navbar-brand img{ width:1.9em; height:1.9em; }
-      #topbar .navbar-toggler, .navbar-luga .navbar-toggler{ padding:.45em .7em; }
-      #topbar .nav-avatar, #topbar .nav-initials,
-      .navbar-luga .nav-avatar, .navbar-luga .nav-initials{ width:2.1em; height:2.1em; }
-    }
-    @media (max-width:360px){
-      #topbar, .navbar-luga{ font-size:15px; }
     }
 
-    /* Encabezado moderno */
     .page-head{
       border:0; border-radius:1rem;
       background: linear-gradient(135deg, #22c55e 0%, #0ea5e9 55%, #6366f1 100%);
@@ -252,20 +254,16 @@ $stRes->close();
       color:#fff; padding:.35rem .6rem; border-radius:999px; font-weight:600;
     }
 
-    /* Cards stats */
     .card-elev{
       border:0; border-radius:1rem;
       box-shadow:0 10px 28px rgba(2,8,20,.06), 0 2px 8px rgba(2,8,20,.05);
     }
-    .stat{
-      display:flex; align-items:center; gap:.75rem;
-    }
+    .stat{ display:flex; align-items:center; gap:.75rem; }
     .stat .bubble{
       width:42px; height:42px; display:grid; place-items:center;
       border-radius:12px; background:#eef2ff; color:#312e81;
     }
 
-    /* Sección traspaso */
     .card-header-gradient{
       background: linear-gradient(135deg,#0f172a 0%,#111827 100%);
       color:#fff; border-top-left-radius:1rem; border-top-right-radius:1rem;
@@ -283,6 +281,10 @@ $stRes->close();
     .btn-confirm:hover{ filter:brightness(.98); }
 
     .chk-cell{ width:72px; text-align:center }
+
+    /* Modal acuse */
+    .modal-xxl { max-width: 1200px; }
+    #frameAcuse{ width:100%; min-height:72vh; border:0; background:#fff; }
   </style>
 </head>
 <body class="bg-light">
@@ -458,13 +460,55 @@ $stRes->close();
   <?php endif; ?>
 </div>
 
-<!-- Si tu navbar ya importa Bootstrap JS, puedes omitir esto -->
-<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
+<!-- Modal ACUSE (iframe) -->
+<div class="modal fade" id="modalAcuse" tabindex="-1" aria-hidden="true" data-bs-backdrop="static">
+  <div class="modal-dialog modal-xxl modal-dialog-centered modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-file-earmark-text me-2"></i>Acuse de recepción</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+      </div>
+      <div class="modal-body p-0">
+        <iframe id="frameAcuse" src="about:blank"></iframe>
+      </div>
+      <div class="modal-footer">
+        <button type="button" id="btnOpenAcuse" class="btn btn-outline-secondary">
+          <i class="bi bi-box-arrow-up-right me-1"></i> Abrir en pestaña
+        </button>
+        <button type="button" id="btnPrintAcuse" class="btn btn-primary">
+          <i class="bi bi-printer me-1"></i> Reimprimir
+        </button>
+        <button type="button" class="btn btn-dark" data-bs-dismiss="modal">Cerrar</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- JS Bootstrap (necesario para Modals) -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 function toggleAll(idT, checked){
   document.querySelectorAll('.chk-item-' + idT).forEach(el => el.checked = checked);
   const master = document.getElementById('chk_all_' + idT);
   if (master) master.checked = checked;
+}
+
+// ===== Modal ACUSE: auto-apertura posterior al procesamiento =====
+const ACUSE_URL   = <?= json_encode($acuseUrl, JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE) ?>;
+const ACUSE_READY = <?= $acuseReady ? 'true' : 'false' ?>;
+
+if (ACUSE_READY && ACUSE_URL) {
+  const modalAcuse = new bootstrap.Modal(document.getElementById('modalAcuse'));
+  const frame = document.getElementById('frameAcuse');
+  frame.src = ACUSE_URL; // incluye &print=1 → acuse_traspaso.php debería disparar window.print() internamente
+  frame.addEventListener('load', () => { try { frame.contentWindow.focus(); } catch(e){} });
+  modalAcuse.show();
+
+  document.getElementById('btnOpenAcuse').onclick  = () => window.open(ACUSE_URL, '_blank', 'noopener');
+  document.getElementById('btnPrintAcuse').onclick = () => {
+    try { frame.contentWindow.focus(); frame.contentWindow.print(); }
+    catch(e){ window.open(ACUSE_URL, '_blank', 'noopener'); }
+  };
 }
 </script>
 </body>

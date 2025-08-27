@@ -1,57 +1,118 @@
 <?php
+// traspaso_nuevo.php — Traspaso entre sucursales (origen = sucursal actual; destino = otra sucursal o Eulalia)
+// Versión con modal de ACUSE auto-impreso al generar el traspaso
 session_start();
 if (!isset($_SESSION['id_usuario'])) {
     header("Location: index.php");
     exit();
 }
 
-include 'db.php';
+require_once __DIR__.'/db.php';
+date_default_timezone_set('America/Mexico_City');
 
-$idUsuario  = (int)$_SESSION['id_usuario'];
-$idSucursal = (int)$_SESSION['id_sucursal'];
-$mensaje = "";
+$idUsuario   = (int)($_SESSION['id_usuario'] ?? 0);
+$idSucursal  = (int)($_SESSION['id_sucursal'] ?? 0);
+$nombreUser  = trim($_SESSION['nombre'] ?? 'Usuario');
+
+$mensaje     = "";
+$acuseUrl    = "";   // ← URL del acuse a cargar en el modal (con print=1)
+$acuseReady  = false; // ← flag para disparar el modal en el front
+
+// Helper seguro
+function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 
 /* =========================
-   Procesar traspaso (igual)
+   Procesar traspaso (POST)
 ========================= */
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['equipos']) && isset($_POST['sucursal_destino'])) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['equipos'], $_POST['sucursal_destino'])) {
     $sucursalDestino = (int)$_POST['sucursal_destino'];
-    $equiposSeleccionados = $_POST['equipos'];
+    $equiposSeleccionados = is_array($_POST['equipos']) ? $_POST['equipos'] : [];
 
     if ($sucursalDestino <= 0) {
         $mensaje = "<div class='alert alert-warning card-surface mt-3'>Selecciona una sucursal destino.</div>";
+    } elseif ($sucursalDestino === $idSucursal) {
+        $mensaje = "<div class='alert alert-warning card-surface mt-3'>El destino no puede ser la misma sucursal de origen.</div>";
     } elseif (!empty($equiposSeleccionados)) {
-        // 1) Insertar traspaso
-        $stmt = $conn->prepare("INSERT INTO traspasos (id_sucursal_origen, id_sucursal_destino, fecha_traspaso, estatus, usuario_creo)
-                                VALUES (?, ?, NOW(), 'Pendiente', ?)");
-        $stmt->bind_param("iii", $idSucursal, $sucursalDestino, $idUsuario);
-        $stmt->execute();
-        $idTraspaso = $stmt->insert_id;
-        $stmt->close();
+        // Normalizar IDs
+        $idsInv = array_values(array_unique(array_map('intval', $equiposSeleccionados)));
 
-        // 2) Detalle y actualizar inventario
-        $stmtDetalle  = $conn->prepare("INSERT INTO detalle_traspaso (id_traspaso, id_inventario) VALUES (?, ?)");
-        $stmtUpdateInv= $conn->prepare("UPDATE inventario SET estatus='En tránsito' WHERE id=?");
+        if (count($idsInv) === 0) {
+            $mensaje = "<div class='alert alert-warning card-surface mt-3'>⚠️ Debes seleccionar al menos un equipo.</div>";
+        } else {
+            $conn->begin_transaction();
+            try {
+                // Validar que TODOS siguen en la sucursal origen y 'Disponible'
+                $placeholders = implode(',', array_fill(0, count($idsInv), '?'));
+                $typesIds     = str_repeat('i', count($idsInv));
+                $sqlVal = "
+                  SELECT i.id
+                  FROM inventario i
+                  WHERE i.id_sucursal=? AND i.estatus='Disponible' AND i.id IN ($placeholders)
+                ";
+                $stmtVal = $conn->prepare($sqlVal);
+                $typesFull = 'i' . $typesIds;
+                $stmtVal->bind_param($typesFull, $idSucursal, ...$idsInv);
+                $stmtVal->execute();
+                $rsVal = $stmtVal->get_result();
+                $validos = [];
+                while ($r = $rsVal->fetch_assoc()) $validos[] = (int)$r['id'];
+                $stmtVal->close();
 
-        foreach ($equiposSeleccionados as $idInventario) {
-            $idInventario = (int)$idInventario;
-            $stmtDetalle->bind_param("ii", $idTraspaso, $idInventario);
-            $stmtDetalle->execute();
-            $stmtUpdateInv->bind_param("i", $idInventario);
-            $stmtUpdateInv->execute();
+                if (count($validos) !== count($idsInv)) {
+                    $conn->rollback();
+                    $mensaje = "<div class='alert alert-danger card-surface mt-3'>Algunos equipos ya no están disponibles en esta sucursal o cambiaron de estatus. Refresca e intenta de nuevo.</div>";
+                } else {
+                    // 1) Cabecera (Pendiente)
+                    $stmtCab = $conn->prepare("
+                        INSERT INTO traspasos (id_sucursal_origen, id_sucursal_destino, fecha_traspaso, estatus, usuario_creo)
+                        VALUES ( ?, ?, NOW(), 'Pendiente', ? )
+                    ");
+                    $stmtCab->bind_param("iii", $idSucursal, $sucursalDestino, $idUsuario);
+                    $stmtCab->execute();
+                    $idTraspaso = (int)$stmtCab->insert_id;
+                    $stmtCab->close();
+
+                    // 2) Detalle + actualizar inventario a “En tránsito” (blindando origen + estatus)
+                    $stmtDet = $conn->prepare("INSERT INTO detalle_traspaso (id_traspaso, id_inventario) VALUES (?, ?)");
+                    $stmtUpd = $conn->prepare("UPDATE inventario SET estatus='En tránsito' WHERE id=? AND id_sucursal=? AND estatus='Disponible'");
+
+                    foreach ($validos as $idInv) {
+                        $stmtDet->bind_param("ii", $idTraspaso, $idInv);
+                        $stmtDet->execute();
+
+                        $stmtUpd->bind_param("ii", $idInv, $idSucursal);
+                        $stmtUpd->execute();
+                        if ($stmtUpd->affected_rows !== 1) {
+                            throw new Exception("Fallo al actualizar inventario #$idInv");
+                        }
+                    }
+                    $stmtDet->close();
+                    $stmtUpd->close();
+
+                    $conn->commit();
+
+                    // Preparar el modal del ACUSE (con auto-print en el iframe)
+                    $acuseUrl   = "acuse_traspaso.php?id={$idTraspaso}&print=1";
+                    $acuseReady = true;
+
+                    // Mensaje (dejamos como info secundaria)
+                    $mensaje = "<div class='alert alert-success card-surface mt-3'>
+                        ✅ <strong>Traspaso #{$idTraspaso}</strong> generado. Los equipos ahora están <b>En tránsito</b>.
+                        <div class='small text-muted mt-1'>El acuse se abrirá en un cuadro de vista previa para imprimir.</div>
+                    </div>";
+                }
+            } catch (Throwable $e) {
+                $conn->rollback();
+                $mensaje = "<div class='alert alert-danger card-surface mt-3'>Error al generar traspaso: ".h($e->getMessage())."</div>";
+            }
         }
-
-        $stmtDetalle->close();
-        $stmtUpdateInv->close();
-
-        $mensaje = "<div class='alert alert-success card-surface mt-3'>✅ Traspaso #$idTraspaso generado correctamente. Los equipos seleccionados ahora están en tránsito.</div>";
     } else {
         $mensaje = "<div class='alert alert-warning card-surface mt-3'>⚠️ Debes seleccionar al menos un equipo.</div>";
     }
 }
 
 /* =========================
-   Sucursales destino
+   Sucursales destino (todas menos origen)
 ========================= */
 $sqlSucursales = "SELECT id, nombre FROM sucursales WHERE id != ? ORDER BY nombre";
 $stmtSuc = $conn->prepare($sqlSucursales);
@@ -61,14 +122,14 @@ $sucursales = $stmtSuc->get_result()->fetch_all(MYSQLI_ASSOC);
 $stmtSuc->close();
 
 /* =========================
-   Inventario disponible
+   Inventario disponible en origen
 ========================= */
 $sqlInventario = "
     SELECT i.id, p.marca, p.modelo, p.color, p.capacidad, p.imei1, p.imei2
     FROM inventario i
     INNER JOIN productos p ON p.id = i.id_producto
     WHERE i.id_sucursal = ? AND i.estatus = 'Disponible'
-    ORDER BY p.marca, p.modelo
+    ORDER BY p.marca, p.modelo, i.id ASC
 ";
 $stmtInv = $conn->prepare($sqlInventario);
 $stmtInv->bind_param("i", $idSucursal);
@@ -78,8 +139,6 @@ $inventario  = $resInv->fetch_all(MYSQLI_ASSOC);
 $stmtInv->close();
 
 $totalDisponibles = count($inventario);
-
-function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 ?>
 <!DOCTYPE html>
 <html lang="es" data-bs-theme="light">
@@ -87,7 +146,7 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
   <meta charset="UTF-8">
   <title>Nuevo Traspaso</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
   <style>
     :root{ --surface:#ffffff; --muted:#6b7280; }
@@ -96,8 +155,6 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
     .page-title{ font-weight:700; letter-spacing:.2px; margin:0; }
     .small-muted{ color:var(--muted); font-size:.92rem; }
     .card-surface{ background:var(--surface); border:1px solid rgba(0,0,0,.05); box-shadow:0 6px 16px rgba(16,24,40,.06); border-radius:18px; }
-    .stat{ display:flex; align-items:center; gap:.75rem; }
-    .stat .icon{ width:40px; height:40px; border-radius:12px; display:grid; place-items:center; background:#eef2ff; }
     .chip{ display:inline-flex; align-items:center; gap:.4rem; padding:.25rem .6rem; border-radius:999px; font-weight:600; font-size:.85rem; border:1px solid transparent; }
     .chip-info{ background:#e8f0fe; color:#1a56db; border-color:#cbd8ff; }
     .chip-success{ background:#e7f8ef; color:#0f7a3d; border-color:#b7f1cf; }
@@ -107,22 +164,26 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
     .tbl-wrap{ overflow:auto; border-radius:14px; }
     .table thead th{ position:sticky; top:0; z-index:1; }
     .row-selected{ background:#f3f6ff !important; }
+
+    /* Modal acuse */
+    .modal-xxl { max-width: 1200px; }
+    #frameAcuse{ width:100%; min-height:72vh; border:0; background:#fff; }
   </style>
 </head>
 <body>
 
-<?php include 'navbar.php'; ?>
+<?php include __DIR__.'/navbar.php'; ?>
 
 <div class="container py-3">
   <!-- Encabezado -->
   <div class="page-header">
     <div>
       <h1 class="page-title">🚚 Generar Traspaso de Equipos</h1>
-      <div class="small-muted">Sucursal origen: <strong>#<?= (int)$idSucursal ?></strong></div>
+      <div class="small-muted">Sucursal origen: <strong>#<?= (int)$idSucursal ?></strong> &middot; Usuario: <strong><?= h($nombreUser) ?></strong></div>
     </div>
     <div class="d-flex align-items-center gap-2 flex-wrap">
-      <span class="chip chip-info"><i class="bi bi-box-seam"></i> Disponibles: <?= (int)$totalDisponibles ?></span>
-      <span class="chip chip-success"><i class="bi bi-check2-circle"></i> Seleccionados: <span id="chipSel">0</span></span>
+      <span class="chip chip-info"><i class="bi bi-box-seam me-1"></i> Disponibles: <?= (int)$totalDisponibles ?></span>
+      <span class="chip chip-success"><i class="bi bi-check2-circle me-1"></i> Seleccionados: <span id="chipSel">0</span></span>
     </div>
   </div>
 
@@ -174,9 +235,7 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
               <?php if ($totalDisponibles > 0): ?>
                 <?php foreach ($inventario as $row): ?>
                   <tr data-id="<?= (int)$row['id'] ?>">
-                    <td>
-                      <input type="checkbox" name="equipos[]" value="<?= (int)$row['id'] ?>" class="chk-equipo">
-                    </td>
+                    <td><input type="checkbox" name="equipos[]" value="<?= (int)$row['id'] ?>" class="chk-equipo"></td>
                     <td class="td-id"><?= (int)$row['id'] ?></td>
                     <td class="td-marca"><?= h($row['marca']) ?></td>
                     <td class="td-modelo"><?= h($row['modelo']) ?></td>
@@ -204,7 +263,7 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
           <div class="modal-dialog modal-lg modal-dialog-centered">
             <div class="modal-content">
               <div class="modal-header">
-                <h5 class="modal-title"><i class="bi bi-exclamation-triangle me-2"></i>Confirmar traspaso</h5>
+                <h5 class="modal-title"><i class="bi bi-check2-square me-2"></i>Confirmar traspaso</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
               </div>
               <div class="modal-body">
@@ -227,7 +286,7 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
               <div class="modal-footer">
                 <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
                 <button type="submit" class="btn btn-primary">
-                  <i class="bi bi-check2-circle"></i> Generar traspaso
+                  <i class="bi bi-send-check"></i> Generar traspaso
                 </button>
               </div>
             </div>
@@ -259,20 +318,47 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
         </div>
         <div class="card-footer d-flex justify-content-between align-items-center">
           <small class="text-muted" id="miniDestino">Destino: —</small>
-          <button class="btn btn-soft btn-sm" id="btnAbrirModal">Confirmar (0)</button>
+          <button type="button" class="btn btn-soft btn-sm" id="btnAbrirModal" disabled>Confirmar (0)</button>
         </div>
       </div>
     </div>
   </div>
 </div>
 
+<!-- Modal ACUSE (iframe) -->
+<div class="modal fade" id="modalAcuse" tabindex="-1" aria-hidden="true" data-bs-backdrop="static">
+  <div class="modal-dialog modal-xxl modal-dialog-centered modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-file-earmark-text me-2"></i>Acuse de entrega</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+      </div>
+      <div class="modal-body p-0">
+        <iframe id="frameAcuse" src="about:blank"></iframe>
+      </div>
+      <div class="modal-footer">
+        <button type="button" id="btnOpenAcuse" class="btn btn-outline-secondary">
+          <i class="bi bi-box-arrow-up-right me-1"></i> Abrir en pestaña
+        </button>
+        <button type="button" id="btnPrintAcuse" class="btn btn-primary">
+          <i class="bi bi-printer me-1"></i> Reimprimir
+        </button>
+        <button type="button" class="btn btn-dark" data-bs-dismiss="modal">Cerrar</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- JS -->
-<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script> -->
+<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
 <script>
+// Helpers front
 const norm = s => (s||'').toString().toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu,'');
-const buscar = document.getElementById('buscarIMEI');
-const tabla  = document.getElementById('tablaInventario');
-const rows   = Array.from(tabla.querySelectorAll('tbody tr'));
+function esc(s){return (s??'').toString().replace(/[&<>"']/g,m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
+
+const buscar   = document.getElementById('buscarIMEI');
+const tabla    = document.getElementById('tablaInventario');
+const rows     = Array.from(tabla.querySelectorAll('tbody tr'));
 const checkAll = document.getElementById('checkAll');
 const chipSel  = document.getElementById('chipSel');
 const badgeSel = document.getElementById('badgeCount');
@@ -280,7 +366,7 @@ const btnModal = document.getElementById('btnAbrirModal');
 const miniDest = document.getElementById('miniDestino');
 const selDest  = document.getElementById('sucursal_destino');
 
-// Búsqueda rápida (front)
+// Búsqueda rápida
 function applyFilter(){
   const q = norm(buscar.value);
   let visibles = 0, visiblesChecked = 0;
@@ -292,13 +378,12 @@ function applyFilter(){
       if (tr.querySelector('.chk-equipo').checked) visiblesChecked++;
     }
   });
-  // checkAll refleja estado visible
   checkAll.indeterminate = visiblesChecked>0 && visiblesChecked<visibles;
   checkAll.checked = visibles>0 && visiblesChecked===visibles;
 }
 buscar?.addEventListener('input', applyFilter);
 
-// Seleccionar todos (solo visibles)
+// Seleccionar todos (visibles)
 checkAll?.addEventListener('change', () => {
   const q = norm(buscar.value);
   rows.forEach(tr => {
@@ -312,7 +397,7 @@ checkAll?.addEventListener('change', () => {
   rebuildSelection();
 });
 
-// Toggle por fila
+// Toggle por fila / checkbox
 rows.forEach(tr => {
   const chk = tr.querySelector('.chk-equipo');
   tr.addEventListener('click', (e) => {
@@ -343,10 +428,10 @@ function rebuildSelection(){
       const imei   = tr.querySelector('.td-imei1').textContent.trim();
       const row = document.createElement('tr');
       row.innerHTML = `
-        <td>${id}</td>
-        <td>${marca} ${modelo}</td>
-        <td class="font-monospace">${imei}</td>
-        <td class="text-end"><button type="button" class="btn btn-sm btn-outline-danger" data-id="${id}"><i class="bi bi-x"></i></button></td>
+        <td>${esc(id)}</td>
+        <td>${esc(marca)} ${esc(modelo)}</td>
+        <td class="font-monospace">${esc(imei)}</td>
+        <td class="text-end"><button type="button" class="btn btn-sm btn-outline-danger" data-id="${esc(id)}"><i class="bi bi-x"></i></button></td>
       `;
       tbody.appendChild(row);
       count++;
@@ -355,15 +440,16 @@ function rebuildSelection(){
   chipSel.textContent  = count;
   badgeSel.textContent = count;
   btnModal.textContent = `Confirmar (${count})`;
+  btnModal.disabled    = (count === 0);
 }
 document.querySelector('#tablaSeleccion tbody').addEventListener('click', (e) => {
-  if (e.target.closest('button[data-id]')) {
-    const id = e.target.closest('button').getAttribute('data-id');
-    const chk = document.querySelector(`.chk-equipo[value="${id}"]`);
-    if (chk){ chk.checked = false; chk.closest('tr').classList.remove('row-selected'); }
-    rebuildSelection();
-    applyFilter();
-  }
+  const btn = e.target.closest('button[data-id]');
+  if (!btn) return;
+  const id = btn.getAttribute('data-id');
+  const chk = document.querySelector(`.chk-equipo[value="${CSS.escape(id)}"]`);
+  if (chk){ chk.checked = false; chk.closest('tr').classList.remove('row-selected'); }
+  rebuildSelection();
+  applyFilter();
 });
 
 // Destino mini-label
@@ -392,20 +478,35 @@ function openResumen() {
     const imei1 = tr.querySelector('.td-imei1').textContent.trim();
     const imei2 = tr.querySelector('.td-imei2').textContent.trim();
     const row = document.createElement('tr');
-    row.innerHTML = `<td>${id}</td><td>${h(marca)}</td><td>${h(modelo)}</td><td class="font-monospace">${h(imei1)}</td><td class="font-monospace">${h(imei2)}</td>`;
+    row.innerHTML = `<td>${esc(id)}</td><td>${esc(marca)}</td><td>${esc(modelo)}</td><td class="font-monospace">${esc(imei1)}</td><td class="font-monospace">${esc(imei2)}</td>`;
     tbody.appendChild(row);
   });
 
   modalResumen.show();
 }
-// pequeño helper para escapar en client-side
-function h(s){return (s??'').toString().replace(/[&<>"']/g,m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
-
 document.getElementById('btnAbrirModal').addEventListener('click', openResumen);
 document.getElementById('btnConfirmar').addEventListener('click', openResumen);
 
-// Inicial
-applyFilter();
+// ===== Modal ACUSE: auto-apertura al terminar el traspaso =====
+const ACUSE_URL = <?= json_encode($acuseUrl, JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE) ?>;
+const ACUSE_READY = <?= $acuseReady ? 'true' : 'false' ?>;
+
+if (ACUSE_READY && ACUSE_URL) {
+  const modalAcuse = new bootstrap.Modal(document.getElementById('modalAcuse'));
+  const frame = document.getElementById('frameAcuse');
+  frame.src = ACUSE_URL; // incluye &print=1 → acuse_traspaso.php disparará window.print() dentro del iframe
+  // Fallback: si el navegador bloquea, dejamos botones en el footer
+  frame.addEventListener('load', () => {
+    try { frame.contentWindow.focus(); } catch(e){}
+  });
+  modalAcuse.show();
+
+  // Botones footer
+  document.getElementById('btnOpenAcuse').onclick = () => window.open(ACUSE_URL, '_blank', 'noopener');
+  document.getElementById('btnPrintAcuse').onclick = () => {
+    try { frame.contentWindow.focus(); frame.contentWindow.print(); } catch(e){ window.open(ACUSE_URL, '_blank', 'noopener'); }
+  };
+}
 </script>
 </body>
 </html>

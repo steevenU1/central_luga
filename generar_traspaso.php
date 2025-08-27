@@ -7,7 +7,9 @@ if (!isset($_SESSION['id_usuario']) || !in_array(($_SESSION['rol'] ?? ''), ['Adm
 
 require_once __DIR__.'/db.php';
 
-$mensaje = '';
+$mensaje    = '';
+$acuseUrl   = '';     // URL del acuse con print=1
+$acuseReady = false;  // bandera para disparar el modal en el front
 
 // ===============================
 // 1) Resolver ID de "Eulalia" (Almacén central) de forma tolerante
@@ -114,9 +116,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           $stmtUpd->close();
 
           $conn->commit();
+
+          // URL del acuse (auto-impresión en iframe) + bandera para modal
+          $acuseUrl   = "acuse_traspaso.php?id={$idTraspaso}&print=1";
+          $acuseReady = true;
+
+          // Mensaje de éxito (solo informativo; el modal se abrirá solo)
           $mensaje = "<div class='alert alert-success alert-dismissible fade show shadow-sm' role='alert'>
                         <i class='bi bi-check-circle me-1'></i>
                         <strong>Traspaso #{$idTraspaso}</strong> generado con éxito. Los equipos ahora están <b>En tránsito</b>.
+                        <div class='small text-muted mt-1'>Se abrirá el acuse en una vista previa para imprimir.</div>
                         <button type='button' class='btn-close' data-bs-dismiss='alert' aria-label='Cerrar'></button>
                       </div>";
         }
@@ -194,6 +203,10 @@ while ($row = $resSuc->fetch_assoc()) $sucursales[] = $row;
     .chip{ border:1px solid #e6e9f2; border-radius:999px; padding:.25rem .6rem; background:#fff; font-size:.8rem; }
     .table code{ color:inherit; background:#f8fafc; padding:2px 6px; border-radius:6px; }
     .sticky-aside{ position:sticky; top:92px; }
+
+    /* Modal del acuse */
+    .modal-xxl { max-width: 1200px; }
+    #frameAcuse { width:100%; min-height:72vh; border:0; background:#fff; }
   </style>
 </head>
 <body>
@@ -210,6 +223,11 @@ while ($row = $resSuc->fetch_assoc()) $sucursales[] = $row;
       </div>
     </div>
     <div class="d-flex gap-2">
+      <?php if ($acuseUrl): ?>
+        <a class="btn btn-primary btn-sm" target="_blank" rel="noopener" href="<?= htmlspecialchars($acuseUrl) ?>">
+          <i class="bi bi-printer me-1"></i> Imprimir acuse
+        </a>
+      <?php endif; ?>
       <a class="btn btn-outline-secondary btn-sm" href="traspasos_salientes.php">
         <i class="bi bi-clock-history me-1"></i>Histórico
       </a>
@@ -385,8 +403,32 @@ while ($row = $resSuc->fetch_assoc()) $sucursales[] = $row;
   </div>
 </div>
 
+<!-- Modal ACUSE (iframe) -->
+<div class="modal fade" id="modalAcuse" tabindex="-1" aria-hidden="true" data-bs-backdrop="static">
+  <div class="modal-dialog modal-xxl modal-dialog-centered modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-file-earmark-text me-2"></i>Acuse de entrega</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+      </div>
+      <div class="modal-body p-0">
+        <iframe id="frameAcuse" src="about:blank"></iframe>
+      </div>
+      <div class="modal-footer">
+        <button type="button" id="btnOpenAcuse" class="btn btn-outline-secondary">
+          <i class="bi bi-box-arrow-up-right me-1"></i> Abrir en pestaña
+        </button>
+        <button type="button" id="btnPrintAcuse" class="btn btn-primary">
+          <i class="bi bi-printer me-1"></i> Reimprimir
+        </button>
+        <button type="button" class="btn btn-dark" data-bs-dismiss="modal">Cerrar</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Bootstrap JS (bundle para Modal/Toast/Collapse) -->
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
 
 <script>
 // ------- Filtro -------
@@ -479,6 +521,24 @@ function openResumen(){
 }
 document.getElementById('btnAbrirModal').addEventListener('click', openResumen);
 document.getElementById('btnConfirmar').addEventListener('click', openResumen);
+
+// ===== Modal ACUSE: auto-apertura al terminar el traspaso =====
+const ACUSE_URL = <?= json_encode($acuseUrl, JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE) ?>;
+const ACUSE_READY = <?= $acuseReady ? 'true' : 'false' ?>;
+
+if (ACUSE_READY && ACUSE_URL) {
+  const modalAcuse = new bootstrap.Modal(document.getElementById('modalAcuse'));
+  const frame = document.getElementById('frameAcuse');
+  frame.src = ACUSE_URL; // incluye &print=1 → acuse_traspaso.php disparará window.print() dentro del iframe
+  frame.addEventListener('load', () => { try { frame.contentWindow.focus(); } catch(e){} });
+  modalAcuse.show();
+
+  document.getElementById('btnOpenAcuse').onclick = () => window.open(ACUSE_URL, '_blank', 'noopener');
+  document.getElementById('btnPrintAcuse').onclick = () => {
+    try { frame.contentWindow.focus(); frame.contentWindow.print(); }
+    catch(e){ window.open(ACUSE_URL, '_blank', 'noopener'); }
+  };
+}
 </script>
 </body>
 </html>
