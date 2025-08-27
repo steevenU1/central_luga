@@ -1,5 +1,5 @@
 <?php
-// inventario_retiros.php — LUGA (Eulalia) | UI modernizada + modal resumen + modal detalle (fix DataTables)
+// inventario_retiros.php — Retiros multi-sucursal | UI modernizada + modal resumen + modal detalle (DataTables safe)
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 if (!isset($_SESSION['id_usuario']) || ($_SESSION['rol'] ?? '') !== 'Admin') { header("Location: 403.php"); exit(); }
 
@@ -8,23 +8,48 @@ require_once __DIR__.'/navbar.php';
 
 $idUsuario = (int)($_SESSION['id_usuario'] ?? 0);
 
-// Helper seguro (evita colisiones con otros includes)
+// Helper seguro
 if (!function_exists('h')) { function h($s){ return htmlspecialchars($s ?? '', ENT_QUOTES, 'UTF-8'); } }
 
-// ===== Sucursal Eulalia =====
-$stmt = $conn->prepare("SELECT id, nombre FROM sucursales WHERE nombre = 'Eulalia' LIMIT 1");
-$stmt->execute();
-$res = $stmt->get_result();
-if ($res->num_rows === 0) {
-  echo "<div class='container my-4'><div class='alert alert-danger'>No existe la sucursal 'Eulalia'. Créala primero.</div></div>";
+// ===============================
+// 1) Resolver ID de “Luga Eulalia” (almacén) de forma tolerante
+// ===============================
+$idEulalia = 0; $nombreEulalia = 'Luga Eulalia';
+
+// a) intento exacto con variantes comunes
+if ($st = $conn->prepare("SELECT id,nombre FROM sucursales WHERE LOWER(nombre) IN ('luga eulalia','eulalia') LIMIT 1")) {
+  $st->execute();
+  if ($r = $st->get_result()->fetch_assoc()) { $idEulalia = (int)$r['id']; $nombreEulalia = $r['nombre']; }
+  $st->close();
+}
+// b) fallback por LIKE
+if ($idEulalia <= 0) {
+  $rs = $conn->query("SELECT id,nombre FROM sucursales WHERE LOWER(nombre) LIKE '%eulalia%' ORDER BY LENGTH(nombre) ASC LIMIT 1");
+  if ($rs && ($r = $rs->fetch_assoc())) { $idEulalia = (int)$r['id']; $nombreEulalia = $r['nombre']; }
+}
+if ($idEulalia <= 0) {
+  echo "<div class='container my-4'><div class='alert alert-danger'>No se localizó la sucursal de almacén “Luga Eulalia”. Verifica el catálogo.</div></div>";
   exit();
 }
-$rowE = $res->fetch_assoc();
-$idEulalia = (int)$rowE['id'];
-$nombreEulalia = $rowE['nombre'];
-$stmt->close();
 
-// ===== Alerts =====
+// ===============================
+// 2) Catálogo de sucursales y sucursal seleccionada
+// ===============================
+$sucursales = [];
+$resSuc = $conn->query("SELECT id, nombre FROM sucursales ORDER BY nombre ASC");
+while ($row = $resSuc->fetch_assoc()) $sucursales[] = $row;
+
+$idSucursalSel = (int)($_GET['sucursal'] ?? 0);
+if ($idSucursalSel <= 0) $idSucursalSel = $idEulalia;
+
+// Verifica que exista; si no, vuelve a Eulalia
+$nomSucursalSel = null;
+foreach ($sucursales as $s) { if ((int)$s['id'] === $idSucursalSel) { $nomSucursalSel = $s['nombre']; break; } }
+if (!$nomSucursalSel) { $idSucursalSel = $idEulalia; $nomSucursalSel = $nombreEulalia; }
+
+// ===============================
+// 3) Alerts
+// ===============================
 $mensaje = $_GET['msg'] ?? '';
 $alert   = '';
 if ($mensaje === 'ok') {
@@ -36,7 +61,9 @@ if ($mensaje === 'ok') {
   $alert = "<div class='alert alert-danger my-3'>❌ $err</div>";
 }
 
-// ===== Búsqueda en disponibles de Eulalia =====
+// ===============================
+// 4) Inventario disponible (por sucursal seleccionada)
+// ===============================
 $f_q = trim($_GET['q'] ?? '');
 $params = [];
 $sql = "
@@ -46,7 +73,8 @@ $sql = "
   INNER JOIN productos p ON p.id = inv.id_producto
   WHERE inv.estatus = 'Disponible' AND inv.id_sucursal = ?
 ";
-$params[] = ['i', $idEulalia];
+$params[] = ['i', $idSucursalSel];
+
 if ($f_q !== '') {
   $sql .= " AND (p.marca LIKE ? OR p.modelo LIKE ? OR p.color LIKE ? OR p.capacidad LIKE ? OR p.imei1 LIKE ? OR p.codigo_producto LIKE ?) ";
   $like = "%$f_q%";
@@ -62,7 +90,9 @@ $stmt->execute();
 $itemsDisponibles = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
 $stmt->close();
 
-// ===== Historial (últimos 200 de Eulalia) =====
+// ===============================
+// 5) Historial (últimos 200 por sucursal seleccionada)
+// ===============================
 $h_motivo = $_GET['h_motivo'] ?? '';
 $h_qfolio = trim($_GET['h_folio'] ?? '');
 $h_estado = $_GET['h_estado'] ?? ''; // '', 'vigente', 'revertido'
@@ -78,7 +108,7 @@ $histSql = "
   LEFT JOIN usuarios   u ON u.id = r.id_usuario
   WHERE r.id_sucursal = ?
 ";
-$histParams = [['i', $idEulalia]];
+$histParams = [['i', $idSucursalSel]];
 if ($h_motivo !== '') { $histSql .= " AND r.motivo = ? "; $histParams[] = ['s', $h_motivo]; }
 if ($h_qfolio !== '') { $histSql .= " AND r.folio LIKE ? "; $histParams[] = ['s', "%$h_qfolio%"]; }
 if     ($h_estado === 'vigente')   { $histSql .= " AND r.revertido = 0 "; }
@@ -92,7 +122,9 @@ $stmt->execute();
 $historial = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
 $stmt->close();
 
-// ===== KPIs =====
+// ===============================
+// 6) KPIs
+// ===============================
 $disponibles = count($itemsDisponibles);
 $vigentes = 0; $revertidos = 0; $totalRetirados = 0; $ultimo = '';
 foreach ($historial as $h) {
@@ -101,7 +133,9 @@ foreach ($historial as $h) {
   if ($ultimo === '' && !empty($h['fecha'])) $ultimo = $h['fecha'];
 }
 
-// ===== Preparar templates de detalle (fuera de la tabla) =====
+// ===============================
+// 7) Templates de detalle historial
+// ===============================
 $detailTemplates = [];
 foreach ($historial as $h) {
   ob_start();
@@ -157,7 +191,7 @@ foreach ($historial as $h) {
 <html lang="es">
 <head>
   <meta charset="UTF-8">
-  <title>Retiros de Inventario — Eulalia</title>
+  <title>Retiros de Inventario — <?= h($nomSucursalSel) ?></title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" href="/img/favicon.ico?v=7" sizes="any">
 
@@ -198,15 +232,34 @@ foreach ($historial as $h) {
   <!-- Encabezado -->
   <div class="page-head">
     <div>
-      <h2 class="page-title">📤 Retiros de Inventario — Eulalia</h2>
+      <h2 class="page-title">📤 Retiros de Inventario — <?= h($nomSucursalSel) ?></h2>
       <div class="mt-1"><span class="role-chip">Admin</span></div>
     </div>
     <div class="toolbar">
+      <!-- Selector de sucursal (GET) -->
+      <form method="GET" class="d-flex align-items-center gap-2">
+        <?php
+          // Preservar q / h_motivo / h_estado / h_folio al cambiar sucursal
+          $preserveKeys = ['q','h_motivo','h_estado','h_folio'];
+          foreach ($preserveKeys as $k) {
+            if (isset($_GET[$k])) {
+              echo '<input type="hidden" name="'.h($k).'" value="'.h($_GET[$k]).'">';
+            }
+          }
+        ?>
+        <label class="me-1 small text-muted">Sucursal:</label>
+        <select name="sucursal" class="form-select form-select-sm" onchange="this.form.submit()">
+          <?php foreach ($sucursales as $s): ?>
+            <option value="<?= (int)$s['id'] ?>" <?= ((int)$s['id']===$idSucursalSel)?'selected':'' ?>><?= h($s['nombre']) ?></option>
+          <?php endforeach; ?>
+        </select>
+      </form>
+
       <button class="btn btn-outline-secondary btn-sm rounded-pill" data-bs-toggle="collapse" data-bs-target="#filtrosHist"><i class="bi bi-sliders me-1"></i> Filtros historial</button>
-      <a href="exportar_retiros_eulalia.php?<?= http_build_query($_GET) ?>" class="btn btn-success btn-sm rounded-pill">
+      <a href="exportar_retiros_eulalia.php?<?= http_build_query(array_merge($_GET, ['sucursal'=>$idSucursalSel])) ?>" class="btn btn-success btn-sm rounded-pill">
         <i class="bi bi-file-earmark-spreadsheet me-1"></i> Exportar historial
       </a>
-      <a href="inventario_retiros.php" class="btn btn-light btn-sm rounded-pill border"><i class="bi bi-arrow-counterclockwise me-1"></i> Limpiar</a>
+      <a href="inventario_retiros.php?<?= http_build_query(['sucursal'=>$idSucursalSel]) ?>" class="btn btn-light btn-sm rounded-pill border"><i class="bi bi-arrow-counterclockwise me-1"></i> Limpiar</a>
     </div>
   </div>
 
@@ -222,18 +275,20 @@ foreach ($historial as $h) {
   </div>
 
   <!-- === Form de BÚSQUEDA separado para evitar submit del retiro === -->
-  <form id="searchForm" method="GET"></form>
+  <form id="searchForm" method="GET">
+    <input type="hidden" name="sucursal" value="<?= (int)$idSucursalSel ?>">
+  </form>
 
-  <!-- ===== Nuevo retiro (Eulalia fija) ===== -->
+  <!-- ===== Nuevo retiro (multi-sucursal) ===== -->
   <div class="card mb-4 filters-card">
     <div class="card-header bg-white fw-semibold">Nuevo retiro</div>
     <div class="card-body">
       <form id="formRetiro" action="procesar_retiro.php" method="POST">
-        <input type="hidden" name="id_sucursal" value="<?= $idEulalia ?>">
+        <input type="hidden" name="id_sucursal" value="<?= (int)$idSucursalSel ?>">
         <div class="row g-3">
           <div class="col-md-3">
             <label class="form-label">Sucursal</label>
-            <input type="text" class="form-control" value="<?= h($nombreEulalia) ?>" readonly>
+            <input type="text" class="form-control" value="<?= h($nomSucursalSel) ?>" readonly>
           </div>
           <div class="col-md-3">
             <label class="form-label">Motivo</label>
@@ -317,12 +372,13 @@ foreach ($historial as $h) {
   <!-- ===== Historial ===== -->
   <div class="table-wrap">
     <div class="d-flex justify-content-between align-items-center p-2">
-      <h6 class="m-0">Historial de retiros (últimos 200) — Eulalia</h6>
+      <h6 class="m-0">Historial de retiros (últimos 200) — <?= h($nomSucursalSel) ?></h6>
       <button class="btn btn-outline-secondary btn-sm rounded-pill" data-bs-toggle="collapse" data-bs-target="#filtrosHist"><i class="bi bi-funnel me-1"></i>Filtros</button>
     </div>
 
     <div id="filtrosHist" class="collapse px-2">
       <form method="GET" class="row g-2 mb-3">
+        <input type="hidden" name="sucursal" value="<?= (int)$idSucursalSel ?>">  <!-- preservar sucursal -->
         <div class="col-md-3">
           <label class="form-label">Motivo</label>
           <select name="h_motivo" class="form-select" onchange="this.form.submit()">
@@ -365,45 +421,45 @@ foreach ($historial as $h) {
           </tr>
         </thead>
         <tbody>
-        <?php if (empty($historial)): ?>
-          <tr><td colspan="8" class="text-center text-muted py-4">Sin retiros registrados</td></tr>
-        <?php else: foreach ($historial as $h): ?>
-          <tr>
-            <td><span class="badge bg-dark"><?= h($h['folio']) ?></span></td>
-            <td><?= h($h['fecha']) ?></td>
-            <td><?= h($h['usuario_nombre'] ?? 'N/D') ?></td>
-            <td><?= h($h['motivo']) ?></td>
-            <td><?= h($h['destino'] ?? '') ?></td>
-            <td><strong><?= (int)$h['cantidad'] ?></strong></td>
-            <td>
-              <?php if ((int)$h['revertido'] === 1): ?>
-                <span class="chip"><span class="status-dot dot-gray"></span>Revertido</span><br>
-                <small class="text-muted"><?= h($h['fecha_reversion']) ?></small>
-              <?php else: ?>
-                <span class="chip"><span class="status-dot dot-green"></span>Vigente</span>
-              <?php endif; ?>
-            </td>
-            <td class="d-flex gap-2">
-              <button class="btn btn-outline-primary btn-sm btn-detalle" type="button"
-                      data-id="<?= (int)$h['id'] ?>" data-folio="<?= h($h['folio']) ?>">Detalle</button>
+        <?php if (!empty($historial)): ?>
+          <?php foreach ($historial as $h): ?>
+            <tr>
+              <td><span class="badge bg-dark"><?= h($h['folio']) ?></span></td>
+              <td><?= h($h['fecha']) ?></td>
+              <td><?= h($h['usuario_nombre'] ?? 'N/D') ?></td>
+              <td><?= h($h['motivo']) ?></td>
+              <td><?= h($h['destino'] ?? '') ?></td>
+              <td><strong><?= (int)$h['cantidad'] ?></strong></td>
+              <td>
+                <?php if ((int)$h['revertido'] === 1): ?>
+                  <span class="chip"><span class="status-dot dot-gray"></span>Revertido</span><br>
+                  <small class="text-muted"><?= h($h['fecha_reversion']) ?></small>
+                <?php else: ?>
+                  <span class="chip"><span class="status-dot dot-green"></span>Vigente</span>
+                <?php endif; ?>
+              </td>
+              <td class="d-flex gap-2">
+                <button class="btn btn-outline-primary btn-sm btn-detalle" type="button"
+                        data-id="<?= (int)$h['id'] ?>" data-folio="<?= h($h['folio']) ?>">Detalle</button>
 
-              <?php if ((int)$h['revertido'] === 0): ?>
-                <form action="revertir_retiro.php" method="POST" onsubmit="return confirmarReversion();" class="d-flex gap-1">
-                  <input type="hidden" name="id_retiro" value="<?= (int)$h['id'] ?>">
-                  <input type="hidden" name="id_sucursal" value="<?= $idEulalia ?>">
-                  <input type="text" name="nota_reversion" class="form-control form-control-sm" style="width: 180px;" placeholder="Nota de reversión (opcional)">
-                  <button class="btn btn-warning btn-sm">Revertir</button>
-                </form>
-              <?php endif; ?>
-            </td>
-          </tr>
-        <?php endforeach; endif; ?>
+                <?php if ((int)$h['revertido'] === 0): ?>
+                  <form action="revertir_retiro.php" method="POST" onsubmit="return confirmarReversion();" class="d-flex gap-1">
+                    <input type="hidden" name="id_retiro" value="<?= (int)$h['id'] ?>">
+                    <input type="hidden" name="id_sucursal" value="<?= (int)$idSucursalSel ?>">
+                    <input type="text" name="nota_reversion" class="form-control form-control-sm" style="width: 180px;" placeholder="Nota de reversión (opcional)">
+                    <button class="btn btn-warning btn-sm">Revertir</button>
+                  </form>
+                <?php endif; ?>
+              </td>
+            </tr>
+          <?php endforeach; ?>
+        <?php endif; ?>
         </tbody>
       </table>
     </div>
   </div>
 
-  <!-- ===== Aquí fuera de la tabla imprimimos TODOS los templates de detalle ===== -->
+  <!-- ===== Templates de detalle (historial) ===== -->
   <?php foreach ($detailTemplates as $tpl) { echo $tpl; } ?>
 
 </div>
@@ -418,7 +474,7 @@ foreach ($historial as $h) {
       </div>
       <div class="modal-body">
         <div class="mb-3">
-          <strong>Sucursal:</strong> <?= h($nombreEulalia) ?><br>
+          <strong>Sucursal:</strong> <?= h($nomSucursalSel) ?><br>
           <strong>Motivo:</strong> <span id="resMotivo"></span><br>
           <strong>Destino:</strong> <span id="resDestino"></span><br>
           <strong>Nota:</strong> <span id="resNota"></span>
@@ -472,6 +528,7 @@ foreach ($historial as $h) {
 
 <!-- JS -->
 <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+<!-- Si tu navbar ya importa Bootstrap JS, puedes omitir esta línea -->
 <!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
 
 <!-- DataTables core + addons -->
@@ -554,14 +611,17 @@ foreach ($historial as $h) {
       order: [[ 1, 'desc' ]],
       fixedHeader: true,
       responsive: true,
-      language: { url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/es-ES.json' },
+      language: {
+        url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/es-ES.json',
+        emptyTable: 'Sin retiros registrados'
+      },
       dom: "<'row align-items-center mb-2'<'col-sm-12 col-md-6'B><'col-sm-12 col-md-6'f>>" +
            "tr" +
            "<'row mt-2'<'col-sm-12 col-md-5'i><'col-sm-12 col-md-7'p>>",
       buttons: [
-        { extend: 'csvHtml5',   className: 'btn btn-light btn-sm rounded-pill border', text: '<i class="bi bi-filetype-csv me-1"></i>CSV' },
-        { extend: 'excelHtml5', className: 'btn btn-light btn-sm rounded-pill border', text: '<i class="bi bi-file-earmark-excel me-1"></i>Excel' },
-        { extend: 'colvis',     className: 'btn btn-light btn-sm rounded-pill border', text: '<i class="bi bi-view-list me-1"></i>Columnas' }
+        { extend: 'csvHtml5',   className: 'btn btn-light btn-sm rounded-pill border', text: '<i class=\"bi bi-filetype-csv me-1\"></i>CSV' },
+        { extend: 'excelHtml5', className: 'btn btn-light btn-sm rounded-pill border', text: '<i class=\"bi bi-file-earmark-excel me-1\"></i>Excel' },
+        { extend: 'colvis',     className: 'btn btn-light btn-sm rounded-pill border', text: '<i class=\"bi bi-view-list me-1\"></i>Columnas' }
       ],
       columnDefs: [
         { targets: [0,1,5,6,7], className: 'text-nowrap' }
