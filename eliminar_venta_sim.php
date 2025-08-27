@@ -1,74 +1,111 @@
 <?php
 session_start();
-include 'db.php';
+require_once __DIR__ . '/db.php';
 
 if (!isset($_SESSION['id_usuario'])) {
     header("Location: index.php");
     exit();
 }
 
-$idVenta = intval($_POST['id_venta'] ?? 0);
-$idUsuario = $_SESSION['id_usuario'];
-$rolUsuario = $_SESSION['rol'];
+$idVenta    = (int)($_POST['id_venta'] ?? 0);
+$idUsuario  = (int)($_SESSION['id_usuario'] ?? 0);
+$rolUsuario = $_SESSION['rol'] ?? '';
 
-// 1️⃣ Verificar que la venta SIM exista
-$sqlVenta = "SELECT id, id_usuario, fecha_venta FROM ventas_sims WHERE id=?";
-$stmt = $conn->prepare($sqlVenta);
-$stmt->bind_param("i", $idVenta);
-$stmt->execute();
-$venta = $stmt->get_result()->fetch_assoc();
-$stmt->close();
+if ($idVenta <= 0) {
+    header("Location: historial_ventas_sims.php?msg=" . urlencode("❌ Venta inválida"));
+    exit();
+}
+
+/** Calcula inicio/fin de la semana actual (martes-lunes) */
+function obtenerSemanaActual() : array {
+    $hoy = new DateTime();
+    $n   = (int)$hoy->format('N'); // 1=lun..7=dom
+    $dif = $n - 2;                 // martes=2
+    if ($dif < 0) $dif += 7;
+    $inicio = (new DateTime())->modify("-$dif days")->setTime(0,0,0);
+    $fin    = (clone $inicio)->modify("+6 days")->setTime(23,59,59);
+    return [$inicio, $fin];
+}
+
+/* 1) Cargar venta SIM */
+$st = $conn->prepare("SELECT id, id_usuario, fecha_venta FROM ventas_sims WHERE id=? LIMIT 1");
+$st->bind_param("i", $idVenta);
+$st->execute();
+$venta = $st->get_result()->fetch_assoc();
+$st->close();
 
 if (!$venta) {
-    header("Location: historial_ventas_sims.php?msg=Venta+de+SIM+no+encontrada");
+    header("Location: historial_ventas_sims.php?msg=" . urlencode("❌ Venta de SIM no encontrada"));
     exit();
 }
 
-// 2️⃣ Validar permisos del usuario (Ejecutivo, Gerente, Admin puede eliminar sus propias ventas)
+/* 2) Permisos
+   - Admin: puede eliminar cualquier venta (sin restricción de semana ni dueño)
+   - Otros roles: solo su propia venta y además debe ser de la semana actual
+*/
+$esAdmin = ($rolUsuario === 'Admin');
 $puedeEliminar = false;
-if (in_array($rolUsuario, ['Ejecutivo','Gerente','Admin']) && $venta['id_usuario'] == $idUsuario) {
-    $puedeEliminar = true;
-}
 
-// 3️⃣ Validar si la venta es de la semana actual (martes-lunes)
-$fechaVenta = new DateTime($venta['fecha_venta']);
-$diaSemana = (int)$fechaVenta->format('N'); // 1 (Lunes) - 7 (Domingo)
-$offset = $diaSemana - 2;
-if ($offset < 0) $offset += 7;
-$inicioSemana = new DateTime($venta['fecha_venta']);
-$inicioSemana->modify("-$offset days")->setTime(0, 0, 0);
-$finSemana = clone $inicioSemana;
-$finSemana->modify('+6 days')->setTime(23, 59, 59);
-
-$hoy = new DateTime();
-if (!($hoy >= $inicioSemana && $hoy <= $finSemana)) {
-    header("Location: historial_ventas_sims.php?msg=Solo+puedes+eliminar+ventas+de+la+semana+actual");
-    exit();
+if ($esAdmin) {
+    $puedeEliminar = true; // sin más validaciones
+} else {
+    // Dueño de la venta
+    if ((int)$venta['id_usuario'] === $idUsuario) {
+        // Además: la venta debe pertenecer a la semana actual
+        list($inicioSemana, $finSemana) = obtenerSemanaActual();
+        $fechaVenta = new DateTime($venta['fecha_venta']);
+        if ($fechaVenta >= $inicioSemana && $fechaVenta <= $finSemana) {
+            $puedeEliminar = true;
+        }
+    }
 }
 
 if (!$puedeEliminar) {
-    header("Location: historial_ventas_sims.php?msg=No+tienes+permiso+para+eliminar+esta+venta");
+    header("Location: historial_ventas_sims.php?msg=" . urlencode("❌ No tienes permiso para eliminar esta venta"));
     exit();
 }
 
-// 4️⃣ Obtener los SIMs de la venta
-$sqlSims = "SELECT id_sim FROM detalle_venta_sims WHERE id_venta=?";
-$stmt = $conn->prepare($sqlSims);
-$stmt->bind_param("i", $idVenta);
-$stmt->execute();
-$res = $stmt->get_result();
+/* 3) Operación: devolver SIMs (si los hay) y borrar venta */
+$conn->begin_transaction();
 
-// 5️⃣ Devolver cada SIM al inventario
-while ($row = $res->fetch_assoc()) {
-    $idSim = (int)$row['id_sim'];
-    $conn->query("UPDATE inventario_sims SET estatus='Disponible' WHERE id=$idSim");
+try {
+    // Devolver SIMs al inventario
+    $st = $conn->prepare("SELECT id_sim FROM detalle_venta_sims WHERE id_venta=?");
+    $st->bind_param("i", $idVenta);
+    $st->execute();
+    $res = $st->get_result();
+
+    $upd = $conn->prepare("UPDATE inventario_sims SET estatus='Disponible' WHERE id=?");
+    while ($row = $res->fetch_assoc()) {
+        $idSim = (int)$row['id_sim'];
+        if ($idSim > 0) {
+            $upd->bind_param("i", $idSim);
+            $upd->execute();
+        }
+    }
+    $upd->close();
+    $st->close();
+
+    // Borrar detalle
+    $delDet = $conn->prepare("DELETE FROM detalle_venta_sims WHERE id_venta=?");
+    $delDet->bind_param("i", $idVenta);
+    $delDet->execute();
+    $delDet->close();
+
+    // Borrar venta
+    $delVen = $conn->prepare("DELETE FROM ventas_sims WHERE id=?");
+    $delVen->bind_param("i", $idVenta);
+    $delVen->execute();
+    $delVen->close();
+
+    $conn->commit();
+
+    header("Location: historial_ventas_sims.php?msg=" . urlencode("✅ Venta de SIM eliminada correctamente"));
+    exit();
+
+} catch (Throwable $e) {
+    $conn->rollback();
+    // Opcional: error_log($e->getMessage());
+    header("Location: historial_ventas_sims.php?msg=" . urlencode("❌ Ocurrió un error al eliminar la venta"));
+    exit();
 }
-$stmt->close();
-
-// 6️⃣ Eliminar detalle y venta
-$conn->query("DELETE FROM detalle_venta_sims WHERE id_venta=$idVenta");
-$conn->query("DELETE FROM ventas_sims WHERE id=$idVenta");
-
-// 7️⃣ Redirigir
-header("Location: historial_ventas_sims.php?msg=✅+Venta+de+SIM+eliminada+correctamente");
-exit();

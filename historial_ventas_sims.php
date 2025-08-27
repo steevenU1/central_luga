@@ -330,9 +330,9 @@ foreach ($ventas as $v) {
           <tbody>
             <?php foreach ($ventas as $v): ?>
               <?php
-                $puedeEliminar = in_array($_SESSION['rol'], ['Ejecutivo','Gerente','Admin'], true)
-                                 && (int)$_SESSION['id_usuario'] === (int)$v['id_usuario'];
-                $isEsim = (int)($v['es_esim'] ?? 0) === 1;
+                // ❗Eliminar: solo Admin
+                $puedeEliminar = (($_SESSION['rol'] ?? '') === 'Admin');
+                $isEsim   = (int)($v['es_esim'] ?? 0) === 1;
                 $tipoIcon = $isEsim ? 'bi-sim' : 'bi-sim-fill';
               ?>
               <tr>
