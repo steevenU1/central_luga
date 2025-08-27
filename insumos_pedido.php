@@ -52,23 +52,44 @@ if (!$esTiendaPropia) {
 }
 
 /* ------------------ Periodo seleccionado por el usuario ------------------ */
-$anio = isset($_GET['anio']) ? (int)$_GET['anio'] : (int)date('Y');
-$mes  = isset($_GET['mes'])  ? (int)$_GET['mes']  : (int)date('n');
+// Siempre iniciar en el mes siguiente por defecto
+if (isset($_GET['anio']) && isset($_GET['mes'])) {
+    $anio = (int)$_GET['anio'];
+    $mes  = (int)$_GET['mes'];
+} else {
+    $hoy = new DateTime('now', new DateTimeZone('America/Mexico_City'));
+    $siguiente = (clone $hoy)->modify('first day of next month');
+    $anio = (int)$siguiente->format('Y');
+    $mes  = (int)$siguiente->format('n');
+}
 
 /* ============================================================
-   Utilidades de ventana: últimos 5 días del mes ANTERIOR al
-   periodo solicitado (p.ej. para 09/2025 la ventana es 27-31 de 08/2025)
+   Ventana: 4 días del mes ANTERIOR al periodo solicitado,
+   específicamente los 4 días ANTES de los últimos 2 días del mes.
+   Si el mes anterior termina en N, ventana = [N-5, N-2].
    ============================================================ */
 function obtenerRangoVentana(int $anio, int $mes): array {
   $tz = new DateTimeZone('America/Mexico_City');
   $periodo = DateTime::createFromFormat('Y-n-j', "$anio-$mes-1", $tz);
   if (!$periodo) return ['inicio'=>null,'fin'=>null];
 
+  // Mes anterior al periodo solicitado
   $mesAnterior = (clone $periodo)->modify('first day of previous month');
-  $fin    = (clone $mesAnterior)->modify('last day of this month'); // último día
-  $inicio = (clone $fin)->modify('-4 days');                        // últimos 5 días
 
-  return ['inicio'=>$inicio, 'fin'=>$fin];
+  // Último día del mes anterior (N)
+  $ultimoDiaMesAnterior = (clone $mesAnterior)->modify('last day of this month');
+
+  // Fin de ventana = N - 2 (excluimos los últimos 2 días: N-1 y N)
+  $finVentana = (clone $ultimoDiaMesAnterior)->modify('-2 days');
+
+  // Inicio de ventana = (N - 2) - 3 = N - 5  → 4 días: N-5, N-4, N-3, N-2
+  $inicioVentana = (clone $finVentana)->modify('-3 days');
+
+  // Normalizamos horas
+  $inicioVentana->setTime(0,0,0);
+  $finVentana->setTime(23,59,59);
+
+  return ['inicio' => $inicioVentana, 'fin' => $finVentana];
 }
 
 function ventanaAbiertaParaPeriodo(int $anio, int $mes): bool {
@@ -106,7 +127,7 @@ $ventanaLeyenda      = $ventanaActiva ? "Abierta del $desde al $hasta" : "Estuvo
 $periodoPermitidoTxt = sprintf('%02d/%d', $mesPermitido, $anioPermitido);
 
 /* ============================================================
-   Helpers de límites (¡CORREGIDOS!)
+   Helpers de límites
    ============================================================ */
 function normalizarSubtipo(?string $s): ?string {
   if ($s === null || $s === '') return null;
@@ -340,34 +361,52 @@ $det = $conn->query("
     <strong>Estatus:</strong> <?= htmlspecialchars($estatus) ?>
   </p>
   <p class="text-muted mb-1">
-    <?= htmlspecialchars($ventanaLeyenda) ?> (últimos 5 días del mes anterior).
+    <?= htmlspecialchars($ventanaLeyenda) ?> 
     <?= $ventanaActiva
           ? '<span class="badge bg-success ms-2">Ventana activa</span>'
           : '<span class="badge bg-danger ms-2">Ventana cerrada</span>' ?>
-    <span class="ms-2 text-secondary">Solo puedes capturar para <strong><?= $periodoPermitidoTxt ?></strong>.</span>
+    <span class="ms-2 text-secondary">Periodo permitido por sistema: <strong><?= $periodoPermitidoTxt ?></strong>.</span>
   </p>
 
   <?php if ($msg): ?>
     <div class="alert alert-<?= $msgClass ?>"><?= htmlspecialchars($msg) ?></div>
   <?php endif; ?>
 
-  <form class="row g-2 mb-3" method="get">
+  <form class="row g-2 mb-3 align-items-center" method="get">
     <div class="col-auto">
+      <label class="form-label mb-0 small text-muted">Mes</label>
       <select name="mes" class="form-select">
-        <?php for($m=1;$m<=12;$m++): ?>
-          <option value="<?= $m ?>" <?= $m==$mes?'selected':'' ?>><?= $m ?></option>
+        <?php for($m=1;$m<=12;$m++):
+              $textoMes = (string)$m;
+              // Marcar visualmente el "mes permitido" cuando el año también coincida
+              if ($m === $mesPermitido && $anio === $anioPermitido) {
+                $textoMes .= " (siguiente)";
+              }
+        ?>
+          <option value="<?= $m ?>" <?= $m==$mes?'selected':'' ?>><?= $textoMes ?></option>
         <?php endfor; ?>
       </select>
     </div>
     <div class="col-auto">
+      <label class="form-label mb-0 small text-muted">Año</label>
       <select name="anio" class="form-select">
-        <?php for($a=date('Y')-1;$a<=date('Y')+1;$a++): ?>
-          <option value="<?= $a ?>" <?= $a==$anio?'selected':'' ?>><?= $a ?></option>
+        <?php for($a=date('Y')-1;$a<=date('Y')+1;$a++): 
+              $textoAnio = (string)$a;
+              if ($a === $anioPermitido && $mes === $mesPermitido) {
+                $textoAnio .= " (siguiente)";
+              }
+        ?>
+          <option value="<?= $a ?>" <?= $a==$anio?'selected':'' ?>><?= $textoAnio ?></option>
         <?php endfor; ?>
       </select>
     </div>
     <div class="col-auto">
       <button class="btn btn-outline-primary">Cambiar periodo</button>
+    </div>
+    <div class="col-auto">
+      <span class="badge rounded-pill bg-info text-dark">
+        Periodo permitido: <?= $periodoPermitidoTxt ?>
+      </span>
     </div>
   </form>
 

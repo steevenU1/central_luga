@@ -10,7 +10,6 @@ if (!isset($_SESSION['id_usuario']) || !in_array($_SESSION['rol'], ['Admin'])) {
 }
 
 require_once __DIR__ . '/db.php';
-require_once __DIR__ . '/navbar.php';
 
 $anio = isset($_GET['anio']) ? (int)$_GET['anio'] : (int)date('Y');
 $mes  = isset($_GET['mes'])  ? (int)$_GET['mes']  : (int)date('n');
@@ -23,9 +22,8 @@ $whereSuc = "
 /* ---------- util: headers excel con BOM ---------- */
 function xls_headers($filename)
 {
-  while (ob_get_level()) {
-    ob_end_clean();
-  }
+  // Cerrar cualquier buffer abierto para evitar que haya salida previa
+  while (ob_get_level()) { ob_end_clean(); }
   header("Content-Type: application/vnd.ms-excel; charset=UTF-8");
   header("Content-Disposition: attachment; filename=\"$filename\"");
   header("Pragma: no-cache");
@@ -34,82 +32,84 @@ function xls_headers($filename)
 }
 
 /* =========================================================
-   EXPORTS (antes de cualquier HTML)
+   EXPORTS (antes de cualquier HTML o includes que impriman)
 ========================================================= */
-if (isset($_GET['export'])) {
+$isExport = isset($_GET['export']) ? $_GET['export'] : null;
 
-  if ($_GET['export'] === 'xls_general') {
-    $q = $conn->query("
-      SELECT 
-        COALESCE(cat.nombre,'Sin categoría') AS categoria,
-        c.nombre, c.unidad,
-        SUM(d.cantidad) AS total_cant
-      FROM insumos_pedidos p
-      INNER JOIN insumos_pedidos_detalle d ON d.id_pedido = p.id
-      INNER JOIN insumos_catalogo c ON c.id = d.id_insumo
-      LEFT JOIN insumos_categorias cat ON cat.id = c.id_categoria
-      INNER JOIN sucursales s ON s.id = p.id_sucursal
-      WHERE p.anio = $anio AND p.mes = $mes
-        AND p.estatus IN ('Enviado','Aprobado')
-        AND $whereSuc
-      GROUP BY categoria, c.nombre, c.unidad
-      ORDER BY categoria, c.nombre
-    ");
+if ($isExport === 'xls_general') {
+  $q = $conn->query("
+    SELECT 
+      COALESCE(cat.nombre,'Sin categoría') AS categoria,
+      c.nombre, c.unidad,
+      SUM(d.cantidad) AS total_cant
+    FROM insumos_pedidos p
+    INNER JOIN insumos_pedidos_detalle d ON d.id_pedido = p.id
+    INNER JOIN insumos_catalogo c ON c.id = d.id_insumo
+    LEFT JOIN insumos_categorias cat ON cat.id = c.id_categoria
+    INNER JOIN sucursales s ON s.id = p.id_sucursal
+    WHERE p.anio = $anio AND p.mes = $mes
+      AND p.estatus IN ('Enviado','Aprobado')
+      AND $whereSuc
+    GROUP BY categoria, c.nombre, c.unidad
+    ORDER BY categoria, c.nombre
+  ");
 
-    xls_headers("insumos_concentrado_general_{$anio}_" . sprintf('%02d', $mes) . ".xls");
-    echo "<table border='1'>";
-    echo "<tr><th colspan='4'>Concentrado general — " . sprintf('%02d', $mes) . "/$anio</th></tr>";
-    echo "<tr><th>Categoría</th><th>Insumo</th><th>Unidad</th><th>Cantidad Total</th></tr>";
-    while ($r = $q->fetch_assoc()) {
-      echo "<tr>";
-      echo "<td>" . htmlspecialchars($r['categoria']) . "</td>";
-      echo "<td>" . htmlspecialchars($r['nombre']) . "</td>";
-      echo "<td>" . htmlspecialchars($r['unidad']) . "</td>";
-      echo "<td>" . number_format((float)$r['total_cant'], 2, '.', '') . "</td>";
-      echo "</tr>";
-    }
-    echo "</table>";
-    exit;
+  xls_headers("insumos_concentrado_general_{$anio}_" . sprintf('%02d', $mes) . ".xls");
+  echo "<table border='1'>";
+  echo "<tr><th colspan='4'>Concentrado general — " . sprintf('%02d', $mes) . "/$anio</th></tr>";
+  echo "<tr><th>Categoría</th><th>Insumo</th><th>Unidad</th><th>Cantidad Total</th></tr>";
+  while ($r = $q->fetch_assoc()) {
+    echo "<tr>";
+    echo "<td>" . htmlspecialchars($r['categoria']) . "</td>";
+    echo "<td>" . htmlspecialchars($r['nombre']) . "</td>";
+    echo "<td>" . htmlspecialchars($r['unidad']) . "</td>";
+    echo "<td>" . number_format((float)$r['total_cant'], 2, '.', '') . "</td>";
+    echo "</tr>";
   }
+  echo "</table>";
+  exit;
+}
 
-  if ($_GET['export'] === 'xls_sucursales') {
-    $q = $conn->query("
-      SELECT 
-        s.nombre AS sucursal,
-        COALESCE(cat.nombre,'Sin categoría') AS categoria,
-        c.nombre AS insumo, c.unidad,
-        SUM(d.cantidad) AS total_cant
-      FROM insumos_pedidos p
-      INNER JOIN insumos_pedidos_detalle d ON d.id_pedido = p.id
-      INNER JOIN insumos_catalogo c ON c.id = d.id_insumo
-      LEFT JOIN insumos_categorias cat ON cat.id = c.id_categoria
-      INNER JOIN sucursales s ON s.id = p.id_sucursal
-      WHERE p.anio = $anio AND p.mes = $mes
-        AND p.estatus IN ('Enviado','Aprobado')
-        AND $whereSuc
-      GROUP BY s.nombre, categoria, insumo, c.unidad
-      ORDER BY s.nombre, categoria, insumo
-    ");
+if ($isExport === 'xls_sucursales') {
+  $q = $conn->query("
+    SELECT 
+      s.nombre AS sucursal,
+      COALESCE(cat.nombre,'Sin categoría') AS categoria,
+      c.nombre AS insumo, c.unidad,
+      SUM(d.cantidad) AS total_cant
+    FROM insumos_pedidos p
+    INNER JOIN insumos_pedidos_detalle d ON d.id_pedido = p.id
+    INNER JOIN insumos_catalogo c ON c.id = d.id_insumo
+    LEFT JOIN insumos_categorias cat ON cat.id = c.id_categoria
+    INNER JOIN sucursales s ON s.id = p.id_sucursal
+    WHERE p.anio = $anio AND p.mes = $mes
+      AND p.estatus IN ('Enviado','Aprobado')
+      AND $whereSuc
+    GROUP BY s.nombre, categoria, insumo, c.unidad
+    ORDER BY s.nombre, categoria, insumo
+  ");
 
-    xls_headers("insumos_concentrado_sucursales_{$anio}_" . sprintf('%02d', $mes) . ".xls");
-    echo "<table border='1'>";
-    echo "<tr><th colspan='5'>Concentrado por sucursal — " . sprintf('%02d', $mes) . "/$anio</th></tr>";
-    echo "<tr><th>Sucursal</th><th>Categoría</th><th>Insumo</th><th>Unidad</th><th>Cantidad Total</th></tr>";
-    while ($r = $q->fetch_assoc()) {
-      echo "<tr>";
-      echo "<td>" . htmlspecialchars($r['sucursal']) . "</td>";
-      echo "<td>" . htmlspecialchars($r['categoria']) . "</td>";
-      echo "<td>" . htmlspecialchars($r['insumo']) . "</td>";
-      echo "<td>" . htmlspecialchars($r['unidad']) . "</td>";
-      echo "<td>" . number_format((float)$r['total_cant'], 2, '.', '') . "</td>";
-      echo "</tr>";
-    }
-    echo "</table>";
-    exit;
+  xls_headers("insumos_concentrado_sucursales_{$anio}_" . sprintf('%02d', $mes) . ".xls");
+  echo "<table border='1'>";
+  echo "<tr><th colspan='5'>Concentrado por sucursal — " . sprintf('%02d', $mes) . "/$anio</th></tr>";
+  echo "<tr><th>Sucursal</th><th>Categoría</th><th>Insumo</th><th>Unidad</th><th>Cantidad Total</th></tr>";
+  while ($r = $q->fetch_assoc()) {
+    echo "<tr>";
+    echo "<td>" . htmlspecialchars($r['sucursal']) . "</td>";
+    echo "<td>" . htmlspecialchars($r['categoria']) . "</td>";
+    echo "<td>" . htmlspecialchars($r['insumo']) . "</td>";
+    echo "<td>" . htmlspecialchars($r['unidad']) . "</td>";
+    echo "<td>" . number_format((float)$r['total_cant'], 2, '.', '') . "</td>";
+    echo "</tr>";
   }
+  echo "</table>";
+  exit;
 }
 
 /* =================== VISTA NORMAL =================== */
+
+// A partir de aquí ya podemos incluir navbar (imprime HTML)
+require_once __DIR__ . '/navbar.php';
 
 // Mensaje de acción
 $msg = '';
@@ -212,67 +212,16 @@ $meses = [1 => 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', '
   <link rel="stylesheet" href="https://cdn.datatables.net/1.13.8/css/dataTables.bootstrap5.min.css">
   <link rel="stylesheet" href="https://cdn.datatables.net/responsive/2.5.1/css/responsive.bootstrap5.min.css">
   <style>
-    body {
-      background: #f6f7fb;
-    }
-
-    .page-head {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 16px;
-      margin: 18px auto 8px;
-      padding: 6px 4px;
-    }
-
-    .page-title {
-      font-weight: 700;
-      letter-spacing: .2px;
-      margin: 0;
-    }
-
-    .card-soft {
-      border: 1px solid #e9ecf1;
-      border-radius: 16px;
-      box-shadow: 0 2px 12px rgba(16, 24, 40, .06);
-    }
-
-    .chip {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 4px 10px;
-      border-radius: 999px;
-      background: #f1f5f9;
-      color: #0f172a;
-      font-size: .85rem;
-      border: 1px solid #e2e8f0;
-    }
-
-    .pedido-card {
-      border: 1px solid #e9ecf1;
-      border-radius: 14px;
-      box-shadow: 0 2px 10px rgba(16, 24, 40, .06);
-    }
-
-    .badge-status {
-      font-size: .78rem;
-    }
-
-    .filter-chip {
-      cursor: pointer;
-      user-select: none;
-    }
-
-    .filter-chip.active {
-      background: #e8ecff;
-      border-color: #cfd8ff;
-      color: #1d2b7b;
-    }
-
-    .table thead th {
-      white-space: nowrap;
-    }
+    body { background: #f6f7fb; }
+    .page-head { display:flex; align-items:center; justify-content:space-between; gap:16px; margin:18px auto 8px; padding:6px 4px; }
+    .page-title { font-weight:700; letter-spacing:.2px; margin:0; }
+    .card-soft { border:1px solid #e9ecf1; border-radius:16px; box-shadow:0 2px 12px rgba(16,24,40,.06); }
+    .chip { display:inline-flex; align-items:center; gap:6px; padding:4px 10px; border-radius:999px; background:#f1f5f9; color:#0f172a; font-size:.85rem; border:1px solid #e2e8f0; }
+    .pedido-card { border:1px solid #e9ecf1; border-radius:14px; box-shadow:0 2px 10px rgba(16,24,40,.06); }
+    .badge-status { font-size:.78rem; }
+    .filter-chip { cursor:pointer; user-select:none; }
+    .filter-chip.active { background:#e8ecff; border-color:#cfd8ff; color:#1d2b7b; }
+    .table thead th { white-space:nowrap; }
   </style>
 </head>
 
@@ -408,7 +357,7 @@ $meses = [1 => 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', '
       <div class="tab-pane fade show active" id="t1" role="tabpanel">
         <?php if ($ped->num_rows == 0): ?>
           <div class="text-muted">No hay pedidos en este periodo.</div>
-          <?php else:
+        <?php else:
           $statusMap = [
             'Enviado'   => 'primary',
             'Aprobado'  => 'success',
@@ -420,19 +369,19 @@ $meses = [1 => 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', '
             $est = $p['estatus'];
             $badge = $statusMap[$est] ?? 'secondary';
             $det = $conn->query("
-            SELECT COALESCE(cat.nombre,'Sin categoría') AS categoria,
-                   c.nombre, c.unidad, d.cantidad, d.comentario
-            FROM insumos_pedidos_detalle d
-            INNER JOIN insumos_catalogo c ON c.id=d.id_insumo
-            LEFT JOIN insumos_categorias cat ON cat.id=c.id_categoria
-            WHERE d.id_pedido={$p['id']}
-            ORDER BY categoria, c.nombre
-          ");
-          ?>
+              SELECT COALESCE(cat.nombre,'Sin categoría') AS categoria,
+                     c.nombre, c.unidad, d.cantidad, d.comentario
+              FROM insumos_pedidos_detalle d
+              INNER JOIN insumos_catalogo c ON c.id=d.id_insumo
+              LEFT JOIN insumos_categorias cat ON cat.id=c.id_categoria
+              WHERE d.id_pedido={$p['id']}
+              ORDER BY categoria, c.nombre
+            ");
+        ?>
             <div class="pedido-card mb-3"
-              data-status="<?= htmlspecialchars($est) ?>"
-              data-sucursal="<?= htmlspecialchars($p['sucursal']) ?>"
-              data-folio="<?= $pid ?>">
+                 data-status="<?= htmlspecialchars($est) ?>"
+                 data-sucursal="<?= htmlspecialchars($p['sucursal']) ?>"
+                 data-folio="<?= $pid ?>">
               <div class="p-3 d-flex flex-wrap justify-content-between align-items-center gap-2">
                 <div class="d-flex align-items-center gap-3">
                   <div class="fw-semibold">
@@ -443,7 +392,7 @@ $meses = [1 => 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', '
                 </div>
                 <div class="d-flex flex-wrap gap-2">
                   <button class="btn btn-sm btn-light border toggle-detalle" type="button"
-                    data-target="#det<?= $pid ?>">
+                          data-target="#det<?= $pid ?>">
                     <i class="bi bi-list-ul me-1"></i><span class="lbl">Detalle</span>
                   </button>
                   <?php if ($p['estatus'] === 'Enviado'): ?>
@@ -501,8 +450,7 @@ $meses = [1 => 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', '
                 </div>
               </div>
             </div>
-        <?php endwhile;
-        endif; ?>
+        <?php endwhile; endif; ?>
       </div>
 
       <!-- Concentrado general -->
@@ -588,48 +536,30 @@ $meses = [1 => 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', '
   </div><!-- /container -->
 
   <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+  <!-- Si tu navbar no incluye Bootstrap JS, descomenta la siguiente línea -->
   <!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
   <script src="https://cdn.datatables.net/1.13.8/js/jquery.dataTables.min.js"></script>
   <script src="https://cdn.datatables.net/1.13.8/js/dataTables.bootstrap5.min.js"></script>
   <script src="https://cdn.datatables.net/responsive/2.5.1/js/dataTables.responsive.min.js"></script>
   <script>
-    try {
-      document.title = 'Gestión de Insumos — Admin';
-    } catch (e) {}
+    try { document.title = 'Gestión de Insumos — Admin'; } catch (e) {}
 
     // DataTables para concentrados
     $(function() {
       $('#tablaGeneral').DataTable({
         pageLength: 25,
-        order: [
-          [0, 'asc'],
-          [1, 'asc']
-        ],
+        order: [[0, 'asc'], [1, 'asc']],
         responsive: true,
-        language: {
-          url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/es-ES.json'
-        },
-        columnDefs: [{
-          targets: 3,
-          className: 'text-end'
-        }]
+        language: { url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/es-ES.json' },
+        columnDefs: [{ targets: 3, className: 'text-end' }]
       });
 
       $('#tablaSuc').DataTable({
         pageLength: 25,
-        order: [
-          [0, 'asc'],
-          [1, 'asc'],
-          [2, 'asc']
-        ],
+        order: [[0, 'asc'], [1, 'asc'], [2, 'asc']],
         responsive: true,
-        language: {
-          url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/es-ES.json'
-        },
-        columnDefs: [{
-          targets: 4,
-          className: 'text-end'
-        }]
+        language: { url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/es-ES.json' },
+        columnDefs: [{ targets: 4, className: 'text-end' }]
       });
     });
 
@@ -673,34 +603,27 @@ $meses = [1 => 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', '
         if (ok) visibles++;
       });
     }
-  </script>
-  <script>
+
     // Toggle robusto de detalles (sin usar data-bs-toggle)
     document.querySelectorAll('.toggle-detalle').forEach(btn => {
       const sel = btn.getAttribute('data-target');
       const el = document.querySelector(sel);
       if (!el) return;
 
-      const inst = bootstrap.Collapse.getOrCreateInstance(el, {
-        toggle: false
-      });
+      // Si Bootstrap JS no está global, evita error
+      if (typeof bootstrap === 'undefined' || !bootstrap.Collapse) return;
+
+      const inst = bootstrap.Collapse.getOrCreateInstance(el, { toggle: false });
 
       btn.addEventListener('click', () => {
         const abierto = el.classList.contains('show');
-        if (abierto) {
-          inst.hide();
-        } else {
-          inst.show();
-        }
-
-        // Cambia el texto/icono del botón
-        btn.innerHTML = abierto ?
-          '<i class="bi bi-list-ul me-1"></i><span class="lbl">Detalle</span>' :
-          '<i class="bi bi-chevron-up me-1"></i><span class="lbl">Ocultar</span>';
+        if (abierto) { inst.hide(); } else { inst.show(); }
+        btn.innerHTML = abierto
+          ? '<i class="bi bi-list-ul me-1"></i><span class="lbl">Detalle</span>'
+          : '<i class="bi bi-chevron-up me-1"></i><span class="lbl">Ocultar</span>';
       });
     });
   </script>
 
 </body>
-
 </html>
