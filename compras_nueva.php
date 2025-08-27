@@ -1,6 +1,6 @@
 <?php
 // compras_nueva.php — Central 2.0
-// Captura de factura de compra por renglones de MODELO (catálogo formal)
+// Captura de factura de compra por renglones de MODELO (catálogo formal) + Otros cargos
 
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 if (!isset($_SESSION['id_usuario'])) { header("Location: index.php"); exit(); }
@@ -61,7 +61,7 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
     .card-soft{ border:1px solid #e9ecf1; border-radius:16px; box-shadow:0 2px 12px rgba(16,24,40,.06); }
     .kicker{ color:#6b7280; font-size:.9rem; }
 
-    /* Tabla renglones */
+    /* Tabla renglones (modelos) */
     #tablaDetalle th, #tablaDetalle td{ white-space:nowrap; }
     #tablaDetalle .col-codigo{ min-width: 320px; }
     #tablaDetalle .col-color{ width: 120px; }
@@ -78,6 +78,11 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
     #tablaDetalle .form-control{ padding:.35rem .55rem; }
     #tablaDetalle input.num{ text-align:right; }
     #tablaDetalle input[readonly]{ background:#f8fafc; cursor:not-allowed; }
+
+    /* Tabla otros cargos */
+    #tablaCargos th, #tablaCargos td{ white-space:nowrap; }
+    #tablaCargos .form-control{ padding:.35rem .55rem; }
+    #tablaCargos input.num{ text-align:right; }
 
     /* Resumen */
     .summary{ position:sticky; top:12px; border-radius:16px; border:1px solid #e9ecf1; background:#fff; box-shadow:0 2px 10px rgba(16,24,40,.06);}
@@ -168,7 +173,7 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
 
     <div class="row g-3">
       <div class="col-lg-9">
-        <!-- Detalle -->
+        <!-- Detalle (modelos) -->
         <div class="card card-soft">
           <div class="card-body">
             <div class="d-flex justify-content-between align-items-center mb-2">
@@ -207,6 +212,39 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
             <div class="hint mt-2">
               Tip: marca/desmarca “Requiere IMEI” si el modelo lo amerita (p. ej. accesorios).
             </div>
+          </div>
+        </div>
+
+        <!-- Otros cargos (opcional) -->
+        <div class="card card-soft mt-3">
+          <div class="card-body">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+              <div>
+                <h6 class="mb-0">Otros cargos (opcional)</h6>
+                <div class="kicker">Ej.: seguro de protección, flete, cargo por morosidad, etc.</div>
+              </div>
+              <button type="button" class="btn btn-sm btn-outline-primary rounded-pill" id="btnAddCargo">
+                <i class="bi bi-plus-circle me-1"></i>Agregar cargo
+              </button>
+            </div>
+
+            <div class="table-responsive">
+              <table class="table table-sm align-middle" id="tablaCargos">
+                <thead class="table-light">
+                  <tr>
+                    <th style="min-width:280px">Descripción</th>
+                    <th style="width:150px">Importe</th>
+                    <th style="width:110px">IVA %</th>
+                    <th style="width:130px">Subtotal</th>
+                    <th style="width:120px">IVA</th>
+                    <th style="width:140px">Total</th>
+                    <th style="width:64px"></th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <small class="text-muted">Se envían como <code>extra_desc[]</code>, <code>extra_monto[]</code> y <code>extra_iva_porcentaje[]</code>.</small>
           </div>
         </div>
       </div>
@@ -308,6 +346,7 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
 
   // Elementos base
   const tbody = document.querySelector('#tablaDetalle tbody');
+  const cargosBody = document.querySelector('#tablaCargos tbody');
   const ivaDefault = document.getElementById('ivaDefault');
 
   // vencimiento / condición
@@ -333,13 +372,16 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
   const pagoNotaEl  = document.getElementById('pagoNota');
 
   let rowIdx = 0;
+  let cargoIdx = 0;
   let forceSubmit = false;
 
   function formato(n){ return new Intl.NumberFormat('es-MX',{minimumFractionDigits:2, maximumFractionDigits:2}).format(n||0); }
 
   function calcTotales(){
     let sub=0, iva=0, tot=0;
-    document.querySelectorAll('tr.renglon').forEach(tr=>{
+
+    // Modelos
+    document.querySelectorAll('#tablaDetalle tbody tr.renglon').forEach(tr=>{
       const qty = parseFloat(tr.querySelector('.qty').value) || 0;
       const pu  = parseFloat(tr.querySelector('.pu').value)  || 0;
       const ivp = parseFloat(tr.querySelector('.ivp').value) || 0;
@@ -351,6 +393,20 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
       tr.querySelector('.rtot').textContent = '$'+formato(rtot);
       sub+=rsub; iva+=riva; tot+=rtot;
     });
+
+    // Otros cargos
+    document.querySelectorAll('#tablaCargos tbody tr.cargo').forEach(tr=>{
+      const imp = parseFloat(tr.querySelector('.importe').value) || 0;
+      const ivp = parseFloat(tr.querySelector('.ivp').value)     || 0;
+      const rsub = imp;
+      const riva = rsub * (ivp/100.0);
+      const rtot = rsub + riva;
+      tr.querySelector('.rsub').textContent = '$'+formato(rsub);
+      tr.querySelector('.riva').textContent = '$'+formato(riva);
+      tr.querySelector('.rtot').textContent = '$'+formato(rtot);
+      sub+=rsub; iva+=riva; tot+=rtot;
+    });
+
     document.getElementById('lblSubtotal').textContent = '$'+formato(sub);
     document.getElementById('lblIVA').textContent      = '$'+formato(iva);
     document.getElementById('lblTotal').textContent    = '$'+formato(tot);
@@ -433,13 +489,45 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
     calcTotales();
   }
 
+  function agregarCargo(){
+    const idx = cargoIdx++;
+    const tr = document.createElement('tr');
+    tr.className = 'cargo';
+    tr.innerHTML = `
+      <td>
+        <input type="text" class="form-control desc" name="extra_desc[${idx}]"
+               placeholder="Descripción del cargo (p. ej. Seguro)" maxlength="120" required>
+      </td>
+      <td>
+        <input type="number" class="form-control num importe" name="extra_monto[${idx}]"
+               step="0.01" min="0" value="0" required>
+      </td>
+      <td>
+        <input type="number" class="form-control num ivp" name="extra_iva_porcentaje[${idx}]"
+               step="0.01" min="0" value="${ivaDefault.value || 16}">
+      </td>
+      <td class="rsub">$0.00</td>
+      <td class="riva">$0.00</td>
+      <td class="rtot">$0.00</td>
+      <td><button type="button" class="btn btn-sm btn-outline-danger rounded-pill btnQuitar">&times;</button></td>
+    `;
+    cargosBody.appendChild(tr);
+
+    tr.querySelectorAll('input').forEach(el => el.addEventListener('input', calcTotales));
+    tr.querySelector('.btnQuitar').addEventListener('click', () => { tr.remove(); calcTotales(); });
+
+    calcTotales();
+  }
+
   document.getElementById('btnAgregar').addEventListener('click', agregarRenglon);
+  document.getElementById('btnAddCargo').addEventListener('click', agregarCargo);
+
   ivaDefault.addEventListener('input', () => {
     document.querySelectorAll('.ivp').forEach(i => i.value = ivaDefault.value || 16);
     calcTotales();
   });
 
-  // arranca con 1 renglón
+  // arranca con 1 renglón de modelo
   agregarRenglon();
 
   // Validación + modal contado

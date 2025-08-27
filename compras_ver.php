@@ -61,6 +61,7 @@ $det = $conn->query("
        , (SELECT COUNT(*) FROM compras_detalle_ingresos x WHERE x.id_detalle=d.id) AS ingresadas
   FROM compras_detalle d
   WHERE d.id_compra=$id
+  ORDER BY id ASC
 ");
 
 $pagos = $conn->query("
@@ -74,8 +75,23 @@ $rowSum = $conn->query("SELECT COALESCE(SUM(monto),0) AS pagado FROM compras_pag
 $totalPagado = (float)$rowSum['pagado'];
 $saldo = max(0, (float)$enc['total'] - $totalPagado);
 
-// 🆕 flag para habilitar/deshabilitar el botón de pago
-$puedeAgregarPago = $saldo > 0;
+// 🆕 Otros cargos y sumas separadas
+$cargos = $conn->query("
+  SELECT id, descripcion, monto, iva_porcentaje, iva_monto, total, afecta_costo, creado_en
+  FROM compras_cargos
+  WHERE id_compra=$id
+  ORDER BY id ASC
+");
+
+$sumDet = $conn->query("
+  SELECT COALESCE(SUM(subtotal),0) AS sub, COALESCE(SUM(iva),0) AS iva, COALESCE(SUM(total),0) AS tot
+  FROM compras_detalle WHERE id_compra=$id
+")->fetch_assoc();
+
+$sumCar = $conn->query("
+  SELECT COALESCE(SUM(monto),0) AS sub, COALESCE(SUM(iva_monto),0) AS iva, COALESCE(SUM(total),0) AS tot
+  FROM compras_cargos WHERE id_compra=$id
+")->fetch_assoc();
 ?>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 <!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script> -->
@@ -109,6 +125,7 @@ $puedeAgregarPago = $saldo > 0;
     <?php endif; ?>
   </p>
 
+  <!-- Detalle de modelos -->
   <div class="table-responsive mb-4">
     <table class="table table-bordered align-middle">
       <thead>
@@ -158,22 +175,121 @@ $puedeAgregarPago = $saldo > 0;
       </tbody>
       <tfoot>
         <tr>
-          <th colspan="10" class="text-end">Subtotal</th>
-          <th class="text-end">$<?= number_format((float)$enc['subtotal'],2) ?></th>
+          <th colspan="10" class="text-end">Subtotal (modelos)</th>
+          <th class="text-end">$<?= number_format((float)$sumDet['sub'],2) ?></th>
           <th colspan="3"></th>
         </tr>
         <tr>
-          <th colspan="11" class="text-end">IVA</th>
-          <th class="text-end">$<?= number_format((float)$enc['iva'],2) ?></th>
+          <th colspan="11" class="text-end">IVA (modelos)</th>
+          <th class="text-end">$<?= number_format((float)$sumDet['iva'],2) ?></th>
           <th colspan="2"></th>
         </tr>
         <tr class="table-light">
-          <th colspan="12" class="text-end fs-5">Total</th>
-          <th class="text-end fs-5">$<?= number_format((float)$enc['total'],2) ?></th>
+          <th colspan="12" class="text-end fs-6">Total (modelos)</th>
+          <th class="text-end fs-6">$<?= number_format((float)$sumDet['tot'],2) ?></th>
           <th></th>
         </tr>
       </tfoot>
     </table>
+  </div>
+
+  <!-- Otros cargos -->
+  <div class="card shadow-sm mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <strong>Otros cargos</strong>
+      <?php if ($cargos && $cargos->num_rows > 0): ?>
+        <span class="text-muted small">
+          Subtotal: $<?= number_format((float)$sumCar['sub'],2) ?> ·
+          IVA: $<?= number_format((float)$sumCar['iva'],2) ?> ·
+          Total: $<?= number_format((float)$sumCar['tot'],2) ?>
+        </span>
+      <?php endif; ?>
+    </div>
+    <div class="card-body">
+      <?php if ($cargos && $cargos->num_rows > 0): ?>
+        <div class="table-responsive">
+          <table class="table table-sm table-bordered align-middle">
+            <thead class="table-light">
+              <tr>
+                <th>Descripción</th>
+                <th class="text-end">Importe</th>
+                <th class="text-end">IVA %</th>
+                <th class="text-end">IVA</th>
+                <th class="text-end">Total</th>
+                <th class="text-muted">Capturado</th>
+              </tr>
+            </thead>
+            <tbody>
+              <?php while($x = $cargos->fetch_assoc()): ?>
+                <tr>
+                  <td><?= htmlspecialchars($x['descripcion']) ?></td>
+                  <td class="text-end">$<?= number_format((float)$x['monto'],2) ?></td>
+                  <td class="text-end"><?= number_format((float)$x['iva_porcentaje'],2) ?></td>
+                  <td class="text-end">$<?= number_format((float)$x['iva_monto'],2) ?></td>
+                  <td class="text-end">$<?= number_format((float)$x['total'],2) ?></td>
+                  <td class="text-muted small"><?= htmlspecialchars($x['creado_en']) ?></td>
+                </tr>
+              <?php endwhile; ?>
+            </tbody>
+            <tfoot>
+              <tr>
+                <th class="text-end">Subtotal (cargos)</th>
+                <th class="text-end">$<?= number_format((float)$sumCar['sub'],2) ?></th>
+                <th></th>
+                <th class="text-end">$<?= number_format((float)$sumCar['iva'],2) ?></th>
+                <th class="text-end">$<?= number_format((float)$sumCar['tot'],2) ?></th>
+                <th></th>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      <?php else: ?>
+        <div class="text-muted">No hay otros cargos registrados para esta compra.</div>
+      <?php endif; ?>
+    </div>
+  </div>
+
+  <!-- Resumen de factura (modelos + cargos = total) -->
+  <div class="row g-3 mb-4">
+    <div class="col-md-6">
+      <div class="card border-0 shadow-sm">
+        <div class="card-body">
+          <div class="d-flex justify-content-between">
+            <span>Subtotal modelos</span>
+            <strong>$<?= number_format((float)$sumDet['sub'],2) ?></strong>
+          </div>
+          <div class="d-flex justify-content-between">
+            <span>IVA modelos</span>
+            <strong>$<?= number_format((float)$sumDet['iva'],2) ?></strong>
+          </div>
+          <div class="d-flex justify-content-between mb-2">
+            <span>Total modelos</span>
+            <strong>$<?= number_format((float)$sumDet['tot'],2) ?></strong>
+          </div>
+          <hr>
+          <div class="d-flex justify-content-between">
+            <span>Subtotal otros cargos</span>
+            <strong>$<?= number_format((float)$sumCar['sub'],2) ?></strong>
+          </div>
+          <div class="d-flex justify-content-between">
+            <span>IVA otros cargos</span>
+            <strong>$<?= number_format((float)$sumCar['iva'],2) ?></strong>
+          </div>
+          <div class="d-flex justify-content-between mb-2">
+            <span>Total otros cargos</span>
+            <strong>$<?= number_format((float)$sumCar['tot'],2) ?></strong>
+          </div>
+          <hr>
+          <div class="d-flex justify-content-between fs-5">
+            <span>Total factura</span>
+            <span><strong>$<?= number_format((float)$enc['total'],2) ?></strong></span>
+          </div>
+          <div class="text-muted small mt-1">
+            (El total de la factura ya incluye los cargos.)
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- Panel de pagos -->
@@ -188,6 +304,7 @@ $puedeAgregarPago = $saldo > 0;
           </strong>
         </span>
       </div>
+      <?php $puedeAgregarPago = $saldo > 0; ?>
       <button
         class="btn btn-sm btn-outline-primary <?= $puedeAgregarPago ? '' : 'disabled' ?>"
         data-bs-toggle="modal"

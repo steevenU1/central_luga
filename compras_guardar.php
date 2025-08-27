@@ -1,6 +1,6 @@
 <?php
 // compras_guardar.php
-// Guarda encabezado y renglones por MODELO del catálogo + pago contado opcional
+// Guarda encabezado y renglones por MODELO del catálogo + otros cargos + pago contado opcional
 require_once __DIR__ . '/candado_captura.php';
 abortar_si_captura_bloqueada(); // por defecto bloquea POST
 
@@ -81,14 +81,17 @@ $precio      = $_POST['precio_unitario'] ?? [];   // [idx] => float
 $iva_pct     = $_POST['iva_porcentaje'] ?? [];    // [idx] => float
 $requiereMap = $_POST['requiere_imei'] ?? [];     // [idx] => "0" | "1"
 
-if (empty($id_modelo)) {
-  die("Debes incluir al menos un renglón.");
-}
+if (empty($id_modelo)) { die("Debes incluir al menos un renglón."); }
+
+// ---------- Otros cargos (NUEVO) ----------
+$extra_desc = $_POST['extra_desc'] ?? [];                    // [i] => str
+$extra_monto = $_POST['extra_monto'] ?? [];                  // [i] => float (base sin IVA)
+$extra_iva_porcentaje = $_POST['extra_iva_porcentaje'] ?? [];// [i] => float
 
 $subtotal = 0.0; $iva = 0.0; $total = 0.0;
 $rows = [];
 
-// Construcción de renglones y cálculo de totales
+// Construcción de renglones (modelos) y cálculo de totales
 foreach ($id_modelo as $idx => $idmRaw) {
   $idm = (int)$idmRaw;
   if ($idm<=0) continue;
@@ -129,6 +132,22 @@ foreach ($id_modelo as $idx => $idmRaw) {
 
 if (empty($rows)) { die("Debes incluir al menos un renglón válido."); }
 
+// ====== Calcular extras y sumarlos a los totales (NUEVO) ======
+$extraSub = 0.0; $extraIVA = 0.0;
+if (!empty($extra_desc) && is_array($extra_desc)) {
+  foreach ($extra_desc as $i => $descRaw) {
+    $desc = trim((string)$descRaw);
+    $monto = isset($extra_monto[$i]) ? (float)$extra_monto[$i] : 0.0;
+    $ivaP  = isset($extra_iva_porcentaje[$i]) ? (float)$extra_iva_porcentaje[$i] : 0.0;
+    if ($desc === '' || $monto <= 0) { continue; }
+    $extraSub += $monto;
+    $extraIVA += $monto * ($ivaP/100.0);
+  }
+}
+$subtotal += $extraSub;
+$iva      += $extraIVA;
+$total     = $subtotal + $iva; // robusto
+
 // ---------- Transacción ----------
 $conn->begin_transaction();
 try {
@@ -141,14 +160,13 @@ try {
   $stmtC = $conn->prepare($sqlC);
   if (!$stmtC) { throw new Exception("Prepare compras: ".$conn->error); }
 
-  // 12 parámetros
   $stmtC->bind_param(
     'siisssidddsi',
     $num_factura,       // s
     $id_proveedor,      // i
     $id_sucursal,       // i
     $fecha_factura,     // s
-    $fecha_venc,        // s (puede ser NULL si la columna lo permite)
+    $fecha_venc,        // s (NULL permitido)
     $condicion_pago,    // s
     $dias_vencimiento,  // i (o NULL)
     $subtotal,          // d
@@ -194,14 +212,40 @@ try {
   }
   $stmtD->close();
 
-  // ---------- Pago contado opcional (tabla compras_pagos de tu esquema) ----------
+  // ====== Guardar otros cargos (NUEVO) ======
+  if (!empty($extra_desc) && is_array($extra_desc)) {
+    $sqlX = "INSERT INTO compras_cargos
+              (id_compra, descripcion, monto, iva_porcentaje, iva_monto, total, afecta_costo)
+             VALUES (?,?,?,?,?,?,?)";
+    $stmtX = $conn->prepare($sqlX);
+    if (!$stmtX) { throw new Exception("Prepare cargos: ".$conn->error); }
+
+    foreach ($extra_desc as $i => $descRaw) {
+      $desc  = trim((string)$descRaw);
+      $monto = isset($extra_monto[$i]) ? (float)$extra_monto[$i] : 0.0;
+      $ivaP  = isset($extra_iva_porcentaje[$i]) ? (float)$extra_iva_porcentaje[$i] : 0.0;
+      if ($desc === '' || $monto <= 0) { continue; }
+
+      $ivaMonto = round($monto * ($ivaP/100.0), 2);
+      $totCargo = round($monto + $ivaMonto, 2);
+      $afecta   = 0; // si luego prorrateas al costo, pon 1
+
+      $stmtX->bind_param("isddddi",
+        $id_compra, $desc, $monto, $ivaP, $ivaMonto, $totCargo, $afecta
+      );
+      if (!$stmtX->execute()) { throw new Exception("Insert cargos: ".$stmtX->error); }
+    }
+    $stmtX->close();
+  }
+
+  // ---------- Pago contado opcional ----------
   $registrarPago = ($_POST['registrar_pago'] ?? '0') === '1';
   if ($registrarPago && $condicion_pago === 'Contado') {
     $pago_monto  = isset($_POST['pago_monto']) ? (float)$_POST['pago_monto'] : 0.0;
-    $pago_metodo = substr(trim($_POST['pago_metodo'] ?? ''), 0, 40);   // metodo_pago (varchar40)
+    $pago_metodo = substr(trim($_POST['pago_metodo'] ?? ''), 0, 40);
     $pago_ref    = substr(trim($_POST['pago_referencia'] ?? ''), 0, 120);
     $pago_fecha  = $_POST['pago_fecha'] ?? date('Y-m-d');
-    $pago_notas  = substr(trim($_POST['pago_nota'] ?? ''), 0, 1000);   // notas (text)
+    $pago_notas  = substr(trim($_POST['pago_nota'] ?? ''), 0, 1000);
 
     if ($pago_monto < 0) $pago_monto = 0.0;
 
@@ -216,7 +260,7 @@ try {
     if (!$stP->execute()) { throw new Exception('Insert pago: '.$stP->error); }
     $stP->close();
 
-    // Opcional: marcar compra como Pagada si el pago cubre el total
+    // Marcar compra como Pagada si el pago cubre el total (incluye cargos)
     if ($pago_monto >= $total) {
       $conn->query("UPDATE compras SET estatus='Pagada' WHERE id=".$id_compra);
     }
