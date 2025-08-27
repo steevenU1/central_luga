@@ -8,7 +8,6 @@ if (!isset($_SESSION['id_usuario'])) {
 
 include 'db.php';
 
-// 🔹 Función semana martes-lunes (igual)
 function obtenerSemanaPorIndice($offset = 0) {
     $hoy = new DateTime();
     $diaSemana = $hoy->format('N'); // 1=lunes ... 7=domingo
@@ -28,16 +27,21 @@ function obtenerSemanaPorIndice($offset = 0) {
     return [$inicio, $fin];
 }
 
-// 🔹 Semana seleccionada (igual)
+// Semana seleccionada (para filtros/listado)
 $semanaSeleccionada = isset($_GET['semana']) ? (int)$_GET['semana'] : 0;
 list($inicioSemanaObj, $finSemanaObj) = obtenerSemanaPorIndice($semanaSeleccionada);
 $inicioSemana = $inicioSemanaObj->format('Y-m-d');
-$finSemana = $finSemanaObj->format('Y-m-d');
+$finSemana    = $finSemanaObj->format('Y-m-d');
 
-$msg = $_GET['msg'] ?? '';
+// Rango de la semana ACTUAL (para permitir edición)
+list($inicioActualObj, $finActualObj) = obtenerSemanaPorIndice(0);
+
+$msg         = $_GET['msg'] ?? '';
 $id_sucursal = $_SESSION['id_sucursal'] ?? 0;
+$ROL         = $_SESSION['rol'] ?? '';
+$idUsuarioSesion = (int)($_SESSION['id_usuario'] ?? 0);
 
-// 🔹 Subtipo sucursal (igual)
+// Subtipo sucursal
 $subtipoSucursal = '';
 if ($id_sucursal) {
     $stmtSubtipo = $conn->prepare("SELECT subtipo FROM sucursales WHERE id = ? LIMIT 1");
@@ -49,31 +53,30 @@ if ($id_sucursal) {
 }
 $esSubdistribuidor = ($subtipoSucursal === 'Subdistribuidor');
 
-// 🔹 Usuarios para filtro (igual)
+// Usuarios para filtro
 $sqlUsuarios = "SELECT id, nombre FROM usuarios WHERE id_sucursal=?";
 $stmtUsuarios = $conn->prepare($sqlUsuarios);
 $stmtUsuarios->bind_param("i", $id_sucursal);
 $stmtUsuarios->execute();
 $usuarios = $stmtUsuarios->get_result();
 
-// 🔹 WHERE base (igual)
+// WHERE base
 $where  = " WHERE DATE(v.fecha_venta) BETWEEN ? AND ?";
 $params = [$inicioSemana, $finSemana];
 $types  = "ss";
 
-// 🔹 Filtro por rol (igual)
-if ($_SESSION['rol'] == 'Ejecutivo') {
+// Filtro por rol para el listado
+if ($ROL == 'Ejecutivo') {
     $where .= " AND v.id_usuario=?";
-    $params[] = $_SESSION['id_usuario'];
+    $params[] = $idUsuarioSesion;
     $types .= "i";
-} elseif ($_SESSION['rol'] == 'Gerente') {
+} elseif ($ROL == 'Gerente') {
     $where .= " AND v.id_sucursal=?";
-    $params[] = $_SESSION['id_sucursal'];
+    $params[] = $id_sucursal;
     $types .= "i";
-}
-// Admin ve todo
+} // Admin ve todo
 
-// 🔹 Filtros GET (igual)
+// Filtros GET
 if (!empty($_GET['tipo_venta'])) {
     $where .= " AND v.tipo_venta=?";
     $params[] = $_GET['tipo_venta'];
@@ -92,7 +95,7 @@ if (!empty($_GET['buscar'])) {
     $types .= "ssss";
 }
 
-// 🔹 Tarjetas resumen (igual consultas)
+// Tarjetas resumen
 $sqlResumen = "
     SELECT 
         COUNT(dv.id) AS total_unidades,
@@ -105,11 +108,11 @@ $stmtResumen = $conn->prepare($sqlResumen);
 $stmtResumen->bind_param($types, ...$params);
 $stmtResumen->execute();
 $resumen = $stmtResumen->get_result()->fetch_assoc();
-$totalUnidades = (int)($resumen['total_unidades'] ?? 0);
+$totalUnidades   = (int)($resumen['total_unidades'] ?? 0);
 $totalComisiones = (float)($resumen['total_comisiones'] ?? 0);
 $stmtResumen->close();
 
-// 🔹 Monto total vendido (igual)
+// Monto total vendido
 $sqlMonto = "SELECT IFNULL(SUM(v.precio_venta),0) AS total_monto FROM ventas v $where";
 $stmtMonto = $conn->prepare($sqlMonto);
 $stmtMonto->bind_param($types, ...$params);
@@ -117,7 +120,7 @@ $stmtMonto->execute();
 $totalMonto = (float)($stmtMonto->get_result()->fetch_assoc()['total_monto'] ?? 0);
 $stmtMonto->close();
 
-// 🔹 Ventas (AQUÍ agregamos enganche y comentarios)
+// Ventas (con enganche y comentarios)
 $sqlVentas = "
     SELECT v.id, v.tag, v.nombre_cliente, v.telefono_cliente, v.tipo_venta,
            v.precio_venta, v.fecha_venta,
@@ -135,7 +138,7 @@ $stmt->execute();
 $ventas = $stmt->get_result();
 $totalVentas = $ventas->num_rows;
 
-// 🔹 Detalle por venta (igual)
+// Detalle por venta
 $sqlDetalle = "
     SELECT dv.id_venta, p.marca, p.modelo, p.color, dv.imei1,
            dv.comision_regular, dv.comision_especial, dv.comision,
@@ -327,10 +330,16 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
     <div class="accordion mt-3" id="ventasAccordion">
       <?php $idx = 0; while ($venta = $ventas->fetch_assoc()): $idx++; ?>
         <?php
-          $puedeEliminar = false;
-          if ($_SESSION['rol'] == 'Admin') $puedeEliminar = true;
-          elseif (in_array($_SESSION['rol'], ['Ejecutivo','Gerente']) && $_SESSION['id_usuario'] == $venta['id_usuario']) $puedeEliminar = true;
+          // Permisos y ventana actual
+          $esPropia = ((int)$venta['id_usuario'] === $idUsuarioSesion);
 
+          $fechaVentaDT = new DateTime($venta['fecha_venta']);
+          $enSemanaActual = ($fechaVentaDT >= $inicioActualObj && $fechaVentaDT <= $finActualObj);
+
+          $puedeEliminar = ($ROL === 'Admin'); // eliminar solo admin
+          $puedeEditar   = (in_array($ROL, ['Ejecutivo','Gerente']) && $esPropia && $enSemanaActual);
+
+          // icono tipo
           $chipIcon = 'bi-tag';
           if ($venta['tipo_venta'] === 'Contado') $chipIcon = 'bi-cash-coin';
           elseif ($venta['tipo_venta'] === 'Financiamiento') $chipIcon = 'bi-bank';
@@ -355,12 +364,34 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
                     &nbsp;(<em><?= h($venta['forma_pago_enganche']) ?></em>)
                   <?php endif; ?>
                 </span>
+                <?php if (!$enSemanaActual): ?>
+                  <span class="ms-2 badge rounded-pill text-bg-secondary">Fuera de semana actual</span>
+                <?php endif; ?>
               </div>
             </button>
           </h2>
           <div id="c<?= $accId ?>" class="accordion-collapse collapse <?= $idx===1?'show':'' ?>" aria-labelledby="h<?= $accId ?>" data-bs-parent="#ventasAccordion">
             <div class="accordion-body">
+
               <div class="d-flex justify-content-end gap-2 mb-2">
+                <?php if ($puedeEditar): ?>
+                  <button 
+                    class="btn btn-outline-primary btn-sm btn-edit-venta"
+                    data-bs-toggle="modal"
+                    data-bs-target="#editarVentaModal"
+                    data-id="<?= (int)$venta['id'] ?>"
+                    data-tag="<?= h($venta['tag']) ?>"
+                    data-precio="<?= number_format((float)$venta['precio_venta'], 2, '.', '') ?>"
+                    data-enganche="<?= number_format((float)$venta['enganche'], 2, '.', '') ?>"
+                    data-formapago="<?= h($venta['forma_pago_enganche']) ?>"
+                    data-cliente="<?= h($venta['nombre_cliente']) ?>"
+                    data-telefono="<?= h($venta['telefono_cliente']) ?>"
+                    data-tipo="<?= h($venta['tipo_venta']) ?>"
+                  >
+                    <i class="bi bi-pencil-square"></i> Editar
+                  </button>
+                <?php endif; ?>
+
                 <?php if ($puedeEliminar): ?>
                   <button 
                     class="btn btn-outline-danger btn-sm" 
@@ -419,7 +450,6 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
                 </table>
               </div>
 
-              <!-- Desglose de enganche (si existe) -->
               <?php if ((float)$venta['enganche'] > 0): ?>
                 <div class="mt-3 small-muted">
                   <strong>Desglose enganche:</strong>
@@ -428,7 +458,6 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
                 </div>
               <?php endif; ?>
 
-              <!-- Comentarios -->
               <?php if (trim((string)$venta['comentarios']) !== ''): ?>
                 <div class="mt-3 comentarios-box">
                   <i class="bi bi-chat-text me-1"></i>
@@ -445,7 +474,61 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 
 </div>
 
-<!-- Modal de confirmación de eliminación -->
+<!-- Modal: Editar venta (Ejecutivo/Gerente solo propias y semana actual) -->
+<div class="modal fade" id="editarVentaModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <form action="editar_venta.php" method="POST" class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-pencil-square me-2"></i>Editar venta</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" name="id_venta" id="ev_id_venta">
+        <div class="row g-2">
+          <div class="col-md-6">
+            <label class="form-label">TAG</label>
+            <input type="text" class="form-control" name="tag" id="ev_tag" maxlength="50">
+            <div class="form-text" id="ev_tag_help">Obligatorio excepto en ventas de Contado.</div>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">Precio de venta</label>
+            <input type="number" step="0.01" min="0" class="form-control" name="precio_venta" id="ev_precio" required>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">Enganche</label>
+            <input type="number" step="0.01" min="0" class="form-control" name="enganche" id="ev_enganche">
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">Forma de pago del enganche</label>
+            <select class="form-select" name="forma_pago_enganche" id="ev_forma">
+              <option value="">N/A</option>
+              <option value="Efectivo">Efectivo</option>
+              <option value="Tarjeta">Tarjeta</option>
+              <option value="Mixto">Mixto</option>
+            </select>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">Nombre del cliente</label>
+            <input type="text" class="form-control" name="nombre_cliente" id="ev_cliente" maxlength="100">
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">Teléfono del cliente</label>
+            <input type="text" class="form-control" name="telefono_cliente" id="ev_tel" maxlength="20">
+          </div>
+        </div>
+        <div class="form-text mt-2">
+          Solo puedes editar estos campos. Otros datos (equipos, comisiones, etc.) no se modifican aquí.
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Guardar cambios</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal de confirmación de eliminación (solo Admin) -->
 <div class="modal fade" id="confirmEliminarModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered">
     <form action="eliminar_venta.php" method="POST" class="modal-content">
@@ -468,12 +551,37 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 
 <!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script> -->
 <script>
-// Cargar id_venta en el modal
-const modal = document.getElementById('confirmEliminarModal');
-modal.addEventListener('show.bs.modal', (ev) => {
-  const btn = ev.relatedTarget;
-  const id = btn?.getAttribute('data-idventa') || '';
-  document.getElementById('modalIdVenta').value = id;
+// Modal eliminar (Admin)
+const modalDel = document.getElementById('confirmEliminarModal');
+if (modalDel) {
+  modalDel.addEventListener('show.bs.modal', (ev) => {
+    const btn = ev.relatedTarget;
+    const id = btn?.getAttribute('data-idventa') || '';
+    document.getElementById('modalIdVenta').value = id;
+  });
+}
+
+// Modal editar (Ejecutivo/Gerente propios)
+// TAG requerido solo si tipo != 'Contado'
+document.querySelectorAll('.btn-edit-venta').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.getElementById('ev_id_venta').value = btn.dataset.id || '';
+    document.getElementById('ev_tag').value      = btn.dataset.tag || '';
+    document.getElementById('ev_precio').value   = btn.dataset.precio || '';
+    document.getElementById('ev_enganche').value = btn.dataset.enganche || '';
+    document.getElementById('ev_forma').value    = btn.dataset.formapago || '';
+    document.getElementById('ev_cliente').value  = btn.dataset.cliente || '';
+    document.getElementById('ev_tel').value      = btn.dataset.telefono || '';
+
+    const tipo = (btn.dataset.tipo || '').trim();
+    const tagInput = document.getElementById('ev_tag');
+    const help = document.getElementById('ev_tag_help');
+    const requerido = (tipo !== 'Contado');
+    tagInput.required = requerido;
+    help.textContent = requerido
+      ? 'Obligatorio para Financiamiento / Financiamiento+Combo.'
+      : 'Opcional en ventas de Contado.';
+  });
 });
 </script>
 </body>
