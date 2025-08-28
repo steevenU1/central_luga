@@ -71,13 +71,14 @@ if ($idUsuario > 0) {
   $st->close();
 }
 
-// Sucursal actual (solo para mostrar)
+// Sucursal actual (nombre y subtipo)
 $sucursalNombre = '';
+$sucursalSubtipo = '';
 if ($idSucursal > 0) {
-  $stmt = $conn->prepare("SELECT nombre FROM sucursales WHERE id=?");
+  $stmt = $conn->prepare("SELECT nombre, COALESCE(subtipo,'') AS subtipo FROM sucursales WHERE id=?");
   $stmt->bind_param("i", $idSucursal);
   $stmt->execute();
-  $stmt->bind_result($sucursalNombre);
+  $stmt->bind_result($sucursalNombre, $sucursalSubtipo);
   $stmt->fetch();
   $stmt->close();
 }
@@ -151,7 +152,7 @@ if ($rolUsuario === 'GerenteZona') {
       $st = $conn->prepare("
         SELECT COUNT(*) AS c
         FROM traspasos t
-        INNER INNER JOIN sucursales sd ON sd.id = t.id_sucursal_destino
+        INNER JOIN sucursales sd ON sd.id = t.id_sucursal_destino
         WHERE t.estatus='Pendiente' AND sd.zona=?
       ");
       $st->bind_param("s", $zonaGZ);
@@ -165,7 +166,17 @@ if ($rolUsuario === 'GerenteZona') {
 $esAdmin       = in_array($rolUsuario, ['Admin','Super'], true);
 $primerNombre  = first_name($nombreUsuario);
 
-// ============ ACTIVO POR URL ============
+// =========================
+// Nudge "sube tu foto"
+// =========================
+$faltaFoto = empty($avatarUrl);
+$subtipoPropia = (mb_strtolower(trim((string)$sucursalSubtipo), 'UTF-8') === 'propia');
+$rolElegible = in_array($rolUsuario, ['Ejecutivo','Gerente','Admin'], true);
+$cookiePospuesto = !empty($_COOKIE['foto_nudge_24h']);
+$mostrarNudge = $faltaFoto && $rolElegible && $subtipoPropia && !$cookiePospuesto;
+// =========================
+
+/* ============ ACTIVO POR URL ============ */
 $current = basename(parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH));
 
 $grpDashboard  = ['productividad_dia.php','dashboard_unificado.php','dashboard_mensual.php'];
@@ -285,6 +296,19 @@ function item_active(string $file, string $current): string { return $current ==
   /* Toggler consistente */
   #topbar .navbar-toggler{ padding:.35em .6em; font-size:1em; }
   #topbar .navbar-toggler .navbar-toggler-icon{ width:1.3em; height:1.3em; background-size:100% 100%; }
+
+  /* ======= Glow del avatar si falta foto ======= */
+  .pulse-ring{ position:relative; display:inline-block; }
+  .pulse-ring::after{
+    content:""; position:absolute; inset:-4px; border-radius:50%;
+    border:2px solid rgba(13,110,253,.65);
+    animation:ring 1.8s ease-out infinite;
+  }
+  @keyframes ring{
+    0% { transform:scale(.8); opacity:.9; }
+    70%{ transform:scale(1.25); opacity:.1; }
+    100%{ transform:scale(1.4); opacity:0; }
+  }
 
   /* Ajustes responsivos para no encoger de más */
   @media (min-width:1200px) and (max-width:1440px){
@@ -585,7 +609,7 @@ function item_active(string $file, string $current): string { return $current ==
         <!-- PERFIL -->
         <li class="nav-item dropdown">
           <a class="nav-link dropdown-toggle d-flex align-items-center" href="#" role="button" data-bs-toggle="dropdown">
-            <span class="me-2 position-relative">
+            <span class="me-2 position-relative <?= $faltaFoto ? 'pulse-ring' : '' ?>">
               <?php if ($avatarUrl): ?>
                 <img src="<?= e($avatarUrl) ?>" alt="avatar" class="nav-avatar"
                      onerror="this.style.display='none'; this.nextElementSibling.style.display='inline-flex';">
@@ -660,3 +684,49 @@ function item_active(string $file, string $current): string { return $current ==
     </div>
   </div>
 </nav>
+
+<?php if ($mostrarNudge): ?>
+  <!-- Toast "Sube tu foto" (solo Ejecutivos/Gerentes de sucursal Propia sin foto) -->
+  <div id="toast-foto" class="toast align-items-center text-bg-light border-0 shadow"
+       role="alert" aria-live="assertive" aria-atomic="true"
+       style="position: fixed; right: 1rem; bottom: 1rem; z-index: 1080; min-width: 320px;">
+    <div class="d-flex">
+      <div class="toast-body">
+        <div class="d-flex align-items-start">
+          <div class="me-2" style="width:.8rem;height:.8rem;border-radius:50%;background:#0d6efd;position:relative;flex:0 0 auto;">
+            <span style="content:'';position:absolute;inset:-6px;border-radius:50%;border:2px solid rgba(13,110,253,.5);animation:ring 1.8s ease-out infinite;"></span>
+          </div>
+          <div>
+            <div class="fw-semibold mb-1">¡Dale personalidad a tu perfil!</div>
+            <div class="text-muted small">Sube tu foto. Se verá en dashboards, celebraciones y reportes.</div>
+            <div class="mt-2 d-flex gap-2">
+              <a href="documentos_historial.php" class="btn btn-primary btn-sm">Subir foto</a>
+              <button id="btn-foto-despues" type="button" class="btn btn-outline-secondary btn-sm">Después</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <button type="button" class="btn-close me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+    </div>
+  </div>
+
+  <script>
+    (function(){
+      var el = document.getElementById('toast-foto');
+      if (el) {
+        var t = new bootstrap.Toast(el, { autohide: false });
+        t.show();
+      }
+      function posponer24h(){
+        var d = new Date();
+        d.setTime(d.getTime() + 24*60*60*1000);
+        document.cookie = "foto_nudge_24h=1; expires="+d.toUTCString()+"; path=/; SameSite=Lax";
+      }
+      document.getElementById('btn-foto-despues')?.addEventListener('click', function(){
+        posponer24h();
+        bootstrap.Toast.getInstance(el)?.hide();
+      });
+      el?.addEventListener('hidden.bs.toast', posponer24h);
+    })();
+  </script>
+<?php endif; ?>
