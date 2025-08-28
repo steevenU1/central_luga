@@ -8,10 +8,28 @@ if (!isset($_SESSION['id_usuario'])) {
 
 include 'db.php';
 
+/* =========================================================
+   Helpers de compatibilidad de esquema
+========================================================= */
+function hasColumn(mysqli $conn, string $table, string $column): bool {
+    $tableEsc  = $conn->real_escape_string($table);
+    $columnEsc = $conn->real_escape_string($column);
+    $sql = "
+        SELECT 1
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME   = '{$tableEsc}'
+          AND COLUMN_NAME  = '{$columnEsc}'
+        LIMIT 1
+    ";
+    $res = $conn->query($sql);
+    return $res && $res->num_rows > 0;
+}
+
 function obtenerSemanaPorIndice($offset = 0) {
     $hoy = new DateTime();
     $diaSemana = $hoy->format('N'); // 1=lunes ... 7=domingo
-    $dif = $diaSemana - 2; // martes=2
+    $dif = $diaSemana - 2;          // martes=2
     if ($dif < 0) $dif += 7;
 
     $inicio = new DateTime();
@@ -36,10 +54,10 @@ $finSemana    = $finSemanaObj->format('Y-m-d');
 // Rango de la semana ACTUAL (para permitir edición)
 list($inicioActualObj, $finActualObj) = obtenerSemanaPorIndice(0);
 
-$msg         = $_GET['msg'] ?? '';
-$id_sucursal = $_SESSION['id_sucursal'] ?? 0;
-$ROL         = $_SESSION['rol'] ?? '';
-$idUsuarioSesion = (int)($_SESSION['id_usuario'] ?? 0);
+$msg              = $_GET['msg'] ?? '';
+$id_sucursal      = (int)($_SESSION['id_sucursal'] ?? 0);
+$ROL              = $_SESSION['rol'] ?? '';
+$idUsuarioSesion  = (int)($_SESSION['id_usuario'] ?? 0);
 
 // Subtipo sucursal
 $subtipoSucursal = '';
@@ -53,24 +71,46 @@ if ($id_sucursal) {
 }
 $esSubdistribuidor = ($subtipoSucursal === 'Subdistribuidor');
 
-// Usuarios para filtro
-$sqlUsuarios = "SELECT id, nombre FROM usuarios WHERE id_sucursal=?";
+/* =========================================================
+   Usuarios para filtro (SOLO activos de la sucursal)
+   Soporta:
+   - usuarios.activo (1/0)
+   - usuarios.estatus ('Activo', 'Activa', 'Alta')
+   - usuarios.fecha_baja (NULL/'0000-00-00' = activo)
+========================================================= */
+$condActivos = '';
+if (hasColumn($conn, 'usuarios', 'activo')) {
+    $condActivos = " AND u.activo = 1";
+} elseif (hasColumn($conn, 'usuarios', 'estatus')) {
+    $condActivos = " AND LOWER(u.estatus) IN ('activo','activa','alta')";
+} elseif (hasColumn($conn, 'usuarios', 'fecha_baja')) {
+    $condActivos = " AND (u.fecha_baja IS NULL OR u.fecha_baja='0000-00-00')";
+}
+
+$sqlUsuarios = "
+    SELECT u.id, u.nombre
+    FROM usuarios u
+    WHERE u.id_sucursal = ? {$condActivos}
+    ORDER BY u.nombre
+";
 $stmtUsuarios = $conn->prepare($sqlUsuarios);
 $stmtUsuarios->bind_param("i", $id_sucursal);
 $stmtUsuarios->execute();
 $usuarios = $stmtUsuarios->get_result();
 
-// WHERE base
+/* =========================================================
+   WHERE base para consultas de ventas
+========================================================= */
 $where  = " WHERE DATE(v.fecha_venta) BETWEEN ? AND ?";
 $params = [$inicioSemana, $finSemana];
 $types  = "ss";
 
 // Filtro por rol para el listado
-if ($ROL == 'Ejecutivo') {
+if ($ROL === 'Ejecutivo') {
     $where .= " AND v.id_usuario=?";
     $params[] = $idUsuarioSesion;
     $types .= "i";
-} elseif ($ROL == 'Gerente') {
+} elseif ($ROL === 'Gerente') {
     $where .= " AND v.id_sucursal=?";
     $params[] = $id_sucursal;
     $types .= "i";
@@ -292,7 +332,7 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
           <option value="">Todas</option>
           <option value="Contado" <?= (($_GET['tipo_venta'] ?? '')=='Contado')?'selected':'' ?>>Contado</option>
           <option value="Financiamiento" <?= (($_GET['tipo_venta'] ?? '')=='Financiamiento')?'selected':'' ?>>Financiamiento</option>
-          <option value="Financiamiento+Combo" <?= (($_GET['tipo_venta'] ?? '')=='Financiamiento')?'selected':'' ?>>Financiamiento + Combo</option>
+          <option value="Financiamiento+Combo" <?= (($_GET['tipo_venta'] ?? '')=='Financiamiento+Combo')?'selected':'' ?>>Financiamiento + Combo</option>
         </select>
       </div>
 
