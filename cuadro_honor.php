@@ -265,7 +265,7 @@ try {
     .metric-label{ color:#64748b; font-size:.85rem; }
     .divider{ width:100%; height:1px; background:#eef2f7; margin:6px 0 2px; }
 
-    .no-export{}
+    
   </style>
 </head>
 <body>
@@ -389,7 +389,7 @@ try {
 
 </div>
 
-<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script> -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 
 <!-- Loader robusto: local -> jsDelivr -> unpkg -->
 <script>
@@ -464,4 +464,3 @@ try {
 </script>
 </body>
 </html>
-
