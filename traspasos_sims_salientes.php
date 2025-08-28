@@ -189,13 +189,48 @@ $stmtPend->close();
 <head>
   <meta charset="UTF-8">
   <title>Traspasos de SIMs Pendientes (Salientes)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"> <!-- 🔧 hace que el navbar/ UI no se vea mini en móvil -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
   <style>
     .toggle-link { text-decoration: none; }
     .toggle-link[aria-expanded="true"] .lbl-open { display:none; }
     .toggle-link[aria-expanded="false"] .lbl-close { display:none; }
     .chips { display:flex; flex-wrap:wrap; gap:.35rem; }
     .chip-badge { border-radius: 9999px; }
+
+    /* ====== Navbar: mejoras móviles ====== */
+    @media (max-width: 576px){
+      .navbar { 
+        --bs-navbar-padding-y: .65rem;
+        font-size: 1rem;                 /* 16px base */
+      }
+      .navbar .navbar-brand{
+        font-size: 1.125rem;             /* ~18px */
+        font-weight: 700;
+      }
+      .navbar .nav-link,
+      .navbar .dropdown-item{
+        font-size: 1rem;                  /* 16px */
+        padding-top: .55rem;
+        padding-bottom: .55rem;
+      }
+      .navbar .navbar-toggler{
+        padding: .45rem .6rem;
+        font-size: 1.1rem;
+        border-width: 2px;
+      }
+      .navbar .bi{ font-size: 1.1rem; }
+      /* Evita que el contenedor quede muy pegado a los lados en móvil */
+      .container { padding-left: 12px; padding-right: 12px; }
+    }
+
+    /* Tablas más legibles en pantallas pequeñas */
+    @media (max-width: 576px){
+      .table { font-size: 12.5px; }
+      .table td, .table th { padding: .4rem .5rem; }
+      .card-header .badge { font-size: .78rem; }
+    }
   </style>
 </head>
 <body class="bg-light">
@@ -388,7 +423,6 @@ $stmtPend->close();
 
 <!-- Bootstrap JS + script para abrir/print del acuse -->
 <!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script> -->
-<link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
 <script>
 (function(){
   const modalAcuse    = new bootstrap.Modal(document.getElementById('modalAcuse'));
@@ -408,7 +442,6 @@ $stmtPend->close();
   btnPrintAcuse.addEventListener('click', ()=>{
     const frame = acuseFrame;
     if (!frame || !frame.contentWindow) return;
-    // Espera a que cargue si es necesario
     if (frame.contentDocument && frame.contentDocument.readyState !== 'complete') {
       frame.addEventListener('load', () => frame.contentWindow.print(), { once:true });
     } else {
@@ -416,7 +449,6 @@ $stmtPend->close();
     }
   });
 
-  // Limpia iframe al cerrar (opcional)
   document.getElementById('modalAcuse').addEventListener('hidden.bs.modal', ()=> {
     acuseFrame.src = '';
   });
