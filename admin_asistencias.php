@@ -1,5 +1,5 @@
 <?php
-// admin_asistencias.php  ·  Panel Admin con KPIs + Matriz + Detalle + Export CSV
+// admin_asistencias.php  ·  Panel Admin con KPIs + Matriz + Detalle (por día) + Permisos + Export CSV + Alta Vacaciones (modal)
 ob_start(); // buffer para evitar "headers already sent"
 session_start();
 if (!isset($_SESSION['id_usuario']) || ($_SESSION['rol'] ?? '') !== 'Admin') {
@@ -18,6 +18,7 @@ if ($DEBUG) {
   mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
 }
 
+/* ===== Utils ===== */
 function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 function opWeekStartFromWeekInput(string $iso): ?DateTime {
   if (!preg_match('/^(\d{4})-W(\d{2})$/',$iso,$m)) return null;
@@ -34,7 +35,7 @@ function diaCortoEs(DateTime $d): string {
   return $map[(int)$d->format('N')] ?? $d->format('D');
 }
 
-/* ================== Compatibilidad de BD (producción) ================== */
+/* ================== Compatibilidad de BD ================== */
 function table_exists(mysqli $conn, string $table): bool {
   $t = $conn->real_escape_string($table);
   $q = $conn->query("SHOW TABLES LIKE '{$t}'");
@@ -47,9 +48,7 @@ function column_exists(mysqli $conn, string $table, string $col): bool {
   return $q && $q->num_rows > 0;
 }
 function pickDateCol(mysqli $conn, string $table, array $candidates=['fecha','creado_en','fecha_evento','dia','timestamp']): string {
-  foreach ($candidates as $c) {
-    if (column_exists($conn, $table, $c)) return $c;
-  }
+  foreach ($candidates as $c) { if (column_exists($conn, $table, $c)) return $c; }
   return 'fecha';
 }
 function pickDateColWithAlias(mysqli $conn, string $table, string $alias, array $candidates=['fecha','creado_en','fecha_evento','dia','timestamp']): string {
@@ -81,13 +80,122 @@ $start = $tuesdayStart->format('Y-m-d');
 $end   = (clone $tuesdayStart)->modify('+6 day')->format('Y-m-d');
 $today = (new DateTime('today'))->format('Y-m-d'); // para no contar faltas en días futuros
 
+// Filtro por día (opcional) para el DETALLE
+$diaSel = '';
+if (!empty($_GET['dia']) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $_GET['dia'])) {
+  if ($_GET['dia'] >= $start && $_GET['dia'] <= $end) { $diaSel = $_GET['dia']; }
+}
+
+/* ===== Flash del alta de vacaciones ===== */
+$msgVac=''; $clsVac='info';
+
+/* ===== Handler: Alta de vacaciones (modal) ===== */
+if ($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['accion'] ?? '')==='alta_vacaciones') {
+  $idUsuario = (int)($_POST['id_usuario'] ?? 0);
+  $fini = trim($_POST['fecha_inicio'] ?? '');
+  $ffin = trim($_POST['fecha_fin'] ?? '');
+  $coment = trim($_POST['comentario'] ?? '');
+
+  // Traer usuario y sucursal (válido para tiendas propias)
+  $userRow = null;
+  $stU = $conn->prepare("SELECT u.id, u.id_sucursal FROM usuarios u JOIN sucursales s ON s.id=u.id_sucursal WHERE u.id=? AND u.activo=1 AND u.rol IN ('Gerente','Ejecutivo') AND s.tipo_sucursal='tienda' AND s.subtipo='propia' LIMIT 1");
+  $stU->bind_param('i',$idUsuario); $stU->execute();
+  $resU=$stU->get_result(); $userRow=$resU->fetch_assoc(); $stU->close();
+
+  if (!$userRow) { $msgVac="Usuario inválido o no elegible."; $clsVac="danger"; }
+  elseif (!preg_match('/^\d{4}-\d{2}-\d{2}$/',$fini) || !preg_match('/^\d{4}-\d{2}-\d{2}$/',$ffin) || $ffin < $fini) {
+    $msgVac="Rango de fechas inválido."; $clsVac="danger";
+  } elseif (!table_exists($conn,'permisos_solicitudes')) {
+    $msgVac="No existe la tabla permisos_solicitudes."; $clsVac="danger";
+  } else {
+    // Descubrir columnas presentes
+    $dateCol       = pickDateCol($conn,'permisos_solicitudes',['fecha','fecha_permiso','dia','fecha_solicitada','creado_en']);
+    $hasAprobPor   = column_exists($conn,'permisos_solicitudes','aprobado_por');
+    $hasAprobEn    = column_exists($conn,'permisos_solicitudes','aprobado_en');
+    $hasComApr     = column_exists($conn,'permisos_solicitudes','comentario_aprobador');
+    $hasStatus     = column_exists($conn,'permisos_solicitudes','status');
+    $hasMotivo     = column_exists($conn,'permisos_solicitudes','motivo');
+    $hasComent     = column_exists($conn,'permisos_solicitudes','comentario');
+    $hasSucursal   = column_exists($conn,'permisos_solicitudes','id_sucursal');
+    $hasCreadoPor  = column_exists($conn,'permisos_solicitudes','creado_por');
+    $hasCreadoEn   = column_exists($conn,'permisos_solicitudes','creado_en');
+
+    // Columnas del insert
+    $cols = ['id_usuario'];
+    if ($hasSucursal)   $cols[] = 'id_sucursal';
+    $cols[] = $dateCol;
+    if ($hasMotivo)     $cols[] = 'motivo';
+    if ($hasComent)     $cols[] = 'comentario';
+    if ($hasStatus)     $cols[] = 'status';
+    if ($hasCreadoPor)  $cols[] = 'creado_por';
+    if ($hasCreadoEn)   $cols[] = 'creado_en';      // NOW()
+    if ($hasAprobPor)   $cols[] = 'aprobado_por';
+    if ($hasAprobEn)    $cols[] = 'aprobado_en';    // NOW()
+    if ($hasComApr)     $cols[] = 'comentario_aprobador';
+
+    $placeholders = [];
+    foreach ($cols as $c) {
+      $placeholders[] = ($c==='creado_en' || $c==='aprobado_en') ? 'NOW()' : '?';
+    }
+    $sqlIns = "INSERT INTO permisos_solicitudes (`".implode('`,`',$cols)."`) VALUES (".implode(',',$placeholders).")";
+    $stmt = $conn->prepare($sqlIns);
+
+    // Rango de fechas
+    $dates=[]; $cursor=new DateTime($fini); $endR=new DateTime($ffin);
+    while($cursor <= $endR){ $dates[]=$cursor->format('Y-m-d'); $cursor->modify('+1 day'); }
+
+    $conn->begin_transaction();
+    try{
+      $insertados=0; $omitidos=0;
+      foreach($dates as $d){
+        // Duplicados
+        if ($hasMotivo) $sqlDup="SELECT id FROM permisos_solicitudes WHERE id_usuario=? AND DATE(`{$dateCol}`)=? AND motivo='Vacaciones' LIMIT 1";
+        else            $sqlDup="SELECT id FROM permisos_solicitudes WHERE id_usuario=? AND DATE(`{$dateCol}`)=? LIMIT 1";
+        $stDup=$conn->prepare($sqlDup); $stDup->bind_param('is',$idUsuario,$d); $stDup->execute();
+        $dup=(bool)$stDup->get_result()->fetch_assoc(); $stDup->close();
+        if ($dup){ $omitidos++; continue; }
+
+        // Bind dinámico (omitimos *_en porque van con NOW())
+        $vals=[]; $types='';
+        foreach ($cols as $c) {
+          if ($c==='creado_en' || $c==='aprobado_en') continue;
+          switch ($c) {
+            case 'id_usuario':            $vals[]=$idUsuario;                     $types.='i'; break;
+            case 'id_sucursal':           $vals[]=(int)$userRow['id_sucursal'];   $types.='i'; break;
+            case 'motivo':                $vals[]='Vacaciones';                   $types.='s'; break;
+            case 'comentario':            $vals[]=$coment;                        $types.='s'; break;
+            case 'status':                $vals[]='Aprobado';                     $types.='s'; break;
+            case 'creado_por':            $vals[]=(int)$_SESSION['id_usuario'];   $types.='i'; break;
+            case 'aprobado_por':          $vals[]=(int)$_SESSION['id_usuario'];   $types.='i'; break;
+            case 'comentario_aprobador':  $vals[]='Alta vacaciones (admin)';      $types.='s'; break;
+            default:
+              if ($c===$dateCol){ $vals[]=$d; $types.='s'; }
+          }
+        }
+        $stmt->bind_param($types, ...$vals);
+        $stmt->execute();
+        $insertados++;
+      }
+      $conn->commit();
+      $msgVac="✅ Vacaciones registradas: {$insertados} día(s). Omitidos por duplicado: {$omitidos}.";
+      $clsVac="success";
+    } catch(Throwable $e){
+      $conn->rollback();
+      $msgVac="❌ Error al registrar: ".$e->getMessage();
+      $clsVac="danger";
+    }
+  }
+}
+
 /* ===== Sucursales 'tienda' 'propia' ===== */
 $sucursales = [];
 $resSuc = $conn->query("SELECT id,nombre FROM sucursales WHERE tipo_sucursal='tienda' AND subtipo='propia' ORDER BY nombre");
 if ($resSuc) { while ($r = $resSuc->fetch_assoc()) $sucursales[] = $r; }
 
 $sucursal_id = isset($_GET['sucursal_id']) ? (int)$_GET['sucursal_id'] : 0;
-$qsExport = http_build_query(['week'=>$weekIso,'sucursal_id'=>$sucursal_id]);
+$qsExportArr = ['week'=>$weekIso,'sucursal_id'=>$sucursal_id];
+if ($diaSel) $qsExportArr['dia'] = $diaSel;
+$qsExport = http_build_query($qsExportArr);
 
 /* ===== Usuarios activos — SOLO Gerente/Ejecutivo ===== */
 $paramsU=[]; $typesU='';
@@ -138,25 +246,33 @@ if (table_exists($conn,'descansos_programados')) {
   $stmt->close();
 }
 
-/* ===== Permisos aprobados ===== */
+/* ===== Permisos aprobados (guardar motivo por día) ===== */
 $permAprob=[];
 if (table_exists($conn,'permisos_solicitudes')) {
   $permDateCol = pickDateCol($conn, 'permisos_solicitudes', ['fecha','dia','fecha_solicitada','fecha_permiso','creado_en']);
-  $inList=implode(',',array_fill(0,count($userIds),'?'));
-  $typesPA=str_repeat('i',count($userIds)).'ss';
-  $sqlPA = "SELECT id_usuario, `{$permDateCol}` AS fecha FROM permisos_solicitudes WHERE id_usuario IN ($inList) AND status='Aprobado' AND `{$permDateCol}` BETWEEN ? AND ?";
+  $hasMotivo = column_exists($conn,'permisos_solicitudes','motivo');
+  $inList = implode(',',array_fill(0,count($userIds),'?'));
+  $typesPA = str_repeat('i',count($userIds)).'ss';
+  $selMot = $hasMotivo ? ", p.motivo AS motivo" : "";
+  $sqlPA = "
+    SELECT p.id_usuario, `{$permDateCol}` AS fecha {$selMot}
+    FROM permisos_solicitudes p
+    WHERE p.id_usuario IN ($inList) AND p.status='Aprobado' AND `{$permDateCol}` BETWEEN ? AND ?
+  ";
   $stmt=$conn->prepare($sqlPA);
   $stmt->bind_param($typesPA, ...array_merge($userIds,[$start,$end]));
   $stmt->execute();
   $rows=stmt_all_assoc($stmt);
-  foreach($rows as $r){ $permAprob[(int)$r['id_usuario']][$r['fecha']] = true; }
+  foreach($rows as $r){
+    $permAprob[(int)$r['id_usuario']][$r['fecha']] = $hasMotivo ? (string)($r['motivo'] ?? '') : 'PERMISO';
+  }
   $stmt->close();
 }
 
-/* ===== Asistencias detalle — con nombre de usuario ===== */
+/* ===== Asistencias DETALLE (toda la semana) — base para matriz y detalle ===== */
 $typesA=str_repeat('i',count($userIds)).'ss';
 $asisDateRaw = pickDateColWithAlias($conn, 'asistencias', 'a', ['fecha','creado_en','fecha_evento','dia','timestamp']);
-$asistDet=[];
+$asistDetWeek=[];
 $sqlA="
   SELECT a.*, {$asisDateRaw} AS fecha, s.nombre AS sucursal, u.nombre AS usuario
   FROM asistencias a
@@ -170,12 +286,18 @@ $sqlA = sprintf($sqlA, $inList);
 $stmt=$conn->prepare($sqlA);
 $stmt->bind_param($typesA, ...array_merge($userIds,[$start,$end]));
 $stmt->execute();
-$asistDet = stmt_all_assoc($stmt);
+$asistDetWeek = stmt_all_assoc($stmt);
 $stmt->close();
 
-/* Index asistencia por usuario/día */
+// Vista del detalle (filtrada por día si aplica)
+$asistDetView = $asistDetWeek;
+if ($diaSel) {
+  $asistDetView = array_values(array_filter($asistDetWeek, fn($a) => ($a['fecha'] ?? '') === $diaSel));
+}
+
+/* Index asistencia por usuario/día (para matriz) */
 $asistByUserDay=[];
-foreach($asistDet as $a){
+foreach($asistDetWeek as $a){
   $uid=(int)$a['id_usuario']; $f=$a['fecha'];
   if(!isset($asistByUserDay[$uid][$f])) $asistByUserDay[$uid][$f]=$a;
 }
@@ -186,9 +308,11 @@ if (table_exists($conn,'permisos_solicitudes')) {
   $permDateRaw = pickDateColWithAlias($conn, 'permisos_solicitudes', 'p', ['fecha','dia','fecha_solicitada','fecha_permiso','creado_en']);
   $typesPS='ss'; $paramsPS=[$start,$end];
   $wherePS = " AND s.tipo_sucursal='tienda' AND s.subtipo='propia' ";
+  $hasAprobPor = column_exists($conn,'permisos_solicitudes','aprobado_por');
   if ($sucursal_id>0){ $typesPS.='i'; $paramsPS[]=$sucursal_id; $wherePS.=' AND s.id=? '; }
+  $selAprob = $hasAprobPor ? 'p.aprobado_por' : 'NULL AS aprobado_por';
   $sqlPS="
-    SELECT p.*, {$permDateRaw} AS fecha, u.nombre AS usuario, s.nombre AS sucursal
+    SELECT p.*, {$permDateRaw} AS fecha, u.nombre AS usuario, s.nombre AS sucursal, {$selAprob}
     FROM permisos_solicitudes p
     JOIN usuarios u ON u.id=p.id_usuario
     JOIN sucursales s ON s.id=p.id_sucursal
@@ -219,7 +343,8 @@ foreach($usuarios as $u){
     $isFuture = ($f > $today); // no contar faltas en futuro
     $dow=(int)$d->format('N');
     $hor=$horarios[$sid][$dow]??null; $cerrado=$hor?((int)$hor['cerrado']===1):false;
-    $isDesc=!empty($descansos[$uid][$f]); $isPerm=!empty($permAprob[$uid][$f]);
+    $isDesc=!empty($descansos[$uid][$f]);
+    $isPerm = isset($permAprob[$uid][$f]); // ahora contiene motivo o 'PERMISO'
     $a=$asistByUserDay[$uid][$f]??null;
     $esLaborable = !$cerrado && !$isDesc && !$isPerm;
 
@@ -238,7 +363,11 @@ foreach($usuarios as $u){
     } else {
       if($isDesc){ $estado='DESCANSO'; $fila['desc']++; $totDesc++; }
       elseif($cerrado){ $estado='CERRADA'; }
-      elseif($isPerm){ $estado='PERMISO'; $fila['perm']++; $totPerm++; }
+      elseif($isPerm){
+        $mot = strtoupper(trim((string)($permAprob[$uid][$f] ?? '')));
+        $estado = (strpos($mot,'VACACION') === 0) ? 'VACACIONES' : 'PERMISO';
+        $fila['perm']++; $totPerm++;
+      }
       else { $estado='FALTA'; $fila['fal']++; if($esLaborable) $laborables++; $totFal++; }
       $fila['dias'][]=['fecha'=>$f,'estado'=>$estado,'entrada'=>null,'salida'=>null,'retardo_min'=>0,'dur'=>0];
     }
@@ -247,7 +376,14 @@ foreach($usuarios as $u){
   $matriz[]=$fila;
 }
 
+/* ====== KPIs ====== */
+$empleadosActivos = ($userIds===[0]) ? 0 : count($usuarios);
+$puntualidad = ($totAsis+$totRet)>0 ? round(($totAsis/($totAsis+$totRet))*100,1) : 0.0;
+$cumplimiento = ($laborables>0) ? round(($presentes / $laborables)*100,1) : 0.0;
+$horasTot = $totMin>0 ? round($totMin/60,2) : 0.0;
+
 /* ====== EXPORTACIONES (antes de imprimir cualquier HTML/ navbar) ====== */
+// NOTA: exports usan la semana completa (asistDetWeek).
 if ($isExport) {
   ini_set('display_errors','0'); // evita que warnings contaminen el CSV
   while (ob_get_level()) { ob_end_clean(); }
@@ -268,10 +404,10 @@ if ($isExport) {
     fputcsv($out,$head);
     foreach($matriz as $fila){
       $row=[$fila['sucursal'],$fila['usuario']];
-      foreach($fila['dias'] as $d){
-        $estado=$d['estado'];
+      foreach($fila['dias'] as $dCell){
+        $estado=$dCell['estado'];
         if ($estado==='PENDIENTE'){ $row[]='—'; }
-        elseif($estado==='RETARDO'){ $row[]='RETARDO +'.($d['retardo_min']??0).'m'; }
+        elseif($estado==='RETARDO'){ $row[]='RETARDO +'.($dCell['retardo_min']??0).'m'; }
         else { $row[]=$estado; }
       }
       $hrs=$fila['min']>0?round($fila['min']/60,2):0;
@@ -285,11 +421,11 @@ if ($isExport) {
     header("Content-Disposition: attachment; filename=asistencias_detalle_{$weekIso}.csv");
     $out=fopen('php://output','w');
     fputcsv($out, ['Sucursal','Usuario','Fecha','Entrada','Salida','Duración(min)','Estado','Retardo(min)','Lat','Lng','IP']);
-    foreach($asistDet as $a){
+    foreach($asistDetWeek as $a){
       $estado=((int)($a['retardo']??0)===1)?'RETARDO':'OK';
       fputcsv($out,[
         $a['sucursal'],
-        $a['usuario'], // nombre en CSV
+        $a['usuario'],
         $a['fecha'],
         $a['hora_entrada'],
         $a['hora_salida'],
@@ -322,12 +458,6 @@ if ($isExport) {
   $out=fopen('php://output','w'); fputcsv($out,['Sin datos']); fclose($out); exit;
 }
 
-/* ====== KPIs ====== */
-$empleadosActivos = ($userIds===[0]) ? 0 : count($usuarios);
-$puntualidad = ($totAsis+$totRet)>0 ? round(($totAsis/($totAsis+$totRet))*100,1) : 0.0;
-$cumplimiento = ($laborables>0) ? round(($presentes / $laborables)*100,1) : 0.0;
-$horasTot = $totMin>0 ? round($totMin/60,2) : 0.0;
-
 /* ============ UI ============ */
 require_once __DIR__.'/navbar.php';
 ?>
@@ -350,6 +480,7 @@ require_once __DIR__.'/navbar.php';
     .pill-rest{ background:#f3f4f6; color:#374151; border:1px solid #e5e7eb; }
     .pill-closed{ background:#ede9fe; color:#5b21b6; border:1px solid #ddd6fe; }
     .pill-perm{ background:#e2f0d9; color:#2b6a2b; border:1px solid #c7e3be; }
+    .pill-vac{ background:#fff0f6; color:#9c36b5; border:1px solid #f3d9fa; } /* VACACIONES */
     .pill-future{ background:#eef2ff; color:#3730a3; border:1px solid #c7d2fe; } /* PENDIENTE */
     .thead-sticky th{ position:sticky; top:0; background:#111827; color:#fff; z-index:2; }
     .kpi{ border:0; border-radius:1rem; padding:1rem 1.25rem; display:flex; gap:.9rem; align-items:center; }
@@ -369,6 +500,10 @@ require_once __DIR__.'/navbar.php';
     <h3 class="mb-0"><i class="bi bi-building-fill-gear me-2"></i>Panel Admin · Asistencias</h3>
     <span class="badge text-bg-secondary"><?= h(fmtBadgeRango($tuesdayStart)) ?></span>
   </div>
+
+  <?php if($msgVac): ?>
+    <div id="alert-vac" class="alert alert-<?= h($clsVac) ?>"><?= h($msgVac) ?></div>
+  <?php endif; ?>
 
   <!-- KPIs -->
   <div class="row g-3 mb-3">
@@ -427,11 +562,14 @@ require_once __DIR__.'/navbar.php';
     </div>
   </div>
 
-  <!-- Export -->
+  <!-- Export + Acción vacaciones -->
   <div class="d-flex flex-wrap gap-2 mb-3">
     <a class="btn btn-outline-success btn-sm" href="?export=matrix&<?= $qsExport ?>"><i class="bi bi-grid-3x3-gap me-1"></i> Exportar matriz</a>
     <a class="btn btn-outline-primary btn-sm" href="?export=detalles&<?= $qsExport ?>"><i class="bi bi-file-earmark-spreadsheet me-1"></i> Exportar detalles</a>
     <a class="btn btn-outline-secondary btn-sm" href="?export=permisos&<?= $qsExport ?>"><i class="bi bi-clipboard-check me-1"></i> Exportar permisos</a>
+    <button class="btn btn-warning btn-sm ms-auto" data-bs-toggle="modal" data-bs-target="#modalVacaciones">
+      <i class="bi bi-sunglasses me-1"></i> Agregar vacaciones
+    </button>
   </div>
 
   <!-- MATRIZ -->
@@ -466,6 +604,7 @@ require_once __DIR__.'/navbar.php';
                 elseif($estado==='DESCANSO'){ $pill='pill-rest'; }
                 elseif($estado==='CERRADA'){ $pill='pill-closed'; }
                 elseif($estado==='PERMISO'){ $pill='pill-perm'; }
+                elseif($estado==='VACACIONES'){ $pill='pill-vac'; }
                 elseif($estado==='PENDIENTE'){ $pill='pill-future'; $txt='Pendiente'; }
               ?>
                 <td class="text-center">
@@ -488,71 +627,164 @@ require_once __DIR__.'/navbar.php';
     </div>
   </div>
 
-  <!-- Detalle asistencias -->
-  <div class="card card-elev mb-4">
-    <div class="card-header fw-bold">Detalle de asistencias (Mar→Lun)</div>
-    <div class="card-body p-0">
-      <div class="table-responsive">
-        <table class="table table-hover table-xs align-middle mb-0">
-          <thead class="table-dark">
-            <tr><th>Sucursal</th><th>Usuario</th><th>Fecha</th><th>Entrada</th><th>Salida</th><th class="text-end">Duración (min)</th><th>Estado</th><th>Retardo(min)</th><th>Mapa</th><th>IP</th></tr>
-          </thead>
-          <tbody>
-          <?php if(!$asistDet): ?>
-            <tr><td colspan="10" class="text-muted">Sin registros.</td></tr>
-          <?php else: foreach($asistDet as $a): $estado=((int)($a['retardo']??0)===1)?'RETARDO':'OK'; ?>
-            <tr class="<?= $a['hora_salida'] ? '' : 'table-warning' ?>">
-              <td><?= h($a['sucursal']) ?></td>
-              <td><?= h($a['usuario']) ?></td>
-              <td><?= h($a['fecha']) ?></td>
-              <td><?= h($a['hora_entrada']) ?></td>
-              <td><?= $a['hora_salida']?h($a['hora_salida']):'<span class="text-muted">—</span>' ?></td>
-              <td class="text-end"><?= (int)($a['duracion_minutos']??0) ?></td>
-              <td><?= $estado==='RETARDO'?'<span class="pill pill-ret">RETARDO</span>':'<span class="pill pill-ok">OK</span>' ?></td>
-              <td><?= (int)($a['retardo_minutos']??0) ?></td>
-              <td><?php if($a['latitud']!==null && $a['longitud']!==null): $url='https://maps.google.com/?q='.urlencode($a['latitud'].','.$a['longitud']); ?>
-                <a href="<?= h($url) ?>" target="_blank" class="btn btn-sm btn-outline-primary">Mapa</a>
-              <?php else: ?><span class="text-muted">—</span><?php endif; ?></td>
-              <td><code><?= h($a['ip']??'—') ?></code></td>
-            </tr>
-          <?php endforeach; endif; ?>
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </div>
-
-  <!-- Permisos semana -->
+  <!-- === PESTAÑAS: Detalle (con filtro por día) / Permisos === -->
   <div class="card card-elev">
-    <div class="card-header fw-bold">Permisos en la semana</div>
-    <div class="card-body p-0">
-      <div class="table-responsive">
-        <table class="table table-striped table-xs align-middle mb-0">
-          <thead class="table-dark"><tr><th>Sucursal</th><th>Colaborador</th><th>Fecha</th><th>Motivo</th><th>Comentario</th><th>Status</th><th>Resuelto por</th><th>Obs.</th></tr></thead>
-          <tbody>
-          <?php if(!$permisosSemana): ?>
-            <tr><td colspan="8" class="text-muted">Sin permisos en esta semana.</td></tr>
-          <?php else: foreach($permisosSemana as $p): ?>
-            <tr>
-              <td><?= h($p['sucursal']) ?></td><td><?= h($p['usuario']) ?></td><td><?= h($p['fecha']) ?></td>
-              <td><?= h($p['motivo']) ?></td><td><?= h($p['comentario']??'—') ?></td>
-              <td><span class="badge <?= $p['status']==='Aprobado'?'bg-success':($p['status']==='Rechazado'?'bg-danger':'bg-warning text-dark') ?>"><?= h($p['status']) ?></span></td>
-              <td><?= $p['aprobado_por'] ? (int)$p['aprobado_por'] : '—' ?></td>
-              <td><?= h($p['comentario_aprobador']??'—') ?></td>
-            </tr>
-          <?php endforeach; endif; ?>
-          </tbody>
-        </table>
+    <div class="card-header p-0">
+      <ul class="nav nav-tabs card-header-tabs" id="asistTabs" role="tablist">
+        <li class="nav-item" role="presentation">
+          <button class="nav-link active" id="tab-detalle-tab" data-bs-toggle="tab" data-bs-target="#tab-detalle" type="button" role="tab" aria-controls="tab-detalle" aria-selected="true">
+            Detalle de asistencias
+          </button>
+        </li>
+        <li class="nav-item" role="presentation">
+          <button class="nav-link" id="tab-permisos-tab" data-bs-toggle="tab" data-bs-target="#tab-permisos" type="button" role="tab" aria-controls="tab-permisos" aria-selected="false">
+            Permisos de la semana
+          </button>
+        </li>
+      </ul>
+    </div>
+
+    <div class="card-body">
+      <div class="tab-content" id="asistTabsContent">
+
+        <!-- TAB: DETALLE (filtro por día) -->
+        <div class="tab-pane fade show active" id="tab-detalle" role="tabpanel" aria-labelledby="tab-detalle-tab">
+          <!-- Filtro por día -->
+          <form method="get" class="row g-2 align-items-end mb-3">
+            <input type="hidden" name="week" value="<?= h($weekIso) ?>">
+            <input type="hidden" name="sucursal_id" value="<?= (int)$sucursal_id ?>">
+            <div class="col-sm-6 col-md-4">
+              <label class="form-label mb-0">Día dentro de la semana</label>
+              <select name="dia" class="form-select">
+                <option value="">Todos los días (semana)</option>
+                <?php foreach($days as $d): $v=$d->format('Y-m-d'); ?>
+                  <option value="<?= $v ?>" <?= $diaSel===$v?'selected':'' ?>>
+                    <?= diaCortoEs($d).' '.$d->format('d/m/Y') ?>
+                  </option>
+                <?php endforeach; ?>
+              </select>
+            </div>
+            <div class="col-sm-3 col-md-2">
+              <button class="btn btn-outline-primary w-100"><i class="bi bi-funnel me-1"></i>Aplicar</button>
+            </div>
+            <?php if($diaSel): ?>
+              <div class="col-sm-3 col-md-2">
+                <a class="btn btn-outline-secondary w-100" href="?week=<?= h($weekIso) ?>&sucursal_id=<?= (int)$sucursal_id ?>">
+                  Limpiar día
+                </a>
+              </div>
+            <?php endif; ?>
+          </form>
+
+          <div class="table-responsive">
+            <table class="table table-hover table-xs align-middle mb-0">
+              <thead class="table-dark">
+                <tr><th>Sucursal</th><th>Usuario</th><th>Fecha</th><th>Entrada</th><th>Salida</th><th class="text-end">Duración (min)</th><th>Estado</th><th>Retardo(min)</th><th>Mapa</th><th>IP</th></tr>
+              </thead>
+              <tbody>
+              <?php if(!$asistDetView): ?>
+                <tr><td colspan="10" class="text-muted">Sin registros.</td></tr>
+              <?php else: foreach($asistDetView as $a): $estado=((int)($a['retardo']??0)===1)?'RETARDO':'OK'; ?>
+                <tr class="<?= $a['hora_salida'] ? '' : 'table-warning' ?>">
+                  <td><?= h($a['sucursal']) ?></td>
+                  <td><?= h($a['usuario']) ?></td>
+                  <td><?= h($a['fecha']) ?></td>
+                  <td><?= h($a['hora_entrada']) ?></td>
+                  <td><?= $a['hora_salida']?h($a['hora_salida']):'<span class="text-muted">—</span>' ?></td>
+                  <td class="text-end"><?= (int)($a['duracion_minutos']??0) ?></td>
+                  <td><?= $estado==='RETARDO'?'<span class="pill pill-ret">RETARDO</span>':'<span class="pill pill-ok">OK</span>' ?></td>
+                  <td><?= (int)($a['retardo_minutos']??0) ?></td>
+                  <td><?php if($a['latitud']!==null && $a['longitud']!==null): $url='https://maps.google.com/?q='.urlencode($a['latitud'].','.$a['longitud']); ?>
+                    <a href="<?= h($url) ?>" target="_blank" class="btn btn-sm btn-outline-primary">Mapa</a>
+                  <?php else: ?><span class="text-muted">—</span><?php endif; ?></td>
+                  <td><code><?= h($a['ip']??'—') ?></code></td>
+                </tr>
+              <?php endforeach; endif; ?>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- TAB: PERMISOS SEMANA -->
+        <div class="tab-pane fade" id="tab-permisos" role="tabpanel" aria-labelledby="tab-permisos-tab">
+          <div class="table-responsive">
+            <table class="table table-striped table-xs align-middle mb-0">
+              <thead class="table-dark"><tr><th>Sucursal</th><th>Colaborador</th><th>Fecha</th><th>Motivo</th><th>Comentario</th><th>Status</th><th>Resuelto por</th><th>Obs.</th></tr></thead>
+              <tbody>
+              <?php if(!$permisosSemana): ?>
+                <tr><td colspan="8" class="text-muted">Sin permisos en esta semana.</td></tr>
+              <?php else: foreach($permisosSemana as $p): ?>
+                <tr>
+                  <td><?= h($p['sucursal']) ?></td><td><?= h($p['usuario']) ?></td><td><?= h($p['fecha']) ?></td>
+                  <td><?= h($p['motivo']) ?></td><td><?= h($p['comentario']??'—') ?></td>
+                  <td><span class="badge <?= $p['status']==='Aprobado'?'bg-success':($p['status']==='Rechazado'?'bg-danger':'bg-warning text-dark') ?>"><?= h($p['status']) ?></span></td>
+                  <td><?= isset($p['aprobado_por']) && $p['aprobado_por']!==null ? (int)$p['aprobado_por'] : '—' ?></td>
+                  <td><?= h($p['comentario_aprobador']??'—') ?></td>
+                </tr>
+              <?php endforeach; endif; ?>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
       </div>
     </div>
-  </div>
-
-  <div class="d-flex flex-wrap gap-2 mt-3">
-    <a class="btn btn-outline-success btn-sm" href="?export=matrix&<?= $qsExport ?>"><i class="bi bi-download me-1"></i> Matriz (CSV)</a>
-    <a class="btn btn-outline-primary btn-sm" href="?export=detalles&<?= $qsExport ?>"><i class="bi bi-download me-1"></i> Detalles (CSV)</a>
-    <a class="btn btn-outline-secondary btn-sm" href="?export=permisos&<?= $qsExport ?>"><i class="bi bi-download me-1"></i> Permisos (CSV)</a>
   </div>
 
 </div>
+
+<!-- MODAL: Alta de Vacaciones -->
+<div class="modal fade" id="modalVacaciones" tabindex="-1" aria-labelledby="modalVacacionesLabel" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <form method="post">
+        <input type="hidden" name="accion" value="alta_vacaciones">
+        <div class="modal-header">
+          <h5 class="modal-title" id="modalVacacionesLabel">Agregar vacaciones</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+        </div>
+        <div class="modal-body">
+          <div class="mb-3">
+            <label class="form-label">Colaborador *</label>
+            <select name="id_usuario" class="form-select" required>
+              <option value="">Seleccione…</option>
+              <?php foreach($usuarios as $u): ?>
+                <option value="<?= (int)$u['id'] ?>"><?= h($u['sucursal'].' · '.$u['nombre']) ?></option>
+              <?php endforeach; ?>
+            </select>
+          </div>
+          <div class="row g-2">
+            <div class="col-md-6">
+              <label class="form-label">Fecha inicio *</label>
+              <input type="date" name="fecha_inicio" class="form-control" required>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Fecha fin *</label>
+              <input type="date" name="fecha_fin" class="form-control" required>
+            </div>
+          </div>
+          <div class="mt-3">
+            <label class="form-label">Comentario (opcional)</label>
+            <textarea name="comentario" rows="2" class="form-control" placeholder="Notas internas"></textarea>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
+          <button class="btn btn-primary">Guardar vacaciones</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- Bootstrap JS para tabs y modal -->
+<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
+<?php if($msgVac && $clsVac==='danger'): ?>
+<script>
+// Si hubo error en el alta, reabrimos el modal para corregir
+const vacModal = new bootstrap.Modal(document.getElementById('modalVacaciones'));
+vacModal.show();
+</script>
+<?php endif; ?>
 </body>
 </html>
