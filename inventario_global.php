@@ -1,5 +1,5 @@
 <?php
-// inventario_global.php — LUGA (UI modernizada, fix helper name)
+// inventario_global.php — LUGA (RAM + "Almacenamiento", fecha sin hora, tabla compacta)
 session_start();
 if (!isset($_SESSION['id_usuario'])) { header("Location: 403.php"); exit(); }
 
@@ -14,7 +14,7 @@ require_once __DIR__.'/db.php';
 require_once __DIR__.'/navbar.php';
 require_once __DIR__.'/verificar_sesion.php';
 
-// ===== Helpers locales (evitar colisión con navbar.php) =====
+// ===== Helpers =====
 if (!function_exists('h')) {
   function h($s){ return htmlspecialchars($s ?? '', ENT_QUOTES, 'UTF-8'); }
 }
@@ -32,7 +32,7 @@ $sql = "
          s.id AS id_sucursal,
          s.nombre AS sucursal,
          p.id AS id_producto,
-         p.marca, p.modelo, p.color, p.capacidad,
+         p.marca, p.modelo, p.color, p.ram, p.capacidad,
          p.imei1, p.imei2,
          p.costo,
          p.costo_con_iva,
@@ -54,20 +54,14 @@ $types  = "";
 
 if ($filtroSucursal !== '') {
   $sql .= " AND s.id = ?";
-  $params[] = (int)$filtroSucursal;
-  $types .= "i";
+  $params[] = (int)$filtroSucursal; $types .= "i";
 }
 if ($filtroImei !== '') {
   $sql .= " AND (p.imei1 LIKE ? OR p.imei2 LIKE ?)";
-  $like = "%$filtroImei%";
-  $params[] = $like;
-  $params[] = $like;
-  $types .= "ss";
+  $like = "%$filtroImei%"; $params[] = $like; $params[] = $like; $types .= "ss";
 }
 if ($filtroEstatus !== '') {
-  $sql .= " AND i.estatus = ?";
-  $params[] = $filtroEstatus;
-  $types .= "s";
+  $sql .= " AND i.estatus = ?"; $params[] = $filtroEstatus; $types .= "s";
 }
 if ($filtroAntiguedad == '<30') {
   $sql .= " AND TIMESTAMPDIFF(DAY, i.fecha_ingreso, NOW()) < 30";
@@ -77,14 +71,10 @@ if ($filtroAntiguedad == '<30') {
   $sql .= " AND TIMESTAMPDIFF(DAY, i.fecha_ingreso, NOW()) > 90";
 }
 if ($filtroPrecioMin !== '') {
-  $sql .= " AND p.precio_lista >= ?";
-  $params[] = (float)$filtroPrecioMin;
-  $types .= "d";
+  $sql .= " AND p.precio_lista >= ?"; $params[] = (float)$filtroPrecioMin; $types .= "d";
 }
 if ($filtroPrecioMax !== '') {
-  $sql .= " AND p.precio_lista <= ?";
-  $params[] = (float)$filtroPrecioMax;
-  $types .= "d";
+  $sql .= " AND p.precio_lista <= ?"; $params[] = (float)$filtroPrecioMax; $types .= "d";
 }
 
 $sql .= " ORDER BY s.nombre ASC, i.fecha_ingreso ASC";
@@ -96,16 +86,11 @@ $result = $stmt->get_result();
 
 $sucursales = $conn->query("SELECT id, nombre FROM sucursales ORDER BY nombre");
 
-// Datos agregados
+// Agregados
 $rangos = ['<30' => 0, '30-90' => 0, '>90' => 0];
 $inventario = [];
 
-$total = 0;
-$sumAntiguedad = 0;
-$sumPrecio = 0.0;
-$sumProfit = 0.0;
-$cntDisp = 0;
-$cntTrans = 0;
+$total=0; $sumAntiguedad=0; $sumPrecio=0.0; $sumProfit=0.0; $cntDisp=0; $cntTrans=0;
 
 while ($row = $result->fetch_assoc()) {
   $inventario[] = $row;
@@ -116,8 +101,8 @@ while ($row = $result->fetch_assoc()) {
 
   $total++;
   $sumAntiguedad += $dias;
-  $sumPrecio += (float)$row['precio_lista'];
-  $sumProfit += (float)$row['profit'];
+  $sumPrecio  += (float)$row['precio_lista'];
+  $sumProfit  += (float)$row['profit'];
   if ($row['estatus'] === 'Disponible') $cntDisp++;
   if ($row['estatus'] === 'En tránsito') $cntTrans++;
 }
@@ -125,15 +110,6 @@ while ($row = $result->fetch_assoc()) {
 $promAntiguedad = $total ? round($sumAntiguedad / $total, 1) : 0;
 $promPrecio     = $total ? round($sumPrecio / $total, 2) : 0.0;
 $promProfit     = $total ? round($sumProfit / $total, 2) : 0.0;
-
-// Fallback para código
-function buildCodigoFallback($tipo, $marca, $modelo, $color, $cap) {
-  $partes = array_filter([$tipo, $marca, $modelo, $color, $cap], fn($v) => $v !== null && $v !== '');
-  if (!$partes) return '-';
-  $codigo = strtoupper(implode('-', $partes));
-  $codigo = preg_replace('/\s+/', '', $codigo);
-  return $codigo;
-}
 ?>
 <!DOCTYPE html>
 <html lang="es">
@@ -170,10 +146,20 @@ function buildCodigoFallback($tipo, $marca, $modelo, $color, $cap) {
     .ant-pill { font-size:.75rem; padding:.2rem .5rem; border-radius:999px; }
     .ant-pill.lt{ background:#e9f9ee; color:#0b7a3a; border:1px solid #b9ebc9;} .ant-pill.md{ background:#fff6e6; color:#955f00; border:1px solid #ffe2ad;} .ant-pill.gt{ background:#ffecec; color:#9f1c1c; border:1px solid #ffc6c6;}
     .table-wrap { background:#fff; border:1px solid #e9ecf1; border-radius:16px; padding:8px 8px 16px; box-shadow:0 2px 10px rgba(16,24,40,.06); }
+
+    /* Compacción tabla */
+    #tablaInventario td, #tablaInventario th { padding:.35rem .5rem; font-size:.88rem; }
+    /* Truncar proveedor para caber mejor (columna 9 en 1-based) */
+    #tablaInventario td:nth-child(9), #tablaInventario th:nth-child(9) { max-width:180px; }
+    #tablaInventario td:nth-child(9) .truncate { display:inline-block; max-width:180px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
     .dt-buttons .btn { border-radius:999px !important; }
     .copy-btn { border:0; background:transparent; cursor:pointer; }
     .copy-btn:hover { opacity:.8; }
-    @media (max-width: 992px) { .page-head{ flex-direction:column; align-items:flex-start;} .toolbar{ width:100%; justify-content:flex-start; flex-wrap:wrap;} }
+    @media (max-width: 992px) {
+      .page-head{ flex-direction:column; align-items:flex-start; }
+      .toolbar{ width:100%; justify-content:flex-start; flex-wrap:wrap; }
+    }
   </style>
 </head>
 <body>
@@ -289,16 +275,15 @@ function buildCodigoFallback($tipo, $marca, $modelo, $color, $cap) {
 
   <!-- Tabla -->
   <div class="table-wrap">
-    <table id="tablaInventario" class="table table-striped table-hover align-middle nowrap" style="width:100%;">
+    <table id="tablaInventario" class="table table-striped table-hover align-middle" style="width:100%;">
       <thead class="table-light">
         <tr>
-          <th>ID</th>
           <th>Sucursal</th>
           <th>Marca</th>
           <th>Modelo</th>
-          <th>Código</th>
           <th>Color</th>
-          <th>Capacidad</th>
+          <th>RAM</th>
+          <th>Almacenamiento</th>
           <th>IMEI1</th>
           <th>IMEI2</th>
           <th>Proveedor</th>
@@ -306,33 +291,28 @@ function buildCodigoFallback($tipo, $marca, $modelo, $color, $cap) {
           <th>Precio Lista ($)</th>
           <th>Profit ($)</th>
           <th>Estatus</th>
-          <th>Fecha Ingreso</th>
+          <th>Fecha ingreso</th>
           <th>Antigüedad</th>
         </tr>
       </thead>
       <tbody>
       <?php foreach ($inventario as $row):
         $dias  = (int)$row['antiguedad_dias'];
-        $codigo = $row['codigo_producto'] ?? '';
-        if ($codigo === '' || $codigo === null) {
-          $codigo = buildCodigoFallback($row['tipo_producto'] ?? '', $row['marca'] ?? '', $row['modelo'] ?? '', $row['color'] ?? '', $row['capacidad'] ?? '');
-        }
-        $costoConIva = $row['costo_con_iva'];
-        if ($costoConIva === null || $costoConIva === '') { $costoConIva = $row['costo']; }
+        $costoConIva = $row['costo_con_iva']; if ($costoConIva === null || $costoConIva === '') { $costoConIva = $row['costo']; }
         $profit = (float)$row['profit'];
         $antClass = $dias < 30 ? 'lt' : ($dias <= 90 ? 'md' : 'gt');
         $estatus = $row['estatus'];
         $statusChip = $estatus==='Disponible'
           ? '<span class="chip"><span class="status-dot dot-green"></span>Disponible</span>'
           : '<span class="chip"><span class="status-dot dot-amber"></span>En tránsito</span>';
+        $fechaSolo = h(substr((string)$row['fecha_ingreso'], 0, 10)); // YYYY-MM-DD
       ?>
         <tr>
-          <td><?= (int)$row['id_inventario'] ?></td>
           <td><?= h($row['sucursal']) ?></td>
           <td><?= h($row['marca']) ?></td>
           <td><?= h($row['modelo']) ?></td>
-          <td><code><?= h($codigo) ?></code></td>
           <td><?= h($row['color']) ?></td>
+          <td><?= h($row['ram'] ?? '-') ?></td>
           <td><?= h($row['capacidad'] ?? '-') ?></td>
           <td>
             <span><?= h($row['imei1'] ?? '-') ?></span>
@@ -350,14 +330,14 @@ function buildCodigoFallback($tipo, $marca, $modelo, $color, $cap) {
               </button>
             <?php endif; ?>
           </td>
-          <td><?= h($row['proveedor'] ?? '-') ?></td>
+          <td title="<?= h($row['proveedor'] ?? '-') ?>"><span class="truncate"><?= h($row['proveedor'] ?? '-') ?></span></td>
           <td class="text-end">$<?= number_format((float)$costoConIva,2) ?></td>
           <td class="text-end">$<?= number_format((float)$row['precio_lista'],2) ?></td>
           <td class="text-end">
             <span class="<?= $profit>=0 ? 'profit-pos' : 'profit-neg' ?>">$<?= number_format($profit,2) ?></span>
           </td>
           <td><?= $statusChip ?></td>
-          <td><?= h($row['fecha_ingreso']) ?></td>
+          <td><?= $fechaSolo ?></td>
           <td><span class="ant-pill <?= $antClass ?>"><?= $dias ?> d</span></td>
         </tr>
       <?php endforeach; ?>
@@ -398,25 +378,30 @@ function buildCodigoFallback($tipo, $marca, $modelo, $color, $cap) {
     });
   }
 
-  // DataTable
+  // DataTable (orden por fecha ingreso desc; indices actualizados por nueva columna RAM)
   $(function() {
     $('#tablaInventario').DataTable({
       pageLength: 25,
-      order: [[ 0, "desc" ]],
+      order: [[ 13, "desc" ]], // índice de "Fecha ingreso" tras agregar RAM
       responsive: true,
+      autoWidth: false,
       fixedHeader: true,
       language: { url: "//cdn.datatables.net/plug-ins/1.13.4/i18n/es-ES.json" },
       dom: "<'row align-items-center mb-2'<'col-sm-12 col-md-6'B><'col-sm-12 col-md-6'f>>" +
            "tr" +
            "<'row mt-2'<'col-sm-12 col-md-5'i><'col-sm-12 col-md-7'p>>",
       buttons: [
-        { extend: 'csvHtml5', className: 'btn btn-light btn-sm rounded-pill border', text: '<i class="bi bi-filetype-csv me-1"></i>CSV' },
+        { extend: 'csvHtml5',   className: 'btn btn-light btn-sm rounded-pill border', text: '<i class="bi bi-filetype-csv me-1"></i>CSV' },
         { extend: 'excelHtml5', className: 'btn btn-light btn-sm rounded-pill border', text: '<i class="bi bi-file-earmark-excel me-1"></i>Excel' },
-        { extend: 'colvis', className: 'btn btn-light btn-sm rounded-pill border', text: '<i class="bi bi-view-list me-1"></i>Columnas' }
+        { extend: 'colvis',     className: 'btn btn-light btn-sm rounded-pill border', text: '<i class="bi bi-view-list me-1"></i>Columnas' }
       ],
       columnDefs: [
-        { targets: [0,10,11,12,14,15], className: 'text-nowrap' },
-        { targets: [10,11,12], className: 'text-end' }
+        { targets: [9,10,11], className: 'text-end' },                 // precios/profit
+        { targets: [13,14], className: 'text-nowrap' },                // fecha y antigüedad
+        { responsivePriority: 1, targets: 0 },                         // sucursal
+        { responsivePriority: 2, targets: 1 },                         // marca
+        { responsivePriority: 3, targets: 2 },                         // modelo
+        { responsivePriority: 100, targets: [7,8] }                    // IMEI2 / proveedor: ceden primero en móvil
       ]
     });
   });
