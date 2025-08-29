@@ -85,7 +85,9 @@ $sqlEjecutivos = "
   FROM usuarios u
   INNER JOIN sucursales s ON s.id = u.id_sucursal
   LEFT JOIN ( $subVentasAgg ) va ON va.id_usuario = u.id
-  WHERE s.tipo_sucursal='Tienda' AND u.activo = 1 AND u.rol='Ejecutivo'
+  WHERE s.tipo_sucursal='Tienda'
+  AND u.activo = 1
+  AND u.rol IN ('Ejecutivo','Gerente')
   GROUP BY u.id
   ORDER BY unidades DESC, total_ventas DESC
 ";
@@ -120,7 +122,8 @@ $sqlEjecutivosPrev = "
     IFNULL(SUM(va.unidades),0) AS unidades_prev
   FROM usuarios u
   LEFT JOIN ( $subVentasAgg ) va ON va.id_usuario = u.id
-  WHERE u.activo = 1 AND u.rol='Ejecutivo'
+  WHERE u.activo = 1
+  AND u.rol IN ('Ejecutivo','Gerente')
   GROUP BY u.id
 ";
 $stmtP = $conn->prepare($sqlEjecutivosPrev);

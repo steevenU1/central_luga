@@ -318,7 +318,13 @@ $(document).ready(function() {
 
   $('#tipo_venta').on('change', function() {
     $('#combo').toggle(isFinanciamientoCombo());
+    // NUEVO: si se sale de Combo, limpiamos y desbloqueamos
+    if (!isFinanciamientoCombo()) {
+      $('#equipo2').val(null).trigger('change');
+      $('#equipo1 option, #equipo2 option').prop('disabled', false);
+    }
     toggleVenta();
+    refreshEquipoLocks(); // NUEVO
   });
 
   $('#forma_pago_enganche').on('change', function() {
@@ -360,6 +366,36 @@ $(document).ready(function() {
   }
   toggleVenta();
 
+  // ===== NUEVO: bloqueo cruzado para que equipo1 != equipo2 =====
+  function refreshEquipoLocks() {
+    const v1 = $('#equipo1').val();
+    const v2 = $('#equipo2').val();
+
+    // Habilitamos todo y luego deshabilitamos la opción elegida en el otro select
+    $('#equipo1 option, #equipo2 option').prop('disabled', false);
+
+    if (v1) { $('#equipo2 option[value="'+v1+'"]').prop('disabled', true); }
+    if (v2) { $('#equipo1 option[value="'+v2+'"]').prop('disabled', true); }
+
+    // Si quedaron iguales por cualquier razón, limpiamos el combo
+    if (v1 && v2 && v1 === v2) {
+      $('#equipo2').val(null).trigger('change');
+    }
+  }
+
+  $('#equipo1, #equipo2').on('change', refreshEquipoLocks);
+
+  // Filtro extra para Select2: si eligen el mismo, lo revierte al instante
+  $('#equipo2').on('select2:select', function(e){
+    const v1 = $('#equipo1').val();
+    const elegido = e.params.data.id;
+    if (v1 && elegido === v1) {
+      $(this).val(null).trigger('change');
+    }
+    refreshEquipoLocks();
+  });
+  $('#equipo1').on('select2:select', function(){ refreshEquipoLocks(); });
+
   function cargarEquipos(sucursalId) {
     $.ajax({
       url: 'ajax_productos_por_sucursal.php',
@@ -367,10 +403,12 @@ $(document).ready(function() {
       data: { id_sucursal: sucursalId },
       success: function(response) {
         $('#equipo1, #equipo2').html(response).val('').trigger('change');
+        refreshEquipoLocks(); // NUEVO: aplicar bloqueo tras recargar
       },
       error: function(xhr){
         const msg = xhr.responseText || 'Error cargando inventario';
         $('#equipo1, #equipo2').html('<option value="">'+msg+'</option>').trigger('change');
+        refreshEquipoLocks();
       }
     });
   }
@@ -409,6 +447,14 @@ $(document).ready(function() {
     if (!precio || precio <= 0) errores.push('El precio de venta debe ser mayor a 0.');
     if (!forma) errores.push('Selecciona la forma de pago.');
     if (!$('#equipo1').val()) errores.push('Selecciona el equipo principal.');
+
+    // NUEVO: reglas para Financiamento+Combo
+    if (isFinanciamientoCombo()) {
+      const v1 = $('#equipo1').val();
+      const v2 = $('#equipo2').val();
+      if (!v2) errores.push('Selecciona el equipo combo.');
+      if (v1 && v2 && v1 === v2) errores.push('El equipo combo debe ser distinto del principal.');
+    }
 
     if (esFin) {
       if (!nombre) errores.push('Ingresa el nombre del cliente (Financiamiento).');
@@ -499,13 +545,7 @@ $(document).ready(function() {
   // Inicial
   function initEquipos(){ cargarEquipos($('#id_sucursal').val()); }
   initEquipos();
-
-  $('#id_sucursal').on('change', function() {
-    const seleccionada = parseInt($(this).val());
-    if (seleccionada !== idSucursalUsuario) $('#alerta_sucursal').removeClass('d-none');
-    else $('#alerta_sucursal').addClass('d-none');
-    cargarEquipos(seleccionada);
-  });
+  refreshEquipoLocks(); // NUEVO
 });
 </script>
 

@@ -1,5 +1,5 @@
 <?php
-// navbar.php — LUGA (con badges compactos y parpadeo + duplicados en listado)
+// navbar.php — LUGA (compacto: textos de menús reducidos + sin carets en dropdowns)
 
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 include 'db.php';
@@ -69,22 +69,18 @@ if($idUsuario>0){
 /* CSRF */
 if (empty($_SESSION['csrf'])) $_SESSION['csrf']=bin2hex(random_bytes(16));
 
-/* Badges: traspasos equipos (entrantes a mi sucursal) */
+/* Badges */
 $badgeEquip=0;
 if($idSucursal>0){
   $st=$conn->prepare("SELECT COUNT(*) FROM traspasos WHERE id_sucursal_destino=? AND estatus='Pendiente'");
   $st->bind_param("i",$idSucursal); $st->execute(); $st->bind_result($badgeEquip); $st->fetch(); $st->close();
 }
-
-/* Badges: traspasos SIMs (entrantes a mi sucursal) */
 $badgeSims=0;
 if($idSucursal>0){
   if($st=$conn->prepare("SELECT COUNT(*) FROM traspasos_sims WHERE id_sucursal_destino=? AND estatus='Pendiente'")){
     $st->bind_param("i",$idSucursal); $st->execute(); $st->bind_result($badgeSims); $st->fetch(); $st->close();
   }
 }
-
-/* Badge pendientes por ZONA (GZ) excluyendo 'Eulalia' */
 $badgePendZona=0;
 if(($rolUsuario==='GerenteZona')){
   $zonaGZ=null; $st=$conn->prepare("SELECT s.zona FROM usuarios u INNER JOIN sucursales s ON s.id=u.id_sucursal WHERE u.id=? LIMIT 1");
@@ -106,13 +102,6 @@ if(($rolUsuario==='GerenteZona')){
 
 $esAdmin=in_array($rolUsuario,['Admin','Super'],true);
 $primerNombre=first_name($nombreUsuario);
-
-/* Nudge foto */
-$faltaFoto=empty($avatarUrl);
-$subtipoPropia=(mb_strtolower(trim((string)$sucursalSubtipo),'UTF-8')==='propia');
-$rolElegible=in_array($rolUsuario,['Ejecutivo','Gerente','Admin'],true);
-$cookiePospuesto=!empty($_COOKIE['foto_nudge_24h']);
-$mostrarNudge=$faltaFoto && $rolElegible && $subtipoPropia && !$cookiePospuesto;
 
 /* Activo por URL */
 $current=basename(parse_url($_SERVER['REQUEST_URI'],PHP_URL_PATH));
@@ -138,7 +127,12 @@ function item_active(string $f,string $c):string{ return $c===$f?'active':''; }
 <style>
   /* Tamaño base consistente */
   #topbar{ --nav-base:16px; font-size:var(--nav-base); -webkit-text-size-adjust:100%; text-size-adjust:100%; }
-  #topbar{ --brand-font:.88em; --nav-font:.84em; --drop-font:.86em; --icon-em:.90em; --pad-y:.32em; --pad-x:.48em; }
+  /* ↓ Ajustes globales de tipografía/padding de NAV */
+  #topbar{ --brand-font: clamp(13px, 1.6vw, 20px);
+           --nav-font: .80em;       /* tamaño base de items */
+           --drop-font:.84em;       /* tamaño en menú desplegable */
+           --icon-em:.90em;
+           --pad-y:.30em; --pad-x:.42em; }
   #topbar *{ font-size:inherit; }
 
   .navbar-luga{
@@ -152,15 +146,19 @@ function item_active(string $f,string $c):string{ return $c===$f?'active':''; }
     -webkit-background-clip:text; background-clip:text; color:transparent; text-shadow:0 1px 0 rgba(0,0,0,.25);
     white-space:nowrap;
   }
+  .navbar-brand{ margin-right:.5rem; }
   .navbar-brand img{ width:1.625em; height:1.625em; object-fit:cover; }
 
   .navbar-luga .nav-link{
     padding:var(--pad-y) var(--pad-x);
     font-size:var(--nav-font);
-    border-radius:.6rem; color:#e7eef7 !important; line-height:1.1;
+    border-radius:.6rem; color:#e7eef7 !important; line-height:1.1; letter-spacing:.1px;
   }
-  .navbar-luga .nav-link i{ font-size:var(--icon-em); margin-right:.35rem; }
+  .navbar-luga .nav-link i{ font-size:var(--icon-em); margin-right:.24rem; }
   .navbar-luga .nav-link:hover{ background:rgba(255,255,255,.06); }
+
+  /* Quitar carets (flechitas) de todos los dropdowns */
+  .navbar-luga .dropdown-toggle::after{ display:none !important; }
 
   .navbar-luga .dropdown-menu{
     --bs-dropdown-bg:#0f141a; --bs-dropdown-color:#e7eef7; --bs-dropdown-link-color:#e7eef7;
@@ -170,7 +168,7 @@ function item_active(string $f,string $c):string{ return $c===$f?'active':''; }
     border:1px solid rgba(255,255,255,.08); border-radius:14px; box-shadow:0 16px 40px rgba(0,0,0,.35);
     overflow:hidden; font-size:var(--drop-font);
   }
-  .navbar-luga .dropdown-item{ padding:.48em .76em; line-height:1.15; }
+  .navbar-luga .dropdown-item{ padding:.46em .70em; line-height:1.12; }
   .navbar-luga .nav-link.active-parent{ background:rgba(255,255,255,.10); box-shadow:inset 0 0 0 1px rgba(255,255,255,.12); }
   .navbar-luga .dropdown-item.active{ background:rgba(255,255,255,.18); font-weight:600; }
 
@@ -205,11 +203,22 @@ function item_active(string $f,string $c):string{ return $c===$f?'active':''; }
   .pulse-ring::after{ content:""; position:absolute; inset:-4px; border-radius:50%; border:2px solid rgba(13,110,253,.65); animation:ring 1.8s ease-out infinite; }
   @keyframes ring{ 0%{transform:scale(.8);opacity:.9;} 70%{transform:scale(1.25);opacity:.1;} 100%{transform:scale(1.4);opacity:0;} }
 
+  /* Compresión específica para pantallas medianas de PC SIN colapsar */
+  @media (min-width:1200px) and (max-width:1400px){
+    #topbar{ --nav-font:.78em; --drop-font:.82em; --pad-x:.38em; --icon-em:.88em; }
+    .navbar-luga .nav-link i{ margin-right:.20rem; }
+  }
+  @media (min-width:1200px) and (max-width:1280px){
+    #topbar{ --nav-font:.74em; --drop-font:.80em; --pad-x:.34em; }
+    .brand-title{ font-size: clamp(12px, 1.3vw, 18px); }
+  }
+
   @media (min-width:1200px) and (max-width:1440px){ #topbar{ font-size:15px; } }
   @media (max-width:420px){ #topbar{ font-size:clamp(15px,3.8vw,16px); } }
 </style>
 
-<nav id="topbar" class="navbar navbar-expand-lg navbar-dark navbar-luga sticky-top">
+<!-- Mantener expandido en ≥1200px para evitar hamburguesa en pantallas medianas de PC -->
+<nav id="topbar" class="navbar navbar-expand-xl navbar-dark navbar-luga sticky-top">
   <div class="container-fluid">
 
     <a class="navbar-brand d-flex align-items-center" href="dashboard_unificado.php">
@@ -222,7 +231,7 @@ function item_active(string $f,string $c):string{ return $c===$f?'active':''; }
     </button>
 
     <div class="collapse navbar-collapse" id="navbarMain">
-      <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+      <ul class="navbar-nav me-auto mb-2 mb-xl-0">
         <?php $pActive=parent_active($grpDashboard,$current); ?>
         <li class="nav-item dropdown">
           <a class="nav-link dropdown-toggle<?= $pActive?' active-parent':'' ?>" href="#" data-bs-toggle="dropdown">
@@ -488,7 +497,7 @@ function item_active(string $f,string $c):string{ return $c===$f?'active':''; }
       <!-- Derecha -->
       <ul class="navbar-nav ms-auto align-items-center">
         <?php if(in_array($rolUsuario,['Ejecutivo','Gerente'])): ?>
-          <li class="nav-item my-1 my-lg-0 me-lg-2">
+          <li class="nav-item my-1 my-xl-0 me-xl-2">
             <a class="nav-link btn-asistencia <?= item_active('asistencia.php',$current) ?>" href="asistencia.php" title="Registrar asistencia">
               <i class="bi bi-fingerprint"></i> Asistencia
             </a>
@@ -498,7 +507,7 @@ function item_active(string $f,string $c):string{ return $c===$f?'active':''; }
         <!-- Perfil / Cambio sucursal -->
         <li class="nav-item dropdown">
           <a class="nav-link dropdown-toggle d-flex align-items-center" href="#" data-bs-toggle="dropdown">
-            <span class="me-2 position-relative <?= $faltaFoto?'pulse-ring':'' ?>">
+            <span class="me-2 position-relative">
               <?php if($avatarUrl): ?>
                 <img src="<?= e($avatarUrl) ?>" class="nav-avatar" alt="avatar"
                      onerror="this.style.display='none'; this.nextElementSibling.style.display='inline-flex';">
@@ -564,7 +573,7 @@ function item_active(string $f,string $c):string{ return $c===$f?'active':''; }
   </div>
 </nav>
 
-<?php if($mostrarNudge): ?>
+<?php if(!empty($avatarUrl) ? false : true): /* nudge solo si no hay foto */ ?>
   <div id="toast-foto" class="toast align-items-center text-bg-light border-0 shadow"
        role="alert" aria-live="assertive" aria-atomic="true"
        style="position:fixed; right:1rem; bottom:1rem; z-index:1080; min-width:320px;">

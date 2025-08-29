@@ -19,6 +19,13 @@ $ALLOWED   = [
   'image/png'       => 'png',
 ];
 
+// Bancos permitidos (lista blanca)
+$ALLOWED_BANKS = [
+  'BBVA','Citibanamex','Banorte','Santander','HSBC','Scotiabank',
+  'Inbursa','Banco Azteca','BanCoppel','Banregio','Afirme',
+  'Banco del Bajío','Banca Mifel','Compartamos Banco'
+];
+
 /* ------- helper: guardar comprobante para un depósito ------- */
 function guardar_comprobante(mysqli $conn, int $deposito_id, array $file, int $idUsuario, int $MAX_BYTES, array $ALLOWED, &$errMsg): bool {
   if (!isset($file['error']) || $file['error'] === UPLOAD_ERR_NO_FILE) {
@@ -77,11 +84,11 @@ function guardar_comprobante(mysqli $conn, int $deposito_id, array $file, int $i
   return true;
 }
 
-/* ------- Registrar DEPÓSITO (AHORA con comprobante OBLIGATORIO) ------- */
+/* ------- Registrar DEPÓSITO (referencia OBLIGATORIA y NUMÉRICA) ------- */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['accion']) && $_POST['accion']==='registrar') {
   $id_corte        = (int)($_POST['id_corte'] ?? 0);
   $fecha_deposito  = $_POST['fecha_deposito'] ?? date('Y-m-d');
-  $banco           = trim($_POST['banco'] ?? '');
+  $banco           = trim($_POST['banco'] ?? ''); // viene del hidden sincronizado
   $monto           = (float)($_POST['monto_depositado'] ?? 0);
   $referencia      = trim($_POST['referencia'] ?? '');
   $motivo          = trim($_POST['motivo'] ?? '');
@@ -90,7 +97,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['accion']) && $_POST['
   if (!isset($_FILES['comprobante']) || $_FILES['comprobante']['error'] === UPLOAD_ERR_NO_FILE) {
     $msg = "<div class='alert alert-warning shadow-sm'>⚠ Debes adjuntar el comprobante del depósito.</div>";
   } elseif ($_FILES['comprobante']['error'] !== UPLOAD_ERR_OK) {
-    $msg = "<div class='alert alert-danger shadow-sm'>❌ Error al subir el archivo (código ".$_FILES['comprobante']['error'].").</div>";
+    $msg = "<div class='alert alert-danger shadow-sm'>❌ Error al subir el archivo (código ".$_FILES['comprobante']['error']. ").</div>";
   } elseif ($_FILES['comprobante']['size'] <= 0 || $_FILES['comprobante']['size'] > $MAX_BYTES) {
     $msg = "<div class='alert alert-warning shadow-sm'>⚠ El comprobante debe pesar hasta 10 MB.</div>";
   } else {
@@ -102,50 +109,54 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['accion']) && $_POST['
     } else {
       // 2) Validar datos y pendiente del corte
       if ($id_corte>0 && $monto>0 && $banco!=='') {
-        $sqlCheck = "SELECT cc.total_efectivo, IFNULL(SUM(ds.monto_depositado),0) AS suma_actual
-                     FROM cortes_caja cc
-                     LEFT JOIN depositos_sucursal ds ON ds.id_corte = cc.id
-                     WHERE cc.id = ? GROUP BY cc.id";
-        $stmt = $conn->prepare($sqlCheck);
-        $stmt->bind_param("i", $id_corte);
-        $stmt->execute();
-        $corte = $stmt->get_result()->fetch_assoc();
-        $stmt->close();
-
-        if ($corte) {
-          $pendiente = (float)$corte['total_efectivo'] - (float)$corte['suma_actual'];
-          if ($monto > $pendiente + 0.0001) {
-            $msg = "<div class='alert alert-danger shadow-sm'>❌ El depósito excede el monto pendiente del corte. Solo queda $".number_format($pendiente,2)."</div>";
-          } else {
-            // 3) Insertar y adjuntar (si adjuntar falla, revertimos)
-            $stmtIns = $conn->prepare("
-              INSERT INTO depositos_sucursal
-                (id_sucursal, id_corte, fecha_deposito, monto_depositado, banco, referencia, observaciones, estado, creado_en)
-              VALUES (?, ?, ?, ?, ?, ?, ?, 'Pendiente', NOW())
-            ");
-            // (Conservar firma original)
-            $stmtIns->bind_param("iisddss", $idSucursal, $id_corte, $fecha_deposito, $monto, $banco, $referencia, $motivo);
-            if ($stmtIns->execute()) {
-              $deposito_id = $stmtIns->insert_id;
-              $stmtIns->close();
-
-              $errUp = '';
-              if (guardar_comprobante($conn, $deposito_id, $_FILES['comprobante'], $idUsuario, $MAX_BYTES, $ALLOWED, $errUp)) {
-                $msg = "<div class='alert alert-success shadow-sm'>✅ Depósito registrado y comprobante adjuntado.</div>";
-              } else {
-                // revertir
-                $del = $conn->prepare("DELETE FROM depositos_sucursal WHERE id=?");
-                $del->bind_param('i', $deposito_id);
-                $del->execute();
-                $del->close();
-                $msg = "<div class='alert alert-danger shadow-sm'>❌ No se guardó el depósito porque falló el comprobante: ".htmlspecialchars($errUp)."</div>";
-              }
-            } else {
-              $msg = "<div class='alert alert-danger shadow-sm'>❌ Error al registrar depósito.</div>";
-            }
-          }
+        if (!in_array($banco, $ALLOWED_BANKS, true)) {
+          $msg = "<div class='alert alert-warning shadow-sm'>⚠ Selecciona un banco válido del listado.</div>";
         } else {
-          $msg = "<div class='alert alert-danger shadow-sm'>❌ Corte no encontrado.</div>";
+          $sqlCheck = "SELECT cc.total_efectivo, IFNULL(SUM(ds.monto_depositado),0) AS suma_actual
+                       FROM cortes_caja cc
+                       LEFT JOIN depositos_sucursal ds ON ds.id_corte = cc.id
+                       WHERE cc.id = ? GROUP BY cc.id";
+          $stmt = $conn->prepare($sqlCheck);
+          $stmt->bind_param("i", $id_corte);
+          $stmt->execute();
+          $corte = $stmt->get_result()->fetch_assoc();
+          $stmt->close();
+
+          if ($corte) {
+            $pendiente = (float)$corte['total_efectivo'] - (float)$corte['suma_actual'];
+            if ($monto > $pendiente + 0.0001) {
+              $msg = "<div class='alert alert-danger shadow-sm'>❌ El depósito excede el monto pendiente del corte. Solo queda $".number_format($pendiente,2)."</div>";
+            } else {
+              // 3) Insertar y adjuntar (si adjuntar falla, revertimos)
+              $stmtIns = $conn->prepare("
+                INSERT INTO depositos_sucursal
+                  (id_sucursal, id_corte, fecha_deposito, monto_depositado, banco, referencia, observaciones, estado, creado_en)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'Pendiente', NOW())
+              ");
+              // i, i, s, d, s, s, s   ->  id_sucursal, id_corte, fecha, monto, banco, referencia, motivo
+              $stmtIns->bind_param("iisdsss", $idSucursal, $id_corte, $fecha_deposito, $monto, $banco, $referencia, $motivo);
+              if ($stmtIns->execute()) {
+                $deposito_id = $stmtIns->insert_id;
+                $stmtIns->close();
+
+                $errUp = '';
+                if (guardar_comprobante($conn, $deposito_id, $_FILES['comprobante'], $idUsuario, $MAX_BYTES, $ALLOWED, $errUp)) {
+                  $msg = "<div class='alert alert-success shadow-sm'>✅ Depósito registrado y comprobante adjuntado.</div>";
+                } else {
+                  // revertir
+                  $del = $conn->prepare("DELETE FROM depositos_sucursal WHERE id=?");
+                  $del->bind_param('i', $deposito_id);
+                  $del->execute();
+                  $del->close();
+                  $msg = "<div class='alert alert-danger shadow-sm'>❌ No se guardó el depósito porque falló el comprobante: ".htmlspecialchars($errUp)."</div>";
+                }
+              } else {
+                $msg = "<div class='alert alert-danger shadow-sm'>❌ Error al registrar depósito.</div>";
+              }
+            }
+          } else {
+            $msg = "<div class='alert alert-danger shadow-sm'>❌ Corte no encontrado.</div>";
+          }
         }
       } else {
         $msg = "<div class='alert alert-warning shadow-sm'>⚠ Debes llenar todos los campos obligatorios.</div>";
@@ -154,30 +165,60 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['accion']) && $_POST['
   }
 }
 
-/* ------- Subir/Reemplazar comprobante DESDE historial (seguimos permitiendo) ------- */
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['accion']) && $_POST['accion']==='subir_comprobante') {
-  $deposito_id = (int)($_POST['deposito_id'] ?? 0);
+/* =========================
+   Filtros e Historial (GET)
+   ========================= */
+$per_page = max(10, (int)($_GET['pp'] ?? 25));
+$page     = max(1, (int)($_GET['p']  ?? 1));
+$f_inicio = trim($_GET['f_inicio'] ?? '');
+$f_fin    = trim($_GET['f_fin']    ?? '');
+$f_banco  = trim($_GET['f_banco']  ?? '');
+$f_estado = trim($_GET['f_estado'] ?? '');
+$f_q      = trim($_GET['q']        ?? '');
 
-  $stmt = $conn->prepare("SELECT id_sucursal, estado FROM depositos_sucursal WHERE id=?");
-  $stmt->bind_param('i', $deposito_id);
+$conds = [ 'ds.id_sucursal = ?' ];
+$types = 'i';
+$params = [ $idSucursal ];
+
+if ($f_inicio !== '') { $conds[] = 'ds.fecha_deposito >= ?'; $types .= 's'; $params[] = $f_inicio; }
+if ($f_fin    !== '') { $conds[] = 'ds.fecha_deposito <= ?'; $types .= 's'; $params[] = $f_fin; }
+if ($f_banco  !== '') { $conds[] = 'ds.banco = ?';             $types .= 's'; $params[] = $f_banco; }
+if ($f_estado !== '') { $conds[] = 'ds.estado = ?';            $types .= 's'; $params[] = $f_estado; }
+if ($f_q      !== '') {
+  $conds[] = '(ds.referencia LIKE ? OR ds.banco LIKE ? OR ds.observaciones LIKE ?)';
+  $types  .= 'sss';
+  $like = '%'.$f_q.'%';
+  array_push($params, $like, $like, $like);
+}
+$where = implode(' AND ', $conds);
+
+/* ------- Export CSV si se pide ------- */
+if (isset($_GET['export']) && $_GET['export'] == '1') {
+  $sqlExp = "SELECT ds.id, ds.id_corte, cc.fecha_corte, ds.fecha_deposito, ds.monto_depositado,
+                    ds.banco, ds.referencia, ds.estado
+             FROM depositos_sucursal ds
+             INNER JOIN cortes_caja cc ON cc.id = ds.id_corte
+             WHERE $where
+             ORDER BY ds.fecha_deposito DESC, ds.id DESC";
+  $stmt = $conn->prepare($sqlExp);
+  $stmt->bind_param($types, ...$params);
   $stmt->execute();
-  $dep = $stmt->get_result()->fetch_assoc();
-  $stmt->close();
+  $res = $stmt->get_result();
 
-  if (!$dep) {
-    $msg = "<div class='alert alert-danger shadow-sm'>❌ Depósito no encontrado.</div>";
-  } elseif ($rolUsuario!=='Admin' && (int)$dep['id_sucursal'] !== $idSucursal) {
-    $msg = "<div class='alert alert-danger shadow-sm'>❌ No tienes permiso para adjuntar a este depósito.</div>";
-  } elseif (!in_array($dep['estado'], ['Pendiente','Parcial'], true)) {
-    $msg = "<div class='alert alert-warning shadow-sm'>⚠ No se puede modificar un depósito ya validado.</div>";
-  } else {
-    $errUp = '';
-    if (guardar_comprobante($conn, $deposito_id, $_FILES['comprobante'] ?? [], $idUsuario, $MAX_BYTES, $ALLOWED, $errUp)) {
-      $msg = "<div class='alert alert-success shadow-sm'>✅ Comprobante adjuntado.</div>";
-    } else {
-      $msg = "<div class='alert alert-danger shadow-sm'>❌ ".$errUp."</div>";
-    }
+  header('Content-Type: text/csv; charset=UTF-8');
+  header('Content-Disposition: attachment; filename="depositos_'.date('Ymd_His').'.csv"');
+  // BOM para Excel
+  echo "\xEF\xBB\xBF";
+  $out = fopen('php://output', 'w');
+  fputcsv($out, ['ID Depósito','ID Corte','Fecha Corte','Fecha Depósito','Monto','Banco','Referencia','Estado']);
+  while ($row = $res->fetch_assoc()) {
+    fputcsv($out, [
+      $row['id'], $row['id_corte'], $row['fecha_corte'], $row['fecha_deposito'],
+      number_format((float)$row['monto_depositado'], 2, '.', ''), $row['banco'], $row['referencia'], $row['estado']
+    ]);
   }
+  fclose($out);
+  exit();
 }
 
 /* ------- Consultas para render ------- */
@@ -196,25 +237,40 @@ $stmtPend->execute();
 $cortesPendientes = $stmtPend->get_result()->fetch_all(MYSQLI_ASSOC);
 $stmtPend->close();
 
-// Historial
+// Historial paginado
+$sqlCount = "SELECT COUNT(*) AS n
+             FROM depositos_sucursal ds
+             INNER JOIN cortes_caja cc ON cc.id = ds.id_corte
+             WHERE $where";
+$stmtC = $conn->prepare($sqlCount);
+$stmtC->bind_param($types, ...$params);
+$stmtC->execute();
+$total_rows = (int)$stmtC->get_result()->fetch_assoc()['n'];
+$stmtC->close();
+
+$offset = ($page - 1) * $per_page;
 $sqlHistorial = "
   SELECT ds.*, cc.fecha_corte
   FROM depositos_sucursal ds
   INNER JOIN cortes_caja cc ON cc.id = ds.id_corte
-  WHERE ds.id_sucursal = ?
-  ORDER BY ds.fecha_deposito DESC, ds.id DESC";
+  WHERE $where
+  ORDER BY ds.fecha_deposito DESC, ds.id DESC
+  LIMIT ? OFFSET ?";
 $stmtHist = $conn->prepare($sqlHistorial);
-$stmtHist->bind_param("i", $idSucursal);
+$types2 = $types . 'ii';
+$params2 = array_merge($params, [ $per_page, $offset ]);
+$stmtHist->bind_param($types2, ...$params2);
 $stmtHist->execute();
 $historial = $stmtHist->get_result()->fetch_all(MYSQLI_ASSOC);
 $stmtHist->close();
 
-/* ---- Totales para tarjetas ---- */
+// KPIs rápidos
 $totalPendiente = 0.0;
 foreach ($cortesPendientes as $c) {
   $totalPendiente += ((float)$c['total_efectivo'] - (float)$c['total_depositado']);
 }
 $numCortes = count($cortesPendientes);
+$total_pages = max(1, (int)ceil($total_rows / $per_page));
 ?>
 <!DOCTYPE html>
 <html lang="es" data-bs-theme="light">
@@ -226,117 +282,78 @@ $numCortes = count($cortesPendientes);
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
   <style>
     :root{
-      --surface: #ffffff;
-      --muted: #6b7280;
+      --brand1:#0ea5e9; --brand2:#22c55e; --ink:#0f172a; --muted:#6b7280; --surface:#fff;
     }
-    body{ background: #f6f7fb; }
-    .page-header{
-      display:flex; align-items:center; justify-content:space-between; gap:1rem; margin-top:1rem;
-    }
-    .page-title{
-      font-weight:700; letter-spacing:.2px; margin:0;
-    }
-    .card-surface{
-      background: var(--surface);
-      border: 1px solid rgba(0,0,0,.05);
-      box-shadow: 0 6px 16px rgba(16,24,40,.06);
-      border-radius: 18px;
-    }
-    .stat{
-      display:flex; align-items:center; gap:.75rem;
-    }
-    .stat .icon{
-      width:40px; height:40px; border-radius:12px; display:grid; place-items:center;
-      background:#eef2ff;
-    }
-    .table thead th{
-      position: sticky; top: 0; z-index: 1;
-    }
-    .chip{
-      display:inline-flex; align-items:center; gap:.4rem; padding:.25rem .6rem; border-radius:999px; font-weight:600; font-size:.85rem;
-    }
-    .chip-success{ background:#e7f8ef; color:#0f7a3d; border:1px solid #b7f1cf; }
-    .chip-warn{ background:#fff6e6; color:#9a6200; border:1px solid #ffe1a8; }
-    .chip-pending{ background:#eef2ff; color:#3f51b5; border:1px solid #dfe3ff; }
-    .small-muted{ color: var(--muted); font-size:.9rem; }
-    .tbl-wrap{ overflow:auto; border-radius:14px; }
-    .input-help{ font-size:.8rem; color:#6b7280; }
-    .btn-soft{
-      border:1px solid rgba(0,0,0,.08);
-      background:#ffffff;
-    }
-    .btn-soft:hover{ background:#f9fafb; }
-    .form-mini .form-control,
-    .form-mini .form-select{
-      height: 40px;
-    }
-    .form-mini .form-control[type="file"]{
-      height:auto;
-    }
+    body{ background:#f6f7fb; color:var(--ink); }
+    .page-hero{background:linear-gradient(135deg,var(--brand1),var(--brand2));color:#fff;border-radius:18px;padding:18px 20px;box-shadow:0 10px 30px rgba(2,6,23,.18)}
+    .page-title{margin:0;font-weight:800;letter-spacing:.3px}
+    .hero-kpis{gap:1rem}
+    .kpi{display:flex;align-items:center;gap:.75rem;padding:10px 14px;background:rgba(255,255,255,.15);border-radius:12px}
+    .kpi .num{font-weight:800}
+
+    .card-surface{background:var(--surface);border:1px solid rgba(0,0,0,.05);box-shadow:0 10px 30px rgba(2,6,23,.06);border-radius:18px}
+    .chip{display:inline-flex;align-items:center;gap:.4rem;padding:.25rem .6rem;border-radius:999px;font-weight:600;font-size:.85rem}
+    .chip-success{background:#e7f8ef;color:#0f7a3d;border:1px solid #b7f1cf}
+    .chip-warn{background:#fff6e6;color:#9a6200;border:1px solid #ffe1a8}
+    .chip-pending{background:#eef2ff;color:#3f51b5;border:1px solid #dfe3ff}
+
+    .form-mini .form-control,.form-mini .form-select{height:38px}
+    .form-mini .form-control[type=file]{height:auto}
+
+    .sticky-head thead th{position:sticky;top:0;z-index:1;background:#fff}
+
+    /* ===== Filtros Modernos ===== */
+    .filters-wrap{border:1px solid rgba(0,0,0,.06);background:#fff;border-radius:16px;padding:14px;box-shadow:0 8px 24px rgba(2,6,23,.06)}
+    .filters-modern .form-floating>.form-control, .filters-modern .form-floating>.form-select{border-radius:12px;border-color:#e5e7eb}
+    .filters-modern .form-floating>label{color:#64748b}
+    .filters-modern .form-control:focus, .filters-modern .form-select:focus{box-shadow:0 0 0 0.25rem rgba(14,165,233,.12);border-color:#a5d8f5}
+    .filters-chips .badge{background:#f1f5f9;border:1px solid #e2e8f0;color:#0f172a}
+    .filters-chips .badge:hover{background:#e2e8f0}
+
+    .shadow-soft{box-shadow:0 8px 20px rgba(2,6,23,.06)}
+    .btn-soft{border:1px solid rgba(0,0,0,.08);background:#fff}
+    .btn-soft:hover{background:#f9fafb}
   </style>
 </head>
 <body>
 <div class="container py-3">
 
-  <div class="page-header">
-    <div>
-      <h1 class="page-title">🏦 Depósitos de Sucursal</h1>
-      <div class="small-muted">Usuario: <strong><?= htmlspecialchars($_SESSION['nombre']) ?></strong> · Rol: <strong><?= htmlspecialchars($rolUsuario) ?></strong></div>
-    </div>
-    <div class="d-flex align-items-center gap-2">
-      <span class="chip chip-pending"><i class="bi bi-cash-coin"></i> Pendiente: $<?= number_format($totalPendiente,2) ?></span>
-      <span class="chip chip-warn"><i class="bi bi-clipboard-check"></i> Cortes: <?= (int)$numCortes ?></span>
+  <div class="page-hero mb-4">
+    <div class="d-flex justify-content-between align-items-center">
+      <div>
+        <h1 class="page-title">🏦 Depósitos de Sucursal</h1>
+        <div class="opacity-75">Usuario <strong><?= htmlspecialchars($_SESSION['nombre']) ?></strong> · Rol <strong><?= htmlspecialchars($rolUsuario) ?></strong></div>
+      </div>
+      <div class="hero-kpis d-none d-md-flex">
+        <div class="kpi"><i class="bi bi-cash-coin"></i> <div><div class="small">Pendiente</div><div class="num">$<?= number_format($totalPendiente,2) ?></div></div></div>
+        <div class="kpi"><i class="bi bi-clipboard-check"></i> <div><div class="small">Cortes</div><div class="num"><?= (int)$numCortes ?></div></div></div>
+        <div class="kpi"><i class="bi bi-archive"></i> <div><div class="small">Registros</div><div class="num"><?= (int)$total_rows ?></div></div></div>
+      </div>
     </div>
   </div>
 
   <?= $msg ?>
 
-  <!-- Tarjetas resumen -->
-  <div class="row g-3 my-2">
-    <div class="col-12 col-md-6 col-xl-4">
-      <div class="card card-surface p-3">
-        <div class="stat">
-          <div class="icon"><i class="bi bi-wallet2"></i></div>
-          <div>
-            <div class="small-muted">Pendiente por depositar</div>
-            <div class="h4 m-0">$<?= number_format($totalPendiente,2) ?></div>
-          </div>
-        </div>
-      </div>
-    </div>
-    <div class="col-12 col-md-6 col-xl-4">
-      <div class="card card-surface p-3">
-        <div class="stat">
-          <div class="icon"><i class="bi bi-journal-text"></i></div>
-          <div>
-            <div class="small-muted">Cortes pendientes</div>
-            <div class="h4 m-0"><?= (int)$numCortes ?></div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Cortes pendientes -->
-  <div class="card card-surface p-3 mt-3">
+  <!-- Cortes pendientes de depósito -->
+  <div class="card-surface p-3 p-md-4 mb-4">
     <div class="d-flex align-items-center justify-content-between mb-2">
       <h4 class="m-0"><i class="bi bi-list-check me-2"></i>Cortes pendientes de depósito</h4>
-      <span class="small-muted">Adjunta comprobante (PDF/JPG/PNG, máx 10MB)</span>
+      <span class="text-muted small">Adjunta comprobante (PDF/JPG/PNG, máx 10MB)</span>
     </div>
 
     <?php if (count($cortesPendientes) == 0): ?>
       <div class="alert alert-info mb-0"><i class="bi bi-info-circle me-1"></i>No hay cortes pendientes de depósito.</div>
     <?php else: ?>
-      <div class="tbl-wrap">
+      <div class="table-responsive shadow-soft rounded sticky-head">
         <table class="table table-hover align-middle mb-0">
           <thead class="table-light">
             <tr>
-              <th style="min-width: 120px;">ID Corte</th>
+              <th style="min-width:120px;">ID Corte</th>
               <th>Fecha Corte</th>
               <th>Efectivo a Depositar</th>
               <th>Total Depositado</th>
               <th>Pendiente</th>
-              <th style="min-width: 560px;">Registrar Depósito</th>
+              <th style="min-width:760px;">Registrar Depósito</th>
             </tr>
           </thead>
           <tbody>
@@ -349,7 +366,7 @@ $numCortes = count($cortesPendientes);
                 <td>$<?= number_format($c['total_depositado'],2) ?></td>
                 <td class="fw-bold text-danger">$<?= number_format($pendiente,2) ?></td>
                 <td>
-                  <form method="POST" class="row g-2 form-mini deposito-form" enctype="multipart/form-data"
+                  <form method="POST" class="row g-2 align-items-end form-mini deposito-form" enctype="multipart/form-data"
                         novalidate
                         data-pendiente="<?= htmlspecialchars($pendiente) ?>"
                         data-idcorte="<?= (int)$c['id'] ?>"
@@ -357,43 +374,55 @@ $numCortes = count($cortesPendientes);
                     <input type="hidden" name="accion" value="registrar">
                     <input type="hidden" name="id_corte" value="<?= (int)$c['id'] ?>">
 
-                    <div class="col-6 col-md-3">
-                      <label class="form-label mb-1 small">Fecha depósito</label>
-                      <input type="date" name="fecha_deposito" class="form-control" required>
-                      <div class="invalid-feedback">Requerido.</div>
+                    <div class="col-6 col-md-2">
+                      <label class="form-label small">Fecha depósito</label>
+                      <input type="date" name="fecha_deposito" class="form-control form-control-sm" required>
+                      <div class="invalid-feedback">Requerida.</div>
                     </div>
 
                     <div class="col-6 col-md-2">
-                      <label class="form-label mb-1 small">Monto</label>
-                      <input type="number" step="0.01" name="monto_depositado" class="form-control" placeholder="0.00" required>
+                      <label class="form-label small">Monto</label>
+                      <div class="input-group input-group-sm">
+                        <span class="input-group-text">$</span>
+                        <input type="number" step="0.01" name="monto_depositado" class="form-control" placeholder="0.00" required>
+                      </div>
                       <div class="invalid-feedback">Ingresa un monto válido.</div>
                     </div>
 
-                    <div class="col-6 col-md-2">
-                      <label class="form-label mb-1 small">Banco</label>
-                      <input type="text" name="banco" class="form-control" placeholder="Banco" required>
-                      <div class="invalid-feedback">Requerido.</div>
+                    <div class="col-6 col-md-3">
+                      <label class="form-label small">Banco</label>
+                      <select class="form-select form-select-sm" name="banco_select" required>
+                        <option value="">Elegir...</option>
+                        <?php foreach ($ALLOWED_BANKS as $b): ?>
+                          <option><?= htmlspecialchars($b) ?></option>
+                        <?php endforeach; ?>
+                      </select>
+                      <input type="hidden" name="banco" value="">
+                      <div class="invalid-feedback">Selecciona un banco.</div>
                     </div>
 
                     <div class="col-6 col-md-2">
-                      <label class="form-label mb-1 small">Referencia</label>
-                      <input type="text" name="referencia" class="form-control" placeholder="Referencia">
+                      <label class="form-label small">Referencia
+                        <i class="bi bi-info-circle ms-1" data-bs-toggle="tooltip" data-bs-placement="top"
+                           title="Es el número de folio, ticket o referencia de tu ticket de depósito"></i>
+                      </label>
+                      <input type="text" name="referencia" class="form-control form-control-sm" placeholder="Folio/ticket" pattern="^[0-9]+$" inputmode="numeric" required oninput="this.value=this.value.replace(/\D/g,'')">
+                      <div class="invalid-feedback">Requerida y solo dígitos (0–9).</div>
                     </div>
 
                     <div class="col-12 col-md-3">
-                      <label class="form-label mb-1 small">Motivo (opcional)</label>
-                      <input type="text" name="motivo" class="form-control" placeholder="Motivo">
+                      <label class="form-label small">Motivo (opcional)</label>
+                      <input type="text" name="motivo" class="form-control form-control-sm" placeholder="Motivo">
                     </div>
 
-                    <div class="col-12">
-                      <label class="form-label mb-1 small">Comprobante</label>
-                      <input type="file" name="comprobante" class="form-control form-control-sm"
-                             accept=".pdf,.jpg,.jpeg,.png" required>
-                      <div class="input-help">Solo PDF / JPG / PNG. Máx 10 MB.</div>
+                    <div class="col-12 col-md-6">
+                      <label class="form-label small">Comprobante</label>
+                      <input type="file" name="comprobante" class="form-control form-control-sm" accept=".pdf,.jpg,.jpeg,.png" required>
+                      <div class="form-text">PDF / JPG / PNG · Máx 10 MB.</div>
                       <div class="invalid-feedback">Adjunta el comprobante.</div>
                     </div>
 
-                    <div class="col-12">
+                    <div class="col-12 col-md-3 ms-auto">
                       <button type="button" class="btn btn-success btn-sm w-100 btn-confirmar-deposito">
                         <i class="bi bi-shield-check me-1"></i> Validar y registrar
                       </button>
@@ -408,10 +437,102 @@ $numCortes = count($cortesPendientes);
     <?php endif; ?>
   </div>
 
-  <!-- Historial -->
-  <div class="card card-surface p-3 mt-4 mb-5">
-    <h4 class="mb-3"><i class="bi bi-clock-history me-2"></i>Historial de Depósitos</h4>
-    <div class="tbl-wrap">
+  <!-- Historial con filtros y paginación -->
+  <div class="card-surface p-3 p-md-4">
+    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+      <h4 class="m-0"><i class="bi bi-clock-history me-2"></i>Historial de Depósitos</h4>
+      <div class="d-flex gap-2">
+        <a class="btn btn-soft btn-sm" href="?<?= http_build_query(array_merge($_GET,['export'=>1])) ?>"><i class="bi bi-filetype-csv me-1"></i>Exportar CSV</a>
+      </div>
+    </div>
+
+    <!-- FILTROS -->
+    <div class="filters-wrap mb-3">
+      <form method="get" class="filters-modern row g-3 align-items-end">
+        <input type="hidden" name="p" value="1">
+
+        <div class="col-12 col-lg-4">
+          <div class="form-floating">
+            <input type="text" name="q" id="f_q" value="<?= htmlspecialchars($f_q) ?>" class="form-control" placeholder="Buscar">
+            <label for="f_q"><i class="bi bi-search me-1"></i>Buscar (referencia, banco, motivo)</label>
+          </div>
+        </div>
+
+        <div class="col-6 col-lg-2">
+          <div class="form-floating">
+            <input type="date" name="f_inicio" id="f_inicio" value="<?= htmlspecialchars($f_inicio) ?>" class="form-control" placeholder="Desde">
+            <label for="f_inicio"><i class="bi bi-calendar3 me-1"></i>Desde</label>
+          </div>
+        </div>
+        <div class="col-6 col-lg-2">
+          <div class="form-floating">
+            <input type="date" name="f_fin" id="f_fin" value="<?= htmlspecialchars($f_fin) ?>" class="form-control" placeholder="Hasta">
+            <label for="f_fin"><i class="bi bi-calendar3 me-1"></i>Hasta</label>
+          </div>
+        </div>
+
+        <div class="col-6 col-lg-2">
+          <div class="form-floating">
+            <select name="f_banco" id="f_banco" class="form-select">
+              <option value=""></option>
+              <?php foreach ($ALLOWED_BANKS as $b): $sel = ($f_banco===$b)?'selected':''; ?>
+                <option <?= $sel ?>><?= htmlspecialchars($b) ?></option>
+              <?php endforeach; ?>
+            </select>
+            <label for="f_banco"><i class="bi bi-bank me-1"></i>Banco</label>
+          </div>
+        </div>
+
+        <div class="col-6 col-lg-2">
+          <div class="form-floating">
+            <select name="f_estado" id="f_estado" class="form-select">
+              <?php $estados=[''=>'Todos','Pendiente'=>'Pendiente','Parcial'=>'Parcial','Validado'=>'Validado'];
+                foreach($estados as $k=>$v): $sel = ($f_estado===$k)?'selected':''; ?>
+                <option value="<?= htmlspecialchars($k) ?>" <?= $sel ?>><?= htmlspecialchars($v) ?></option>
+              <?php endforeach; ?>
+            </select>
+            <label for="f_estado"><i class="bi bi-flag me-1"></i>Estado</label>
+          </div>
+        </div>
+
+        <div class="col-6 col-lg-2">
+          <div class="form-floating">
+            <select name="pp" id="pp" class="form-select">
+              <?php foreach([10,25,50,100] as $pp): $sel=($per_page==$pp)?'selected':''; ?>
+                <option value="<?= $pp ?>" <?= $sel ?>><?= $pp ?>/pág</option>
+              <?php endforeach; ?>
+            </select>
+            <label for="pp"><i class="bi bi-list-ul me-1"></i>Tamaño</label>
+          </div>
+        </div>
+
+        <div class="col-12 d-flex gap-2">
+          <button class="btn btn-primary"><i class="bi bi-funnel me-1"></i>Filtrar</button>
+          <a class="btn btn-outline-secondary" href="?"><i class="bi bi-x-circle me-1"></i>Limpiar</a>
+        </div>
+      </form>
+
+      <?php
+        // Chips de filtros activos (links para limpiar cada uno)
+        $chips = [];
+        if ($f_q      !== '') $chips[] = ['label' => 'Búsqueda: '.$f_q, 'key' => 'q'];
+        if ($f_inicio !== '') $chips[] = ['label' => 'Desde: '.$f_inicio, 'key' => 'f_inicio'];
+        if ($f_fin    !== '') $chips[] = ['label' => 'Hasta: '.$f_fin, 'key' => 'f_fin'];
+        if ($f_banco  !== '') $chips[] = ['label' => 'Banco: '.$f_banco, 'key' => 'f_banco'];
+        if ($f_estado !== '') $chips[] = ['label' => 'Estado: '.$f_estado, 'key' => 'f_estado'];
+      ?>
+      <?php if ($chips): ?>
+        <div class="filters-chips mt-2">
+          <?php foreach ($chips as $ch): $qs = $_GET; unset($qs[$ch['key']], $qs['p']); $href = '?' . http_build_query($qs); ?>
+            <a class="badge rounded-pill text-decoration-none me-2 mb-2" href="<?= $href ?>">
+              <i class="bi bi-x-lg me-1"></i><?= htmlspecialchars($ch['label']) ?>
+            </a>
+          <?php endforeach; ?>
+        </div>
+      <?php endif; ?>
+    </div>
+
+    <div class="table-responsive sticky-head">
       <table class="table table-hover align-middle mb-0">
         <thead class="table-light">
           <tr>
@@ -419,7 +540,7 @@ $numCortes = count($cortesPendientes);
             <th>ID Corte</th>
             <th>Fecha Corte</th>
             <th>Fecha Depósito</th>
-            <th>Monto</th>
+            <th class="text-end">Monto</th>
             <th>Banco</th>
             <th>Referencia</th>
             <th>Comprobante</th>
@@ -427,13 +548,15 @@ $numCortes = count($cortesPendientes);
           </tr>
         </thead>
         <tbody>
-          <?php foreach ($historial as $h): ?>
+          <?php if (!$historial): ?>
+            <tr><td colspan="9" class="text-center text-muted py-4">Sin resultados con los filtros seleccionados.</td></tr>
+          <?php else: foreach ($historial as $h): ?>
             <tr>
               <td><span class="badge text-bg-secondary">#<?= (int)$h['id'] ?></span></td>
               <td><?= (int)$h['id_corte'] ?></td>
               <td><?= htmlspecialchars($h['fecha_corte']) ?></td>
               <td><?= htmlspecialchars($h['fecha_deposito']) ?></td>
-              <td>$<?= number_format($h['monto_depositado'],2) ?></td>
+              <td class="text-end">$<?= number_format($h['monto_depositado'],2) ?></td>
               <td><?= htmlspecialchars($h['banco']) ?></td>
               <td><?= htmlspecialchars($h['referencia']) ?></td>
               <td>
@@ -441,25 +564,8 @@ $numCortes = count($cortesPendientes);
                   <a class="btn btn-soft btn-sm" target="_blank" href="deposito_comprobante.php?id=<?= (int)$h['id'] ?>">
                     <i class="bi bi-file-earmark-arrow-down"></i> Ver
                   </a>
-                  <?php if (in_array($h['estado'], ['Pendiente','Parcial'], true)): ?>
-                    <small class="text-muted d-block mt-1">Puedes reemplazarlo abajo.</small>
-                  <?php endif; ?>
                 <?php else: ?>
-                  <span class="small-muted">Sin archivo</span>
-                <?php endif; ?>
-
-                <?php if (in_array($h['estado'], ['Pendiente','Parcial'], true)): ?>
-                  <form class="mt-2" method="post" enctype="multipart/form-data">
-                    <input type="hidden" name="accion" value="subir_comprobante">
-                    <input type="hidden" name="deposito_id" value="<?= (int)$h['id'] ?>">
-                    <div class="input-group input-group-sm">
-                      <input type="file" name="comprobante" class="form-control" accept=".pdf,.jpg,.jpeg,.png" required>
-                      <button class="btn btn-outline-<?= empty($h['comprobante_archivo']) ? 'success' : 'warning' ?>">
-                        <i class="bi <?= empty($h['comprobante_archivo']) ? 'bi-cloud-upload' : 'bi-arrow-repeat' ?>"></i>
-                        <?= empty($h['comprobante_archivo']) ? 'Subir' : 'Reemplazar' ?>
-                      </button>
-                    </div>
-                  </form>
+                  <span class="text-muted small">Sin archivo</span>
                 <?php endif; ?>
               </td>
               <td>
@@ -475,10 +581,36 @@ $numCortes = count($cortesPendientes);
                 ?>
               </td>
             </tr>
-          <?php endforeach; ?>
+          <?php endforeach; endif; ?>
         </tbody>
       </table>
     </div>
+
+    <!-- Paginación -->
+    <nav class="mt-3">
+      <ul class="pagination pagination-sm justify-content-end">
+        <?php
+          $qs = $_GET; unset($qs['p']);
+          $base = '?' . http_build_query($qs);
+          $prev = max(1, $page-1); $next = min($total_pages, $page+1);
+        ?>
+        <li class="page-item <?= $page<=1?'disabled':'' ?>">
+          <a class="page-link" href="<?= $base.'&p='.$prev ?>" tabindex="-1">&laquo;</a>
+        </li>
+        <?php
+          $start = max(1, $page-2); $end = min($total_pages, $page+2);
+          if ($start>1) echo '<li class="page-item"><a class="page-link" href="'.$base.'&p=1">1</a></li><li class="page-item disabled"><span class="page-link">…</span></li>';
+          for($i=$start;$i<=$end;$i++){
+            $active = ($i==$page)?'active':'';
+            echo '<li class="page-item '.$active.'"><a class="page-link" href="'.$base.'&p='.$i.'">'.$i.'</a></li>';
+          }
+          if ($end<$total_pages) echo '<li class="page-item disabled"><span class="page-link">…</span></li><li class="page-item"><a class="page-link" href="'.$base.'&p='.$total_pages.'">'.$total_pages.'</a></li>';
+        ?>
+        <li class="page-item <?= $page>=$total_pages?'disabled':'' ?>">
+          <a class="page-link" href="<?= $base.'&p='.$next ?>">&raquo;</a>
+        </li>
+      </ul>
+    </nav>
   </div>
 
 </div>
@@ -495,46 +627,46 @@ $numCortes = count($cortesPendientes);
         <div class="row g-3">
           <div class="col-12 col-md-4">
             <div class="card card-surface p-3">
-              <div class="small-muted">ID Corte</div>
+              <div class="text-muted small">ID Corte</div>
               <div id="confCorteId" class="h5 m-0">—</div>
             </div>
           </div>
           <div class="col-12 col-md-4">
             <div class="card card-surface p-3">
-              <div class="small-muted">Fecha Corte</div>
+              <div class="text-muted small">Fecha Corte</div>
               <div id="confFechaCorte" class="h5 m-0">—</div>
             </div>
           </div>
           <div class="col-12 col-md-4">
             <div class="card card-surface p-3">
-              <div class="small-muted">Fecha Depósito</div>
+              <div class="text-muted small">Fecha Depósito</div>
               <div id="confFechaDeposito" class="h5 m-0">—</div>
             </div>
           </div>
 
           <div class="col-12 col-md-4">
             <div class="card card-surface p-3">
-              <div class="small-muted">Monto</div>
+              <div class="text-muted small">Monto</div>
               <div id="confMonto" class="h5 m-0">—</div>
               <div id="confPendienteHelp" class="small text-danger mt-1 d-none"><i class="bi bi-exclamation-triangle me-1"></i>El monto supera el pendiente.</div>
             </div>
           </div>
           <div class="col-12 col-md-4">
             <div class="card card-surface p-3">
-              <div class="small-muted">Banco</div>
+              <div class="text-muted small">Banco</div>
               <div id="confBanco" class="h5 m-0">—</div>
             </div>
           </div>
           <div class="col-12 col-md-4">
             <div class="card card-surface p-3">
-              <div class="small-muted">Referencia</div>
+              <div class="text-muted small">Referencia</div>
               <div id="confReferencia" class="h5 m-0">—</div>
             </div>
           </div>
 
           <div class="col-12">
             <div class="card card-surface p-3">
-              <div class="small-muted">Motivo (opcional)</div>
+              <div class="text-muted small">Motivo (opcional)</div>
               <div id="confMotivo" class="m-0">—</div>
             </div>
           </div>
@@ -543,7 +675,7 @@ $numCortes = count($cortesPendientes);
             <div class="card card-surface p-3">
               <div class="d-flex align-items-center justify-content-between">
                 <div>
-                  <div class="small-muted">Comprobante</div>
+                  <div class="text-muted small">Comprobante</div>
                   <div id="confArchivo" class="m-0">—</div>
                 </div>
                 <div id="confPreview" class="ms-3"></div>
@@ -572,14 +704,32 @@ $numCortes = count($cortesPendientes);
   const modal     = new bootstrap.Modal(modalEl);
   let formToSubmit = null;
 
+  // tooltips
+  document.querySelectorAll('[data-bs-toggle="tooltip"]').forEach(el => new bootstrap.Tooltip(el));
+
+  // Lista blanca en el cliente (debiera coincidir con PHP)
+  const allowedBanks = [
+    "BBVA","Citibanamex","Banorte","Santander","HSBC","Scotiabank",
+    "Inbursa","Banco Azteca","BanCoppel","Banregio","Afirme",
+    "Banco del Bajío","Banca Mifel","Compartamos Banco"
+  ];
+
+  // Sincroniza select de bancos con el hidden "banco"
+  document.querySelectorAll('.deposito-form').forEach(form => {
+    const sel = form.querySelector('select[name="banco_select"]');
+    const hidden = form.querySelector('input[name="banco"]');
+    if (!sel || !hidden) return;
+    const sync = () => { hidden.value = sel.value || ""; };
+    sel.addEventListener('change', sync);
+    sync(); // init
+  });
+
   const formatMXN = (n) => new Intl.NumberFormat('es-MX', { style:'currency', currency:'MXN' }).format(n);
 
-  // Validación de archivo (tipo y tamaño)
   function validateFile(file){
     if(!file) return {ok:false, msg:'Adjunta el comprobante.'};
     const allowed = ['application/pdf','image/jpeg','image/png'];
     if (!allowed.includes(file.type)) {
-      // fallback: validar por extensión si el navegador no establece type
       const name = (file.name||'').toLowerCase();
       const extOk = name.endsWith('.pdf') || name.endsWith('.jpg') || name.endsWith('.jpeg') || name.endsWith('.png');
       if(!extOk) return {ok:false, msg:'Tipo de archivo no permitido.'};
@@ -588,15 +738,11 @@ $numCortes = count($cortesPendientes);
     return {ok:true};
   }
 
-  // Hook a cada formulario de depósito
   document.querySelectorAll('.deposito-form').forEach(form => {
     form.querySelector('.btn-confirmar-deposito').addEventListener('click', () => {
-      // Bootstrap validation básica
       form.classList.add('was-validated');
-      if (!form.checkValidity()) {
-        // Si falla algún required del navegador, no seguimos
-        return;
-      }
+      if (!form.checkValidity()) return;
+
       const pendiente  = parseFloat(form.dataset.pendiente || '0');
       const idCorte    = form.dataset.idcorte || '';
       const fechaCorte = form.dataset.fechacorte || '';
@@ -609,15 +755,16 @@ $numCortes = count($cortesPendientes);
       const fileInput  = form.querySelector('input[name="comprobante"]');
       const file       = fileInput?.files?.[0];
 
-      // Validaciones custom
       let errors = [];
       if(!(monto > 0)) errors.push('Ingresa un monto mayor a 0.');
       if(monto > (pendiente + 0.0001)) errors.push('El monto supera el pendiente del corte.');
       if(!banco) errors.push('Banco es requerido.');
+      else if(!allowedBanks.includes(banco)) errors.push('Selecciona un banco válido del listado.');
+      if(!referencia) errors.push('Referencia es requerida.');
+      else if(!/^\d+$/.test(referencia)) errors.push('La referencia debe ser numérica (solo dígitos).');
       const fileRes = validateFile(file);
       if(!fileRes.ok) errors.push(fileRes.msg);
 
-      // Llenar modal
       document.getElementById('confCorteId').textContent = '#' + idCorte;
       document.getElementById('confFechaCorte').textContent = fechaCorte || '—';
       document.getElementById('confFechaDeposito').textContent = fechaDep || '—';
@@ -630,7 +777,6 @@ $numCortes = count($cortesPendientes);
       const archivoTxt = file ? `${file.name} · ${(file.size/1024/1024).toFixed(2)} MB` : '—';
       document.getElementById('confArchivo').textContent = archivoTxt;
 
-      // Preview (si es imagen)
       const prev = document.getElementById('confPreview');
       prev.innerHTML = '';
       if (file && file.type.startsWith('image/')) {
@@ -651,17 +797,14 @@ $numCortes = count($cortesPendientes);
         errorsBox.classList.add('d-none');
       }
 
-      // Guardar form y abrir modal
       formToSubmit = errors.length ? null : form;
       document.getElementById('btnModalConfirmar').disabled = !!errors.length;
       modal.show();
     });
   });
 
-  // Confirmar en modal
   document.getElementById('btnModalConfirmar').addEventListener('click', () => {
     if (formToSubmit) {
-      // Enviar
       formToSubmit.submit();
       formToSubmit = null;
       modal.hide();
