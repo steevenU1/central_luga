@@ -15,6 +15,13 @@ $id_usuario  = (int)($_SESSION['id_usuario']  ?? 0);
 $id_sucursal = (int)($_SESSION['id_sucursal'] ?? 0);
 
 /* ===========================
+   Token anti doble-submit
+   =========================== */
+if (empty($_SESSION['cobro_token'])) {
+    $_SESSION['cobro_token'] = bin2hex(random_bytes(16));
+}
+
+/* ===========================
    Nombre de la sucursal
    =========================== */
 $nombre_sucursal = "Sucursal #$id_sucursal";
@@ -38,43 +45,80 @@ $msg = '';
 $lock = (defined('MODO_CAPTURA') && MODO_CAPTURA === false);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $motivo         = trim($_POST['motivo'] ?? '');
-    $tipo_pago      = $_POST['tipo_pago'] ?? '';
-    $monto_total    = (float)($_POST['monto_total'] ?? 0);
-    $monto_efectivo = (float)($_POST['monto_efectivo'] ?? 0);
-    $monto_tarjeta  = (float)($_POST['monto_tarjeta'] ?? 0);
-
-    $comision_especial = (in_array($motivo, ['Abono PayJoy','Abono Krediya'], true)) ? 10.00 : 0.00;
-
-    if ($motivo === '' || $tipo_pago === '' || $monto_total <= 0) {
-        $msg = "<div class='alert alert-warning mb-3'>⚠ Debes llenar todos los campos obligatorios.</div>";
+    // Valida token idempotencia
+    $posted_token = $_POST['cobro_token'] ?? '';
+    if (!hash_equals($_SESSION['cobro_token'] ?? '', $posted_token)) {
+        $msg = "<div class='alert alert-warning mb-3'>⚠ Sesión expirada o envío duplicado. Recarga la página e intenta de nuevo.</div>";
     } else {
-        $valido = false;
-        if ($tipo_pago === 'Efectivo' && abs($monto_efectivo - $monto_total) < 0.01) $valido = true;
-        if ($tipo_pago === 'Tarjeta'  && abs($monto_tarjeta  - $monto_total) < 0.01) $valido = true;
-        if ($tipo_pago === 'Mixto'    && abs(($monto_efectivo + $monto_tarjeta) - $monto_total) < 0.01) $valido = true;
+        $motivo         = trim($_POST['motivo'] ?? '');
+        $tipo_pago      = $_POST['tipo_pago'] ?? '';
+        $monto_total    = (float)($_POST['monto_total'] ?? 0);
+        $monto_efectivo = (float)($_POST['monto_efectivo'] ?? 0);
+        $monto_tarjeta  = (float)($_POST['monto_tarjeta'] ?? 0);
 
-        if (!$valido) {
-            $msg = "<div class='alert alert-danger mb-3'>⚠ Los montos no cuadran con el tipo de pago seleccionado.</div>";
+        // Redondeo seguro
+        $monto_total    = round($monto_total, 2);
+        $monto_efectivo = round($monto_efectivo, 2);
+        $monto_tarjeta  = round($monto_tarjeta, 2);
+
+        // Normaliza por tipo de pago (evita arrastre de valores ocultos)
+        switch ($tipo_pago) {
+            case 'Efectivo':
+                $monto_efectivo = $monto_total;
+                $monto_tarjeta  = 0.00;
+                break;
+            case 'Tarjeta':
+                $monto_tarjeta  = $monto_total;
+                $monto_efectivo = 0.00;
+                break;
+            case 'Mixto':
+                // se queda como viene (ya redondeado)
+                break;
+            default:
+                $monto_efectivo = 0.00;
+                $monto_tarjeta  = 0.00;
+        }
+
+        // Comisión especial (solo si es Abono PayJoy/Krediya y NO es pago con tarjeta)
+        // Si también quieres excluir 'Mixto', cambia la condición a ($tipo_pago === 'Efectivo').
+        $esAbono = in_array($motivo, ['Abono PayJoy','Abono Krediya'], true);
+        $comision_especial = ($esAbono && $tipo_pago !== 'Tarjeta') ? 10.00 : 0.00;
+
+        if ($motivo === '' || $tipo_pago === '' || $monto_total <= 0) {
+            $msg = "<div class='alert alert-warning mb-3'>⚠ Debes llenar todos los campos obligatorios.</div>";
         } else {
-            $stmt = $conn->prepare("
-                INSERT INTO cobros (
-                    id_usuario, id_sucursal, motivo, tipo_pago,
-                    monto_total, monto_efectivo, monto_tarjeta, comision_especial,
-                    fecha_cobro, id_corte, corte_generado
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NULL, 0)
-            ");
-            $stmt->bind_param(
-                "iissdddd",
-                $id_usuario, $id_sucursal, $motivo, $tipo_pago,
-                $monto_total, $monto_efectivo, $monto_tarjeta, $comision_especial
-            );
-            if ($stmt->execute()) {
-                $msg = "<div class='alert alert-success mb-3'>✅ Cobro registrado correctamente.</div>";
+            // Valida coherencia tras normalizar
+            $valido = false;
+            if ($tipo_pago === 'Efectivo' && abs($monto_efectivo - $monto_total) < 0.01) $valido = true;
+            if ($tipo_pago === 'Tarjeta'  && abs($monto_tarjeta  - $monto_total) < 0.01) $valido = true;
+            if ($tipo_pago === 'Mixto'    && abs(($monto_efectivo + $monto_tarjeta) - $monto_total) < 0.01) $valido = true;
+
+            if (!$valido) {
+                $msg = "<div class='alert alert-danger mb-3'>⚠ Los montos no cuadran con el tipo de pago seleccionado.</div>";
             } else {
-                $msg = "<div class='alert alert-danger mb-3'>❌ Error al registrar cobro.</div>";
+                $stmt = $conn->prepare("
+                    INSERT INTO cobros (
+                        id_usuario, id_sucursal, motivo, tipo_pago,
+                        monto_total, monto_efectivo, monto_tarjeta, comision_especial,
+                        fecha_cobro, id_corte, corte_generado
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NULL, 0)
+                ");
+                $stmt->bind_param(
+                    "iissdddd",
+                    $id_usuario, $id_sucursal, $motivo, $tipo_pago,
+                    $monto_total, $monto_efectivo, $monto_tarjeta, $comision_especial
+                );
+                if ($stmt->execute()) {
+                    $msg = "<div class='alert alert-success mb-3'>✅ Cobro registrado correctamente.</div>";
+                    // Regenera token para impedir re-envío del mismo POST
+                    $_SESSION['cobro_token'] = bin2hex(random_bytes(16));
+                    // Limpia POST para no repoblar inputs
+                    $_POST = [];
+                } else {
+                    $msg = "<div class='alert alert-danger mb-3'>❌ Error al registrar cobro.</div>";
+                }
+                $stmt->close();
             }
-            $stmt->close();
         }
     }
 }
@@ -167,19 +211,24 @@ try {
     <!-- Columna izquierda: formulario -->
     <div class="col-12 col-lg-7">
       <form method="POST" class="card card-soft p-3 p-md-4" id="formCobro" novalidate>
+        <input type="hidden" name="cobro_token" value="<?= htmlspecialchars($_SESSION['cobro_token'], ENT_QUOTES, 'UTF-8') ?>">
         <!-- Motivo -->
         <div class="mb-3">
           <label class="form-label label-req"><i class="bi bi-clipboard2-check me-1"></i>Motivo del cobro</label>
           <select name="motivo" id="motivo" class="form-select" required>
             <option value="">-- Selecciona --</option>
-            <option>Enganche</option>
-            <option>Equipo de contado</option>
-            <option>Venta SIM</option>
-            <option>Recarga Tiempo Aire</option>
-            <option>Abono PayJoy</option>
-            <option>Abono Krediya</option>
+            <?php
+              $motivoSel = $_POST['motivo'] ?? '';
+              foreach (['Enganche','Equipo de contado','Venta SIM','Recarga Tiempo Aire','Abono PayJoy','Abono Krediya'] as $m) {
+                  $sel = ($motivoSel === $m) ? 'selected' : '';
+                  echo "<option $sel>".htmlspecialchars($m, ENT_QUOTES, 'UTF-8')."</option>";
+              }
+            ?>
           </select>
-          <div class="form-help">Para <strong>Abono PayJoy/Krediya</strong> se suma comisión especial automática.</div>
+          <div class="form-help">
+            Para <strong>Abono PayJoy/Krediya</strong> se suma comisión especial automática
+            <em>(no aplica si el pago es con tarjeta)</em>.
+          </div>
         </div>
 
         <!-- Tipo de pago + total -->
@@ -188,10 +237,14 @@ try {
           <div class="row g-2">
             <div class="col-12 col-sm-6">
               <select name="tipo_pago" id="tipo_pago" class="form-select" required>
-                <option value="">-- Selecciona --</option>
-                <option value="Efectivo">Efectivo</option>
-                <option value="Tarjeta">Tarjeta</option>
-                <option value="Mixto">Mixto</option>
+                <?php
+                  $tipoSel = $_POST['tipo_pago'] ?? '';
+                  $opts = [''=>'-- Selecciona --','Efectivo'=>'Efectivo','Tarjeta'=>'Tarjeta','Mixto'=>'Mixto'];
+                  foreach ($opts as $val=>$txt){
+                    $sel = ($tipoSel === $val) ? 'selected' : '';
+                    echo "<option value='".htmlspecialchars($val,ENT_QUOTES)."' $sel>".htmlspecialchars($txt,ENT_QUOTES)."</option>";
+                  }
+                ?>
               </select>
             </div>
             <div class="col-12 col-sm-6">
@@ -199,7 +252,7 @@ try {
                 <span class="input-group-text currency-prefix">$</span>
                 <input type="number" step="0.01" min="0" name="monto_total" id="monto_total"
                        class="form-control" placeholder="0.00" required
-                       value="<?= htmlspecialchars((string)($_POST['monto_total'] ?? '')) ?>">
+                       value="<?= htmlspecialchars((string)($_POST['monto_total'] ?? ''), ENT_QUOTES, 'UTF-8') ?>">
               </div>
               <div class="form-help">Monto total del cobro.</div>
             </div>
@@ -214,7 +267,7 @@ try {
               <span class="input-group-text currency-prefix">$</span>
               <input type="number" step="0.01" min="0" name="monto_efectivo" id="monto_efectivo"
                      class="form-control" placeholder="0.00"
-                     value="<?= htmlspecialchars((string)($_POST['monto_efectivo'] ?? '')) ?>">
+                     value="<?= htmlspecialchars((string)($_POST['monto_efectivo'] ?? ''), ENT_QUOTES, 'UTF-8') ?>">
             </div>
           </div>
 
@@ -224,7 +277,7 @@ try {
               <span class="input-group-text currency-prefix">$</span>
               <input type="number" step="0.01" min="0" name="monto_tarjeta" id="monto_tarjeta"
                      class="form-control" placeholder="0.00"
-                     value="<?= htmlspecialchars((string)($_POST['monto_tarjeta'] ?? '')) ?>">
+                     value="<?= htmlspecialchars((string)($_POST['monto_tarjeta'] ?? ''), ENT_QUOTES, 'UTF-8') ?>">
             </div>
           </div>
         </div>
@@ -341,16 +394,36 @@ try {
 
   function toggleCampos(){
     const t=$tipo.val();
+
+    // Mostrar/ocultar secciones
     $(".pago-efectivo, .pago-tarjeta").addClass("d-none");
     if(t==="Efectivo")$(".pago-efectivo").removeClass("d-none");
     if(t==="Tarjeta") $(".pago-tarjeta").removeClass("d-none");
     if(t==="Mixto")   $(".pago-efectivo, .pago-tarjeta").removeClass("d-none");
+
+    // Deshabilitar y limpiar inputs que no aplican (no se envían si están disabled)
+    if (t==="Efectivo"){
+      $tarjeta.prop("disabled", true).val("");
+      $efectivo.prop("disabled", false);
+    } else if (t==="Tarjeta"){
+      $efectivo.prop("disabled", true).val("");
+      $tarjeta.prop("disabled", false);
+    } else if (t==="Mixto"){
+      $efectivo.prop("disabled", false);
+      $tarjeta.prop("disabled", false);
+    } else {
+      $efectivo.prop("disabled", true).val("");
+      $tarjeta.prop("disabled", true).val("");
+    }
+
     validar();
   }
-  function comisionEspecial(m){ return (m==="Abono PayJoy"||m==="Abono Krediya")?10:0; }
+
+  // Comisión especial: aplica solo si es Abono PayJoy/Krediya y NO es tarjeta
+  function comisionEspecial(m,t){ return ((m==="Abono PayJoy"||m==="Abono Krediya") && t!=="Tarjeta") ? 10 : 0; }
 
   function validar(){
-    const m=($motivo.val()||"").trim(), t=$tipo.val()||"", tot=parseFloat($total.val()||0)||0, ef=parseFloat($efectivo.val()||0)||0, tj=parseFloat($tarjeta.val()||0)||0, com=comisionEspecial(m);
+    const m=($motivo.val()||"").trim(), t=$tipo.val()||"", tot=parseFloat($total.val()||0)||0, ef=parseFloat($efectivo.val()||0)||0, tj=parseFloat($tarjeta.val()||0)||0, com=comisionEspecial(m,t);
     $("#r_motivo").text(m||"—"); $("#r_tipo").text(t||"—"); $("#r_total").text(fmt(tot)); $("#r_efectivo").text(fmt(ef)); $("#r_tarjeta").text(fmt(tj)); $("#r_comision").text(fmt(com));
     let ok=false; if(t==="Efectivo") ok=Math.abs(ef-tot)<0.01; if(t==="Tarjeta") ok=Math.abs(tj-tot)<0.01; if(t==="Mixto") ok=Math.abs((ef+tj)-tot)<0.01;
     const $s=$("#r_status");

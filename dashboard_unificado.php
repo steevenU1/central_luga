@@ -4,12 +4,12 @@ if (!isset($_SESSION['id_usuario'])) { header("Location: index.php"); exit(); }
 include 'db.php';
 
 /* ==============================
-   Semana actual y semana anterior
+   Semana actual (mar–lun)
 ================================= */
 function obtenerSemanaPorIndice($offset = 0) {
     $hoy = new DateTime();
     $diaSemana = (int)$hoy->format('N'); // 1=Lun..7=Dom
-    $dif = $diaSemana - 2; // Martes=2
+    $dif = $diaSemana - 2;               // Martes=2
     if ($dif < 0) $dif += 7;
     $inicio = new DateTime();
     $inicio->modify("-$dif days")->setTime(0,0,0);
@@ -43,7 +43,9 @@ function pctDelta($curr, $prev) {
 function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 
 /* ==========================================================
-   SUBQUERY reusables (agregación por VENTA, no por detalle)
+   Agregado por venta (unidades por VENTA, no por detalle)
+   - Para 'Financiamiento+Combo' = 2 unidades.
+   - 'modem/mifi' no suman unidades.
 ========================================================== */
 $subVentasAgg = "
   SELECT
@@ -64,26 +66,26 @@ $subVentasAgg = "
 ";
 
 /* ==============================
-   Dashboard Ejecutivos (semanal)
+   Ejecutivos (cuota por sucursal/semana)
 ================================= */
 $sqlEjecutivos = "
   SELECT 
     u.id, u.nombre, u.rol, s.nombre AS sucursal,
-    (
-      SELECT ec.cuota_ejecutivo
-      FROM esquemas_comisiones ec
-      WHERE ec.activo=1
-        AND ec.fecha_inicio <= ?
-        AND (ec.fecha_fin IS NULL OR ec.fecha_fin >= ?)
-      ORDER BY ec.fecha_inicio DESC
+    COALESCE((
+      SELECT css.cuota_unidades
+      FROM cuotas_semanales_sucursal css
+      WHERE css.id_sucursal = u.id_sucursal
+        AND css.semana_inicio <= ?
+        AND css.semana_fin    >= ?
+      ORDER BY css.semana_inicio DESC
       LIMIT 1
-    ) AS cuota_ejecutivo,
+    ), 6) AS cuota_ejecutivo,
     IFNULL(SUM(va.unidades),0) AS unidades,
     IFNULL(SUM(va.monto),0)    AS total_ventas
   FROM usuarios u
   INNER JOIN sucursales s ON s.id = u.id_sucursal
   LEFT JOIN ( $subVentasAgg ) va ON va.id_usuario = u.id
-  WHERE s.tipo_sucursal='Tienda' AND u.activo = 1
+  WHERE s.tipo_sucursal='Tienda' AND u.activo = 1 AND u.rol='Ejecutivo'
   GROUP BY u.id
   ORDER BY unidades DESC, total_ventas DESC
 ";
@@ -96,29 +98,29 @@ $rankingEjecutivos = [];
 while ($row = $resEjecutivos->fetch_assoc()) {
     $row['unidades']        = (int)$row['unidades'];
     $row['total_ventas']    = (float)$row['total_ventas'];
-    $row['cuota_ejecutivo'] = (int)$row['cuota_ejecutivo'];
+    $row['cuota_ejecutivo'] = (int)($row['cuota_ejecutivo'] ?? 0);
     $row['cumplimiento']    = $row['cuota_ejecutivo']>0 ? ($row['unidades']/$row['cuota_ejecutivo']*100) : 0;
     $rankingEjecutivos[]    = $row;
 }
 $top3Ejecutivos = array_slice(array_column($rankingEjecutivos, 'id'), 0, 3);
 
-// Semana anterior para tendencia (ejecutivos)
+/* Semana anterior (para delta) */
 $sqlEjecutivosPrev = "
   SELECT 
     u.id,
-    (
-      SELECT ec.cuota_ejecutivo
-      FROM esquemas_comisiones ec
-      WHERE ec.activo=1
-        AND ec.fecha_inicio <= ?
-        AND (ec.fecha_fin IS NULL OR ec.fecha_fin >= ?)
-      ORDER BY ec.fecha_inicio DESC
+    COALESCE((
+      SELECT css.cuota_unidades
+      FROM cuotas_semanales_sucursal css
+      WHERE css.id_sucursal = u.id_sucursal
+        AND css.semana_inicio <= ?
+        AND css.semana_fin    >= ?
+      ORDER BY css.semana_inicio DESC
       LIMIT 1
-    ) AS cuota_prev,
+    ), 6) AS cuota_prev,
     IFNULL(SUM(va.unidades),0) AS unidades_prev
   FROM usuarios u
   LEFT JOIN ( $subVentasAgg ) va ON va.id_usuario = u.id
-  WHERE u.activo = 1
+  WHERE u.activo = 1 AND u.rol='Ejecutivo'
   GROUP BY u.id
 ";
 $stmtP = $conn->prepare($sqlEjecutivosPrev);
@@ -128,7 +130,7 @@ $resEjPrev = $stmtP->get_result();
 $prevEjMap = [];
 while ($r = $resEjPrev->fetch_assoc()) {
     $prevEjMap[(int)$r['id']] = [
-        'cuota_prev'     => (int)$r['cuota_prev'],
+        'cuota_prev'     => (int)($r['cuota_prev'] ?? 0),
         'unidades_prev'  => (int)$r['unidades_prev']
     ];
 }
@@ -139,7 +141,7 @@ foreach ($rankingEjecutivos as &$r) {
 unset($r);
 
 /* ==============================
-   Dashboard Sucursales (semanal)
+   Sucursales (monto vs cuota $)
 ================================= */
 $sqlSucursales = "
   SELECT
@@ -168,7 +170,7 @@ $totalUnidades = 0; $totalVentasGlobal = 0; $totalCuotaGlobal = 0;
 while ($row = $resSucursales->fetch_assoc()) {
     $row['unidades']      = (int)$row['unidades'];
     $row['total_ventas']  = (float)$row['total_ventas'];
-    $row['cuota_semanal'] = (float)$row['cuota_semanal'];
+    $row['cuota_semanal'] = (float)($row['cuota_semanal'] ?? 0);
     $row['cumplimiento']  = $row['cuota_semanal']>0 ? ($row['total_ventas']/$row['cuota_semanal']*100) : 0;
     $sucursales[] = $row;
     $totalUnidades     += $row['unidades'];
@@ -178,9 +180,9 @@ while ($row = $resSucursales->fetch_assoc()) {
 $porcentajeGlobal = $totalCuotaGlobal>0 ? ($totalVentasGlobal/$totalCuotaGlobal)*100 : 0;
 
 /* ==============================
-   Agrupación por Zonas  ✅ (esto faltaba)
+   Agrupación por Zonas
 ================================= */
-$zonas = []; // <- inicializamos para evitar warnings
+$zonas = [];
 foreach ($sucursales as $s) {
     $z = trim((string)($s['zona'] ?? ''));
     if ($z === '') $z = 'Sin zona';
@@ -219,7 +221,7 @@ $resSucPrev = $stmt2p->get_result();
 $prevSucMap = [];
 while ($r = $resSucPrev->fetch_assoc()) {
     $prevSucMap[(int)$r['id_sucursal']] = [
-        'cuota_prev'    => (float)$r['cuota_prev'],
+        'cuota_prev'    => (float)($r['cuota_prev'] ?? 0),
         'ventas_prev'   => (float)$r['ventas_prev'],
     ];
 }
@@ -282,42 +284,42 @@ foreach ($weekSeries as $sucursalNombre => $serie) {
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css">
 <style>
-  /* Utilidades */
-  .w-120 { min-width:120px; }
-  .clip { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .num  { font-variant-numeric: tabular-nums; letter-spacing: -.2px; }
+  /* recortes de texto */
+  .clip        { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .clip-name   { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .clip-branch { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* num + columnas compactas */
+  .num     { font-variant-numeric: tabular-nums; letter-spacing: -.2px; }
+  .col-fit { width:1%; white-space:nowrap; } /* fuerza a que se ajuste al contenido */
+
   .trend { font-size: .875rem; white-space: nowrap; }
   .trend .delta { font-weight: 600; }
 
+  /* que la 1ª columna consuma el resto del ancho */
+  .table td:first-child, .table th:first-child { width:auto; }
+
   #topbar{ font-size:16px; }
+
   @media (max-width:576px){
-    /* Ajustes generales en móvil */
     body { font-size: 14px; }
     .container { padding-left: 8px; padding-right: 8px; }
     .card .card-header { padding: .5rem .65rem; font-size: .95rem; }
     .card .card-body   { padding: .65rem; }
-
-    /* Tablas compactas y texto más pequeño */
-    .table { font-size: 12px; table-layout: fixed; }
+    .table { font-size: 12px; table-layout: auto; }
     .table thead th { font-size: 11px; }
     .table td, .table th { padding: .30rem .40rem; }
     .trend { font-size: .72rem; }
-
-    /* Columnas con elipsis por defecto (nombres/lugares) */
-    .clip { max-width: 110px; }
-
-    /* Topbar mobile tweaks */
-    #topbar{ font-size:16px; --brand-font:1.00em; --nav-font:.95em; --drop-font:.95em; --icon-em:1.05em; --pad-y:.44em; --pad-x:.62em; }
-    #topbar .navbar-brand img{ width:1.8em; height:1.8em; }
-    #topbar .btn-asistencia{ font-size:.95em; padding:.5em .9em !important; border-radius:12px; }
-    #topbar .nav-avatar, #topbar .nav-initials{ width:2.1em; height:2.1em; }
-    #topbar .navbar-toggler{ padding:.45em .7em; }
+    .clip        { max-width: 130px; }
+    .clip-name   { max-width: 240px; }   /* ↑ más espacio al nombre del ejecutivo */
+    .clip-branch { max-width: 160px; }
   }
-
   @media (max-width:360px){
     .table { font-size: 11px; }
     .table td, .table th { padding: .28rem .35rem; }
-    .clip { max-width: 96px; }
+    .clip        { max-width: 110px; }
+    .clip-name   { max-width: 200px; }
+    .clip-branch { max-width: 140px; }
   }
 </style>
 </head>
@@ -341,7 +343,7 @@ foreach ($weekSeries as $sucursalNombre => $serie) {
     <span class="ms-2 text-muted small">Comparando con: <?= $inicioPrevObj->format('d/m/Y') ?> → <?= $finPrevObj->format('d/m/Y') ?></span>
   </form>
 
-  <!-- Tarjetas por zonas + global -->
+  <!-- Tarjetas por zonas + global (montos COMPLETOS) -->
   <div class="row mb-4">
     <?php foreach ($zonas as $zona => $info): ?>
       <div class="col-md-4 mb-3">
@@ -349,7 +351,11 @@ foreach ($weekSeries as $sucursalNombre => $serie) {
           <div class="card-header bg-dark text-white">Zona <?= h($zona) ?></div>
           <div class="card-body">
             <h5><?= number_format($info['cumplimiento'],1) ?>% Cumplimiento</h5>
-            <p>Unidades: <?= (int)$info['unidades'] ?><br>Ventas: $<?= number_format($info['ventas'],2) ?><br>Cuota: $<?= number_format($info['cuota'],2) ?></p>
+            <p>
+              Unidades: <?= (int)$info['unidades'] ?><br>
+              Ventas: $<?= number_format($info['ventas'],2) ?><br>
+              Cuota:  $<?= number_format($info['cuota'],2) ?>
+            </p>
             <div class="progress" style="height:20px">
               <div class="progress-bar <?= $info['cumplimiento']>=100?'bg-success':($info['cumplimiento']>=60?'bg-warning':'bg-danger') ?>" style="width:<?= min(100,$info['cumplimiento']) ?>%">
                 <?= number_format(min(100,$info['cumplimiento']),1) ?>%
@@ -364,7 +370,11 @@ foreach ($weekSeries as $sucursalNombre => $serie) {
         <div class="card-header bg-primary text-white">Global Compañía</div>
         <div class="card-body">
           <h5><?= number_format($porcentajeGlobal,1) ?>% Cumplimiento</h5>
-          <p>Unidades: <?= $totalUnidades ?><br>Ventas: $<?= number_format($totalVentasGlobal,2) ?><br>Cuota: $<?= number_format($totalCuotaGlobal,2) ?></p>
+          <p>
+            Unidades: <?= $totalUnidades ?><br>
+            Ventas: $<?= number_format($totalVentasGlobal,2) ?><br>
+            Cuota:  $<?= number_format($totalCuotaGlobal,2) ?>
+          </p>
           <div class="progress" style="height:20px">
             <div class="progress-bar <?= $porcentajeGlobal>=100?'bg-success':($porcentajeGlobal>=60?'bg-warning':'bg-danger') ?>" style="width:<?= min(100,$porcentajeGlobal) ?>%">
               <?= number_format(min(100,$porcentajeGlobal),1) ?>%
@@ -386,7 +396,7 @@ foreach ($weekSeries as $sucursalNombre => $serie) {
     </div>
   </div>
 
-  <!-- Tablas -->
+  <!-- Tabs -->
   <ul class="nav nav-tabs mb-3" id="dashboardTabs">
     <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#ejecutivos">Ejecutivos 👔</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#sucursales">Sucursales 🏢</button></li>
@@ -403,10 +413,10 @@ foreach ($weekSeries as $sucursalNombre => $serie) {
               <thead class="table-dark">
                 <tr>
                   <th>Ejecutivo</th>
-                  <th>Sucursal</th>
-                  <th class="w-120">Unidades</th>
-                  <th class="d-none d-sm-table-cell">Total Ventas ($)</th>
-                  <th>% Cumpl.</th>
+                  <th class="d-none d-sm-table-cell">Sucursal</th> <!-- oculto en móvil -->
+                  <th class="col-fit">Unidades</th>
+                  <th class="d-none d-sm-table-cell col-fit">Total Ventas ($)</th>
+                  <th class="col-fit">% Cumpl.</th>
                   <th class="d-none d-sm-table-cell">Progreso</th>
                 </tr>
               </thead>
@@ -419,23 +429,27 @@ foreach ($weekSeries as $sucursalNombre => $serie) {
                   $dU = (int)$r['delta_unidades'];
                   [$icoU,$clsU] = arrowIcon($dU);
                   $pctU = pctDelta($r['unidades'], $r['unidades'] - $dU);
+                  $metaU = (int)$r['cuota_ejecutivo'];
+                  $progPct = $metaU>0 ? min(100, ($r['unidades']/$metaU)*100) : 0;
                 ?>
                 <tr class="<?= $fila ?>">
-                  <td class="clip" title="<?= h($r['nombre']) ?>"><?= h($r['nombre']).$iconTop ?></td>
-                  <td class="clip" title="<?= h($r['sucursal']) ?>"><?= h($r['sucursal']) ?></td>
-                  <td class="num">
+                  <td class="clip-name" title="<?= h($r['nombre']) ?>"><?= h($r['nombre']).$iconTop ?></td>
+                  <td class="clip-branch d-none d-sm-table-cell" title="<?= h($r['sucursal']) ?>"><?= h($r['sucursal']) ?></td>
+                  <td class="num col-fit">
                     <?= (int)$r['unidades'] ?>
                     <div class="trend"><span class="<?= $clsU ?>"><?= $icoU ?></span>
                       <span class="delta <?= $clsU ?>"><?= ($dU>0?'+':'').$dU ?> u.</span>
                       <?php if ($pctU!==null): ?><span class="text-muted">(<?= ($pctU>=0?'+':'').number_format($pctU,1) ?>%)</span><?php endif; ?>
                     </div>
                   </td>
-                  <td class="d-none d-sm-table-cell num">$<?= number_format($r['total_ventas'],2) ?></td>
-                  <td class="num"><?= number_format($cumpl,1) ?>% <?= $estado ?></td>
+                  <td class="d-none d-sm-table-cell num col-fit">
+                    <span class="money-abbr" data-raw="<?= (float)$r['total_ventas'] ?>">$<?= number_format($r['total_ventas'],2) ?></span>
+                  </td>
+                  <td class="num col-fit"><?= number_format($cumpl,1) ?>% <?= $estado ?></td>
                   <td class="d-none d-sm-table-cell">
                     <div class="progress" style="height:20px">
-                      <div class="progress-bar <?= $cumpl>=100?'bg-success':($cumpl>=60?'bg-warning':'bg-danger') ?>" style="width:<?= min(100,$cumpl) ?>%">
-                        <?= $cumpl ?>%
+                      <div class="progress-bar <?= $progPct>=100?'bg-success':($progPct>=60?'bg-warning':'bg-danger') ?>" style="width:<?= $progPct ?>%">
+                        <?= number_format($progPct,1) ?>%
                       </div>
                     </div>
                   </td>
@@ -460,9 +474,9 @@ foreach ($weekSeries as $sucursalNombre => $serie) {
                   <th>Sucursal</th>
                   <th class="d-none d-sm-table-cell">Zona</th>
                   <th class="d-none d-sm-table-cell">Unidades</th>
-                  <th>Cuota ($)</th>
-                  <th class="w-120">Total Ventas ($)</th>
-                  <th>% Cumpl.</th>
+                  <th class="col-fit">Cuota ($)</th>
+                  <th class="col-fit">Total Ventas ($)</th>
+                  <th class="col-fit">% Cumpl.</th>
                   <th class="d-none d-sm-table-cell">Progreso</th>
                 </tr>
               </thead>
@@ -476,21 +490,30 @@ foreach ($weekSeries as $sucursalNombre => $serie) {
                   $pctM = $s['pct_delta_monto'];
                 ?>
                 <tr class="<?= $fila ?>">
-                  <td class="clip" title="<?= h($s['sucursal']) ?>"><?= h($s['sucursal']) ?></td>
+                  <td class="clip-branch" title="<?= h($s['sucursal']) ?>"><?= h($s['sucursal']) ?></td>
                   <td class="d-none d-sm-table-cell">Zona <?= h($s['zona']) ?></td>
                   <td class="d-none d-sm-table-cell num"><?= (int)$s['unidades'] ?></td>
-                  <td class="num">$<?= number_format($s['cuota_semanal'],2) ?></td>
-                  <td class="num">
-                    $<?= number_format($s['total_ventas'],2) ?>
+
+                  <td class="num col-fit">
+                    <span class="money-abbr" data-raw="<?= (float)$s['cuota_semanal'] ?>">$<?= number_format($s['cuota_semanal'],2) ?></span>
+                  </td>
+
+                  <td class="num col-fit">
+                    <span class="money-abbr" data-raw="<?= (float)$s['total_ventas'] ?>">$<?= number_format($s['total_ventas'],2) ?></span>
                     <div class="trend">
                       <span class="<?= $clsM ?>"><?= $icoM ?></span>
-                      <span class="delta <?= $clsM ?>"><?= ($dM>=0?'+':'-').'$'.number_format(abs($dM),2) ?></span>
+                      <span class="delta <?= $clsM ?>">
+                        <?= ($dM>=0?'+':'-') ?>
+                        <span class="money-abbr" data-raw="<?= (float)abs($dM) ?>">$<?= number_format(abs($dM),2) ?></span>
+                      </span>
                       <?php if ($pctM !== null): ?>
                         <span class="text-muted">(<?= ($pctM>=0?'+':'').number_format($pctM,1) ?>%)</span>
                       <?php endif; ?>
                     </div>
                   </td>
-                  <td class="num"><?= number_format($cumpl,1) ?>% <?= $estado ?></td>
+
+                  <td class="num col-fit"><?= number_format($cumpl,1) ?>% <?= $estado ?></td>
+
                   <td class="d-none d-sm-table-cell">
                     <div class="progress" style="height:20px">
                       <div class="progress-bar <?= $cumpl>=100?'bg-success':($cumpl>=60?'bg-warning':'bg-danger') ?>" style="width:<?= min(100,$cumpl) ?>%">
@@ -511,9 +534,9 @@ foreach ($weekSeries as $sucursalNombre => $serie) {
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script>
+// Chart
 const labelsSemana = <?= json_encode($labelsSemanaVis, JSON_UNESCAPED_UNICODE) ?>;
 const datasetsWeek = <?= json_encode($datasetsWeek, JSON_UNESCAPED_UNICODE) ?>;
-
 new Chart(document.getElementById('chartSemanal').getContext('2d'), {
   type: 'line',
   data: { labels: labelsSemana, datasets: datasetsWeek },
@@ -525,6 +548,26 @@ new Chart(document.getElementById('chartSemanal').getContext('2d'), {
     scales: { y: { beginAtZero: true, title: { display: true, text: 'Unidades' } } }
   }
 });
+
+// Abreviar montos (solo en tablas). En cards ya mostramos completo.
+(function(){
+  const nf = new Intl.NumberFormat('es-MX',{minimumFractionDigits:2, maximumFractionDigits:2});
+  function abbr(n){
+    const abs = Math.abs(n);
+    if (abs >= 1_000_000) return (n/1_000_000).toFixed(2)+'M';
+    if (abs >= 1_000)     return (n/1_000).toFixed(2)+'K';
+    return nf.format(n);
+  }
+  function render(){
+    const isMobile = window.matchMedia('(max-width: 576px)').matches;
+    document.querySelectorAll('.money-abbr').forEach(el=>{
+      const raw = Number(el.getAttribute('data-raw')||0);
+      el.textContent = isMobile ? ('$'+abbr(raw)) : ('$'+nf.format(raw));
+    });
+  }
+  render();
+  window.addEventListener('resize', render);
+})();
 </script>
 </body>
 </html>

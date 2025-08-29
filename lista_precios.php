@@ -1,5 +1,5 @@
 <?php
-// lista_precios.php (buscador+filtros, promos con color, sort por promoción por defecto)
+// lista_precios.php (buscador+filtros, promos con color, sort por promoción por defecto + KPIs de ventas)
 session_start();
 require_once __DIR__ . '/db.php';
 
@@ -9,7 +9,23 @@ $idSucursal = (int)($_SESSION['id_sucursal'] ?? 0);
 $rol        = $_SESSION['rol'] ?? '';
 $puedeEditar = in_array($rol, ['Admin'], true);
 
-// --------- Query agrupada por marca/modelo/capacidad ---------
+// Helpers
+function esc($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
+function money($n){ return is_null($n) ? null : number_format((float)$n, 2); }
+function n0($v){ return number_format((float)$v,0); }
+function n1($v){ return number_format((float)$v,1); }
+
+// Detectar columnas opcionales
+function hasColumn(mysqli $conn, string $table, string $column): bool {
+  $t = $conn->real_escape_string($table);
+  $c = $conn->real_escape_string($column);
+  $rs = $conn->query("SHOW COLUMNS FROM `$t` LIKE '$c'");
+  return $rs && $rs->num_rows > 0;
+}
+$hasV_Modalidad   = hasColumn($conn, 'ventas', 'modalidad');
+$hasDV_PrecioUnit = hasColumn($conn, 'detalle_venta', 'precio_unitario');
+
+// --------- Query agrupada por marca/modelo/capacidad (inventario disponible) ---------
 $sql = "
   SELECT 
     p.marca,
@@ -34,10 +50,7 @@ $stmt->bind_param('i', $idSucursal);
 $stmt->execute();
 $res = $stmt->get_result();
 $datos = $res->fetch_all(MYSQLI_ASSOC);
-
-// Helpers
-function esc($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
-function money($n){ return is_null($n) ? null : number_format((float)$n, 2); }
+$stmt->close();
 
 /** Colores para la promo según texto */
 function promoBadgeClass(string $txt): string {
@@ -50,14 +63,121 @@ function promoBadgeClass(string $txt): string {
   return 'promo-blue';
 }
 
-// Opciones filtros
+// Opciones filtros (desde inventario mostrado)
 $marcas = []; $capacidades = [];
+$withPromoCount = 0;
 foreach ($datos as $r){
   $marcas[$r['marca']] = true;
   $capacidades[$r['capacidad'] === '' ? '—' : $r['capacidad']] = true;
+  if (trim((string)$r['promocion']) !== '') $withPromoCount++;
 }
 ksort($marcas, SORT_NATURAL | SORT_FLAG_CASE);
 ksort($capacidades, SORT_NATURAL | SORT_FLAG_CASE);
+
+// ===================== KPIs de VENTAS (por sucursal) =====================
+$hoy       = date('Y-m-d');
+$inicioMes = date('Y-m-01');
+
+// Ventas (unidades) últimos 7 días
+$q7 = $conn->prepare("
+  SELECT COUNT(*) AS unidades
+  FROM detalle_venta dv
+  INNER JOIN ventas v ON v.id = dv.id_venta
+  WHERE v.id_sucursal = ?
+    AND DATE(v.fecha_venta) >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+");
+$q7->bind_param('i', $idSucursal);
+$q7->execute();
+$ventas7 = (int)($q7->get_result()->fetch_assoc()['unidades'] ?? 0);
+$q7->close();
+
+// Ventas (unidades) mes en curso
+$qm = $conn->prepare("
+  SELECT COUNT(*) AS unidades
+  FROM detalle_venta dv
+  INNER JOIN ventas v ON v.id = dv.id_venta
+  WHERE v.id_sucursal = ?
+    AND DATE(v.fecha_venta) BETWEEN ? AND ?
+");
+$qm->bind_param('iss', $idSucursal, $inicioMes, $hoy);
+$qm->execute();
+$ventasMes = (int)($qm->get_result()->fetch_assoc()['unidades'] ?? 0);
+$qm->close();
+
+// % Ventas con combo (mes) — solo si existe ventas.modalidad
+$pctCombo = null;
+if ($hasV_Modalidad) {
+  $qc = $conn->prepare("
+    SELECT 
+      SUM(CASE WHEN LOWER(v.modalidad) LIKE '%combo%' THEN 1 ELSE 0 END) AS con_combo,
+      COUNT(*) AS total
+    FROM detalle_venta dv
+    INNER JOIN ventas v ON v.id = dv.id_venta
+    WHERE v.id_sucursal = ?
+      AND DATE(v.fecha_venta) BETWEEN ? AND ?
+  ");
+  $qc->bind_param('iss', $idSucursal, $inicioMes, $hoy);
+  $qc->execute();
+  $rc = $qc->get_result()->fetch_assoc();
+  $qc->close();
+  $totalL = (int)($rc['total'] ?? 0);
+  $conCombo = (int)($rc['con_combo'] ?? 0);
+  $pctCombo = $totalL > 0 ? round(($conCombo / $totalL) * 100, 1) : null;
+}
+
+// Ticket promedio (mes) — solo si existe detalle_venta.precio_unitario
+$ticketProm = null;
+if ($hasDV_PrecioUnit) {
+  $qt = $conn->prepare("
+    SELECT AVG(dv.precio_unitario) AS avg_ticket
+    FROM detalle_venta dv
+    INNER JOIN ventas v ON v.id = dv.id_venta
+    WHERE v.id_sucursal = ?
+      AND DATE(v.fecha_venta) BETWEEN ? AND ?
+      AND dv.precio_unitario IS NOT NULL
+  ");
+  $qt->bind_param('iss', $idSucursal, $inicioMes, $hoy);
+  $qt->execute();
+  $ticketProm = $qt->get_result()->fetch_assoc()['avg_ticket'] ?? null;
+  $qt->close();
+}
+
+// Top promos (mes) por unidades — mapeo por marca/modelo/capacidad -> precios_combo.promocion
+$topPromos = []; // [['promo'=>'Texto', 'unidades'=>N], ...] ordenadas desc
+$topPromoName = '—';
+$topPromoUnits = 0;
+$topPromoPct = null;
+
+$qp = $conn->prepare("
+  SELECT COALESCE(NULLIF(TRIM(pc.promocion),''),'Sin promo') AS promo, COUNT(*) AS unidades
+  FROM detalle_venta dv
+  INNER JOIN ventas v ON v.id = dv.id_venta
+  INNER JOIN productos p ON p.id = dv.id_producto
+  LEFT JOIN precios_combo pc
+    ON pc.marca = p.marca
+   AND pc.modelo = p.modelo
+   AND COALESCE(pc.capacidad,'') = COALESCE(p.capacidad,'')
+  WHERE v.id_sucursal = ?
+    AND DATE(v.fecha_venta) BETWEEN ? AND ?
+  GROUP BY COALESCE(NULLIF(TRIM(pc.promocion),''),'Sin promo')
+  ORDER BY unidades DESC
+  LIMIT 5
+");
+$qp->bind_param('iss', $idSucursal, $inicioMes, $hoy);
+$qp->execute();
+$rsp = $qp->get_result();
+$totalPromoUnits = 0;
+while($row = $rsp->fetch_assoc()){
+  $topPromos[] = ['promo'=>$row['promo'], 'unidades'=>(int)$row['unidades']];
+  $totalPromoUnits += (int)$row['unidades'];
+}
+$qp->close();
+
+if (!empty($topPromos)) {
+  $topPromoName  = $topPromos[0]['promo'];
+  $topPromoUnits = $topPromos[0]['unidades'];
+  $topPromoPct   = $totalPromoUnits > 0 ? round(($topPromoUnits / $totalPromoUnits) * 100, 1) : null;
+}
 
 $ultima = date('Y-m-d H:i');
 ?>
@@ -99,6 +219,17 @@ $ultima = date('Y-m-d H:i');
     .actions .btn{ white-space:nowrap; }
 
     .table-wrap{ overflow:auto; }
+
+    /* ===== KPIs ===== */
+    .kpi{ background:#fff; border:1px solid #E5E7EB; border-radius:14px; padding:1rem 1rem; height:100%; position:relative; overflow:hidden; box-shadow:0 6px 18px rgba(17,24,39,.06); }
+    .kpi .label{ font-size:.9rem; color:#6b7280; }
+    .kpi .value{ font-size:1.5rem; font-weight:800; line-height:1.15; }
+    .kpi .hint{ font-size:.85rem; color:#6b7280; }
+    .kpi::after{
+      content:""; position:absolute; right:-28px; top:-28px; width:120px; height:120px;
+      background: radial-gradient(58px 58px at 58px 58px, rgba(13,110,253,.12), transparent 60%);
+    }
+    .top-promos .badge{ font-size:.9rem; }
   </style>
 </head>
 <body>
@@ -117,6 +248,72 @@ $ultima = date('Y-m-d H:i');
       <button id="btnExport" class="btn btn-outline-primary btn-sm"><i class="bi bi-filetype-csv me-1"></i> Exportar CSV</button>
       <button onclick="window.print()" class="btn btn-outline-secondary btn-sm"><i class="bi bi-printer me-1"></i> Imprimir</button>
     </div>
+  </div>
+
+  <!-- ============== KPIs de ventas / promos (arriba) ============== -->
+  <div class="row g-3 mb-3">
+    <div class="col-6 col-md-3">
+      <div class="kpi">
+        <div class="label">Top promo (mes)</div>
+        <div class="value"><?= esc($topPromoName) ?></div>
+        <div class="hint"><?= n0($topPromoUnits) ?> u<?= $topPromoPct!==null ? ' · '.n1($topPromoPct).'%' : '' ?></div>
+      </div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="kpi">
+        <div class="label">Unidades (7 días)</div>
+        <div class="value"><?= n0($ventas7) ?></div>
+        <div class="hint">Por sucursal</div>
+      </div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="kpi">
+        <div class="label">Unidades (mes)</div>
+        <div class="value"><?= n0($ventasMes) ?></div>
+        <div class="hint">Mes en curso</div>
+      </div>
+    </div>
+    <?php if ($pctCombo !== null): ?>
+    <div class="col-6 col-md-3">
+      <div class="kpi">
+        <div class="label">% ventas con combo</div>
+        <div class="value"><?= n1($pctCombo) ?>%</div>
+        <div class="hint">Mes en curso</div>
+      </div>
+    </div>
+    <?php endif; ?>
+    <?php if ($ticketProm !== null): ?>
+    <div class="col-6 col-md-3">
+      <div class="kpi">
+        <div class="label">Ticket promedio</div>
+        <div class="value">$<?= money($ticketProm) ?></div>
+        <div class="hint">Mes en curso</div>
+      </div>
+    </div>
+    <?php endif; ?>
+    <div class="col-6 col-md-3">
+      <div class="kpi">
+        <div class="label">Modelos con promo activa</div>
+        <div class="value"><?= n0($withPromoCount) ?></div>
+        <div class="hint">De la lista visible</div>
+      </div>
+    </div>
+    <?php if (!empty($topPromos)): ?>
+    <div class="col-12 col-md-6">
+      <div class="kpi top-promos">
+        <div class="label mb-1">Top 3 promos (mes, por unidades)</div>
+        <?php foreach (array_slice($topPromos, 0, 3) as $tp): ?>
+          <span class="badge rounded-pill bg-light border me-1 mb-1">
+            <i class="bi bi-megaphone me-1"></i><?= esc($tp['promo']) ?> · <b><?= n0($tp['unidades']) ?></b>
+          </span>
+        <?php endforeach; ?>
+        <?php if (count($topPromos) > 3): ?>
+          <span class="badge rounded-pill bg-light border me-1 mb-1">+<?= n0(count($topPromos)-3) ?> más</span>
+        <?php endif; ?>
+        <div class="hint mt-1">Fuente: ventas de tu sucursal (mes en curso)</div>
+      </div>
+    </div>
+    <?php endif; ?>
   </div>
 
   <!-- Filtros y buscador -->
@@ -172,7 +369,6 @@ $ultima = date('Y-m-d H:i');
             <th class="th-sort" data-key="promo">Promoción <i class="bi bi-arrow-down-up ms-1"></i></th>
             <th class="text-center th-sort" data-key="dispo_global_num">Disp. Global <i class="bi bi-arrow-down-up ms-1"></i></th>
             <th class="text-center th-sort" data-key="dispo_suc_num">En mi sucursal <i class="bi bi-arrow-down-up ms-1"></i></th>
-            
           </tr>
         </thead>
         <tbody>
@@ -221,15 +417,6 @@ $ultima = date('Y-m-d H:i');
             </td>
             <td class="text-center"><span class="badge rounded-pill <?= $dg>0 ? 'pill-ok':'badge-muted' ?>"><?= $dg ?></span></td>
             <td class="text-center"><span class="badge rounded-pill <?= $ds>0 ? 'pill-ok':'pill-warn' ?>"><?= $ds ?></span></td>
-
-            <?php if ($puedeEditar): ?>
-            <td class="no-print text-center actions">
-              <!-- <button class="btn btn-sm btn-outline-primary"
-                onclick="openComboModal('<?= esc($marca) ?>','<?= esc($modelo) ?>','<?= esc($capacidad) ?>','<?= $pc===null?'':'$'.$pc ?>','<?= esc($promo) ?>')">
-                <i class="bi bi-pencil-square me-1"></i> Editar
-              </button> -->
-            </td>
-            <?php endif; ?>
           </tr>
           <?php endforeach; endif; ?>
         </tbody>

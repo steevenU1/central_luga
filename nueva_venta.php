@@ -43,28 +43,18 @@ foreach ($sucursales as $s) { $mapSuc[(int)$s['id']] = $s['nombre']; }
 
   <!-- ===== Overrides del NAVBAR SOLO para esta vista ===== -->
   <style>
-    :root{
-      --brand: #0d6efd;
-      --brand-100: rgba(13,110,253,.08);
-    }
+    :root{ --brand: #0d6efd; --brand-100: rgba(13,110,253,.08); }
     body.bg-light{
       background:
         radial-gradient(1200px 400px at 100% -50%, var(--brand-100), transparent),
         radial-gradient(1200px 400px at -10% 120%, rgba(25,135,84,.06), transparent),
         #f8fafc;
     }
-
-    /* 🔧 Ajuste responsive del navbar de LUGA en esta vista */
     #topbar, .navbar-luga{ font-size:16px; }
     @media (max-width:576px){
       #topbar, .navbar-luga{
-        font-size:16px;       /* base */
-        --brand-font:1.00em;  /* marca un poquito más grande */
-        --nav-font:.95em;     /* links/dropdowns legibles */
-        --drop-font:.95em;
-        --icon-em:1.05em;
-        --pad-y:.44em;
-        --pad-x:.62em;
+        font-size:16px; --brand-font:1.00em; --nav-font:.95em; --drop-font:.95em;
+        --icon-em:1.05em; --pad-y:.44em; --pad-x:.62em;
       }
       #topbar .navbar-brand img, .navbar-luga .navbar-brand img{ width:1.8em; height:1.8em; }
       #topbar .btn-asistencia, .navbar-luga .btn-asistencia{ font-size:.95em; padding:.5em .9em !important; border-radius:12px; }
@@ -72,16 +62,10 @@ foreach ($sucursales as $s) { $mapSuc[(int)$s['id']] = $s['nombre']; }
       .navbar-luga .nav-avatar, .navbar-luga .nav-initials{ width:2.1em; height:2.1em; }
       #topbar .navbar-toggler, .navbar-luga .navbar-toggler{ padding:.45em .7em; }
     }
-    @media (max-width:360px){
-      #topbar, .navbar-luga{ font-size:15px; }
-    }
-
+    @media (max-width:360px){ #topbar, .navbar-luga{ font-size:15px; } }
     .page-title{font-weight:700; letter-spacing:.3px;}
     .card-elev{border:0; box-shadow:0 10px 24px rgba(2,8,20,0.06), 0 2px 6px rgba(2,8,20,0.05); border-radius:1rem;}
-    .section-title{
-      font-size:.95rem; font-weight:700; color:#334155; text-transform:uppercase;
-      letter-spacing:.8px; margin-bottom:.75rem; display:flex; align-items:center; gap:.5rem;
-    }
+    .section-title{ font-size:.95rem; font-weight:700; color:#334155; text-transform:uppercase; letter-spacing:.8px; margin-bottom:.75rem; display:flex; align-items:center; gap:.5rem; }
     .section-title .bi{opacity:.85;}
     .req::after{content:" *"; color:#dc3545; font-weight:600;}
     .help-text{font-size:.85rem; color:#64748b;}
@@ -98,7 +82,7 @@ foreach ($sucursales as $s) { $mapSuc[(int)$s['id']] = $s['nombre']; }
 </head>
 <body class="bg-light">
 
-<?php include __DIR__ . '/navbar.php'; ?> <!-- ✅ navbar dentro del body con overrides locales -->
+<?php include __DIR__ . '/navbar.php'; ?>
 
 <div class="container my-4">
   <div class="d-flex align-items-center justify-content-between mb-3">
@@ -109,7 +93,6 @@ foreach ($sucursales as $s) { $mapSuc[(int)$s['id']] = $s['nombre']; }
     <a href="panel.php" class="btn btn-outline-secondary"><i class="bi bi-arrow-left"></i> Volver al Panel</a>
   </div>
 
-  <!-- Contexto de sesión -->
   <div class="mb-3">
     <div class="card border-0 shadow-sm">
       <div class="card-body d-flex flex-wrap align-items-center gap-2">
@@ -120,12 +103,10 @@ foreach ($sucursales as $s) { $mapSuc[(int)$s['id']] = $s['nombre']; }
     </div>
   </div>
 
-  <!-- Advertencia -->
   <div id="alerta_sucursal" class="alert alert-warning alert-sucursal d-none">
     <i class="bi bi-exclamation-triangle me-1"></i><strong>Atención:</strong> Estás eligiendo una sucursal diferente a la tuya. La venta contará para tu usuario en esa sucursal.
   </div>
 
-  <!-- Errores -->
   <div id="errores" class="alert alert-danger d-none"></div>
 
   <form method="POST" action="procesar_venta.php" id="form_venta" novalidate>
@@ -134,7 +115,6 @@ foreach ($sucursales as $s) { $mapSuc[(int)$s['id']] = $s['nombre']; }
     <div class="card card-elev mb-4">
       <div class="card-body">
 
-        <!-- Tipo de venta primero -->
         <div class="section-title"><i class="bi bi-phone"></i> Tipo de venta</div>
         <div class="row g-3 mb-3">
           <div class="col-md-4">
@@ -190,7 +170,7 @@ foreach ($sucursales as $s) { $mapSuc[(int)$s['id']] = $s['nombre']; }
           <div class="col-md-4">
             <label class="form-label req">Equipo Principal</label>
             <select name="equipo1" id="equipo1" class="form-control select2-equipo" required></select>
-            <div class="form-text">Busca por modelo o IMEI.</div>
+            <div class="form-text">Puedes buscar por modelo, <strong>IMEI1</strong> o <strong>IMEI2</strong>.</div>
           </div>
           <div class="col-md-4" id="combo" style="display:none;">
             <label class="form-label">Equipo Combo</label>
@@ -321,7 +301,6 @@ foreach ($sucursales as $s) { $mapSuc[(int)$s['id']] = $s['nombre']; }
 </div>
 
 <!-- Bootstrap JS (bundle) -->
-<!-- Deja este comentado: el navbar ya inyecta el bundle en navbar.php -->
 <!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
 
 <script>
@@ -330,14 +309,13 @@ $(document).ready(function() {
   const mapaSucursales = <?= json_encode($mapSuc, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
   const modalConfirm = new bootstrap.Modal(document.getElementById('modalConfirmacion'));
 
-  // Inicializa Select2
+  // Select2 (sin matcher custom; el texto de la opción ya incluye IMEI2)
   $('.select2-equipo').select2({
-    placeholder: "Buscar por modelo o IMEI",
+    placeholder: "Buscar por modelo, IMEI1 o IMEI2",
     allowClear: true,
     width: '100%'
   });
 
-  // Mostrar/ocultar según tipo de venta
   $('#tipo_venta').on('change', function() {
     $('#combo').toggle(isFinanciamientoCombo());
     toggleVenta();
@@ -357,15 +335,10 @@ $(document).ready(function() {
 
   function toggleVenta() {
     const esFin = isFinanciamiento();
-
-    // TAG, Enganche, Plazo, Financiera visibles solo en financiamiento
     $('#tag_field, #enganche_field, #plazo_field, #financiera_field').toggle(esFin);
     $('#mixto_detalle').toggle(esFin && $('#forma_pago_enganche').val()==='Mixto');
-
-    // Etiqueta de forma de pago
     $('#label_forma_pago').text(esFin ? 'Forma de Pago Enganche' : 'Forma de Pago');
 
-    // Requeridos SÓLO cuando es financiamiento (incluye combo)
     $('#tag').prop('required', esFin);
     $('#nombre_cliente').prop('required', esFin);
     $('#telefono_cliente').prop('required', esFin);
@@ -373,12 +346,10 @@ $(document).ready(function() {
     $('#plazo_semanas').prop('required', esFin);
     $('#financiera').prop('required', esFin);
 
-    // Campos siempre obligatorios: precio y forma de pago
     $('#precio_venta').prop('required', true);
     $('#forma_pago_enganche').prop('required', true);
 
     if (!esFin) {
-      // Reset cuando es Contado
       $('#tag').val('');
       $('#enganche').val(0);
       $('#plazo_semanas').val(0);
@@ -387,10 +358,8 @@ $(document).ready(function() {
       $('#enganche_tarjeta').val(0);
     }
   }
+  toggleVenta();
 
-  toggleVenta(); // Al cargar
-
-  // Cargar productos por sucursal
   function cargarEquipos(sucursalId) {
     $.ajax({
       url: 'ajax_productos_por_sucursal.php',
@@ -398,6 +367,10 @@ $(document).ready(function() {
       data: { id_sucursal: sucursalId },
       success: function(response) {
         $('#equipo1, #equipo2').html(response).val('').trigger('change');
+      },
+      error: function(xhr){
+        const msg = xhr.responseText || 'Error cargando inventario';
+        $('#equipo1, #equipo2').html('<option value="">'+msg+'</option>').trigger('change');
       }
     });
   }
@@ -414,7 +387,7 @@ $(document).ready(function() {
     cargarEquipos(seleccionada);
   });
 
-  // =============== VALIDACIÓN Y MODAL ===============
+  // ========= Validación + modal =========
   let permitSubmit = false;
 
   function validarFormulario() {
@@ -432,13 +405,11 @@ $(document).ready(function() {
     const plazo  = parseInt($('#plazo_semanas').val(), 10);
     const finan  = $('#financiera').val();
 
-    // Siempre
     if (!tipo) errores.push('Selecciona el tipo de venta.');
     if (!precio || precio <= 0) errores.push('El precio de venta debe ser mayor a 0.');
     if (!forma) errores.push('Selecciona la forma de pago.');
     if (!$('#equipo1').val()) errores.push('Selecciona el equipo principal.');
 
-    // Solo en financiamiento / combo
     if (esFin) {
       if (!nombre) errores.push('Ingresa el nombre del cliente (Financiamiento).');
       if (!tel) errores.push('Ingresa el teléfono del cliente (Financiamiento).');
@@ -455,7 +426,6 @@ $(document).ready(function() {
         if ((eng||0).toFixed(2) !== (ef+tj).toFixed(2)) errores.push('Efectivo + Tarjeta debe igualar al Enganche.');
       }
     } else {
-      // En contado, si el usuario llenó teléfono, valida formato (opcional)
       if (tel && !/^\d{10}$/.test(tel)) errores.push('El teléfono debe tener 10 dígitos.');
     }
 
@@ -470,7 +440,6 @@ $(document).ready(function() {
     const tipo = $('#tipo_venta').val() || '—';
     $('#conf_tipo').text(tipo);
 
-    // Texto visible del select2
     const equipo1Text = $('#equipo1').find('option:selected').text() || '—';
     const equipo2Text = $('#equipo2').find('option:selected').text() || '';
 
@@ -496,74 +465,47 @@ $(document).ready(function() {
       $('#li_financiera').removeClass('d-none');
 
       const tag = ($('#tag').val() || '').trim();
-      if (tag) {
-        $('#conf_tag').text(tag);
-        $('#li_tag').removeClass('d-none');
-      } else {
-        $('#li_tag').addClass('d-none');
-      }
+      if (tag) { $('#conf_tag').text(tag); $('#li_tag').removeClass('d-none'); }
+      else { $('#li_tag').addClass('d-none'); }
     } else {
       $('#li_enganche, #li_financiera, #li_tag').addClass('d-none');
     }
   }
 
   $('#form_venta').on('submit', function(e){
-    if (permitSubmit) return; // ya confirmado
-
+    if (permitSubmit) return;
     e.preventDefault();
     const errores = validarFormulario();
 
     if (errores.length > 0) {
-      $('#errores')
-        .removeClass('d-none')
+      $('#errores').removeClass('d-none')
         .html('<strong>Corrige lo siguiente:</strong><ul class="mb-0"><li>' + errores.join('</li><li>') + '</li></ul>');
       window.scrollTo({ top: 0, behavior: 'smooth' });
       return;
     }
 
-    // Sin errores → abrir modal de confirmación
     $('#errores').addClass('d-none').empty();
     poblarModal();
     modalConfirm.show();
   });
 
-  // Confirmar envío desde el modal
   $('#btn_confirmar_envio').on('click', function(){
-    // Bloquea el botón principal para evitar doble submit
     $('#btn_submit').prop('disabled', true).text('Enviando...');
     permitSubmit = true;
     modalConfirm.hide();
     $('#form_venta')[0].submit();
   });
 
-  // Cargar productos al inicio
-  function initEquipos() {
-    cargarEquipos($('#id_sucursal').val());
-  }
-
-  function cargarEquipos(sucursalId) {
-    $.ajax({
-      url: 'ajax_productos_por_sucursal.php',
-      method: 'POST',
-      data: { id_sucursal: sucursalId },
-      success: function(response) {
-        $('#equipo1, #equipo2').html(response).val('').trigger('change');
-      }
-    });
-  }
-
+  // Inicial
+  function initEquipos(){ cargarEquipos($('#id_sucursal').val()); }
   initEquipos();
 
   $('#id_sucursal').on('change', function() {
     const seleccionada = parseInt($(this).val());
-    if (seleccionada !== idSucursalUsuario) {
-      $('#alerta_sucursal').removeClass('d-none');
-    } else {
-      $('#alerta_sucursal').addClass('d-none');
-    }
+    if (seleccionada !== idSucursalUsuario) $('#alerta_sucursal').removeClass('d-none');
+    else $('#alerta_sucursal').addClass('d-none');
     cargarEquipos(seleccionada);
   });
-
 });
 </script>
 
