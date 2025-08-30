@@ -113,7 +113,7 @@ $grpCompras    = ['compras_nueva.php','compras_resumen.php','modelos.php','prove
 $grpTraspasos  = ['generar_traspaso.php','generar_traspaso_sims.php','traspasos_sims_pendientes.php','traspasos_sims_salientes.php','traspasos_pendientes.php','traspasos_salientes.php','traspaso_nuevo.php'];
 $grpEfectivo   = ['cobros.php','cortes_caja.php','generar_corte.php','depositos_sucursal.php','depositos.php','recoleccion_comisiones.php'];
 $grpOperacion  = ['lista_precios.php','prospectos.php','insumos_pedido.php','insumos_admin.php','mantenimiento_solicitar.php','mantenimiento_admin.php','gestionar_usuarios.php','zona_asistencias.php'];
-$grpRH         = ['reporte_nomina.php','reporte_nomina_gerentes_zona.php','admin_expedientes.php','admin_asistencias.php'];
+$grpRH         = ['reporte_nomina.php','reporte_nomina_gerentes_zona.php','admin_expedientes.php','admin_asistencias.php','productividad_ejecutivo.php']; // ← agregado
 $grpOperativos = ['insumos_catalogo.php','actualizar_precios_modelo.php','cuotas_mensuales.php','cuotas_mensuales_ejecutivos.php','cuotas_sucursales.php','cargar_cuotas_semanales.php','esquemas_comisiones_ejecutivos.php','esquemas_comisiones_gerentes.php','esquemas_comisiones_pospago.php','comisiones_especiales_equipos.php','carga_masiva_productos.php','carga_masiva_sims.php','alta_usuario.php','alta_sucursal.php'];
 $grpCeleb      = ['cumples_aniversarios.php'];
 
@@ -476,6 +476,11 @@ function item_active(string $f,string $c):string{ return $c===$f?'active':''; }
               <li><hr class="dropdown-divider"></li>
               <li class="dropdown-header">Expedientes</li>
               <li><a class="dropdown-item <?= item_active('admin_expedientes.php',$current) ?>" href="admin_expedientes.php">Panel de expedientes</a></li>
+              <li><hr class="dropdown-divider"></li>
+              <?php if($rolUsuario==='Admin'): ?>
+                <li class="dropdown-header">Efectividad</li>
+                <li><a class="dropdown-item <?= item_active('productividad_ejecutivo.php',$current) ?>" href="productividad_ejecutivo.php"><i class="bi bi-clipboard-data me-1"></i>Efectividad ejecutivos</a></li>
+              <?php endif; ?>
             </ul>
           </li>
         <?php endif; ?>
