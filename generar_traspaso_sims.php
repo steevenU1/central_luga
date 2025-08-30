@@ -9,7 +9,7 @@ $idSucursalOrigen = (int)$_SESSION['id_sucursal'];
 function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 
 // ======================
-// Datos de usuario y sucursal origen (para header/acuse)
+// Datos de usuario y sucursal origen
 // ======================
 $usuarioNombre = 'Usuario #'.$idUsuario;
 $stU = $conn->prepare("SELECT nombre FROM usuarios WHERE id=? LIMIT 1");
@@ -26,7 +26,7 @@ if ($ro = $stSO->get_result()->fetch_assoc()) { $sucOrigenNombre = $ro['nombre']
 $stSO->close();
 
 // ======================
-// Sucursales destino (todas menos la propia)
+// Sucursales destino
 // ======================
 $sqlSucursales = "SELECT id, nombre FROM sucursales WHERE id != ? ORDER BY nombre";
 $stmt = $conn->prepare($sqlSucursales);
@@ -37,14 +37,18 @@ $sucursales = $res->fetch_all(MYSQLI_ASSOC);
 $stmt->close();
 
 // ======================
-// Cajas disponibles en origen (SIMs 'Disponible')
+// Cajas 100% disponibles (sin ninguna SIM en tránsito)
 // ======================
 $sqlCajas = "
-    SELECT caja_id, COUNT(*) AS total_sims
-    FROM inventario_sims
-    WHERE id_sucursal = ? AND estatus = 'Disponible'
-    GROUP BY caja_id
-    ORDER BY caja_id
+  SELECT 
+    caja_id,
+    SUM(CASE WHEN estatus = 'Disponible'  THEN 1 ELSE 0 END) AS total_sims,
+    SUM(CASE WHEN estatus = 'En transito' THEN 1 ELSE 0 END) AS en_transito
+  FROM inventario_sims
+  WHERE id_sucursal = ?
+  GROUP BY caja_id
+  HAVING en_transito = 0 AND total_sims > 0
+  ORDER BY caja_id
 ";
 $stmt = $conn->prepare($sqlCajas);
 $stmt->bind_param("i", $idSucursalOrigen);
@@ -66,7 +70,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['caja_ids'], $_POST['i
     $cajaIdsPost = $_POST['caja_ids'];
     if (!is_array($cajaIdsPost)) $cajaIdsPost = [$cajaIdsPost];
 
-    // Sanitiza y normaliza
     $cajaIds = array_values(array_unique(array_filter(array_map('trim', $cajaIdsPost))));
     $idSucursalDestino = (int)$_POST['id_sucursal_destino'];
 
@@ -88,10 +91,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['caja_ids'], $_POST['i
             // 2) Statements reusables
             $stGet = $conn->prepare("
                 SELECT id FROM inventario_sims
-                WHERE id_sucursal=? AND estatus='Disponible' AND caja_id=?
+                WHERE id_sucursal=? AND estatus='Disponible' AND caja_id=? FOR UPDATE
             ");
             $stDet = $conn->prepare("INSERT INTO detalle_traspaso_sims (id_traspaso, id_sim) VALUES (?, ?)");
-            $stUpd = $conn->prepare("UPDATE inventario_sims SET estatus='En tránsito' WHERE id=?");
+            $stUpd = $conn->prepare("UPDATE inventario_sims SET estatus='En transito' WHERE id=?");
 
             $totalMovidas  = 0;
             $cajasVacias   = [];
@@ -131,11 +134,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['caja_ids'], $_POST['i
                 if ($cajasVacias) {
                     $extra = "<br><small class='text-muted'>Omitidas por estar vacías: ".h(implode(', ', $cajasVacias))."</small>";
                 }
-                // Botón para ver acuse en modal
                 $btn = '<button type="button" class="btn btn-outline-primary btn-sm ms-2" onclick="openAcuse('.$acuseIdGenerado.')">
                           <i class=\"bi bi-file-earmark-text\"></i> Ver acuse
                         </button>';
-                $mensaje = "<div class='alert alert-success card-surface mt-3'>✅ Traspaso <b>#{$idTraspaso}</b> generado. SIMs en tránsito: <b>{$totalMovidas}</b>.{$extra} {$btn}</div>";
+                $mensaje = "<div class='alert alert-success card-surface mt-3'>✅ Traspaso <b>#{$idTraspaso}</b> generado. SIMs en transito: <b>{$totalMovidas}</b>.{$extra} {$btn}</div>";
             }
         } catch (Throwable $e) {
             $conn->rollback();
@@ -193,7 +195,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['caja_ids'], $_POST['i
 
   <?= $mensaje ?>
 
-  <!-- Formulario (igual que antes; recortado para enfoque en cambios) -->
+  <!-- Formulario -->
   <form id="formTraspaso" method="POST" class="card card-surface p-3 mt-3">
     <div class="row g-3 filters">
       <div class="col-12 col-lg-7">
@@ -226,7 +228,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['caja_ids'], $_POST['i
     <div class="small-muted mt-2">Tip: usa la tabla de abajo; marca/desmarca filas o usa “Seleccionar todo lo visible”.</div>
   </form>
 
-  <!-- Listado de cajas (idéntico a tu versión; omito por brevedad) -->
+  <!-- Listado de cajas -->
   <div class="card card-surface mt-3 mb-5">
     <div class="p-3 pb-0 d-flex align-items-center justify-content-between flex-wrap gap-2">
       <h5 class="m-0"><i class="bi bi-table me-2"></i>Cajas disponibles</h5>
@@ -269,7 +271,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['caja_ids'], $_POST['i
   </div>
 </div>
 
-<!-- MODAL: Acuse (carga la vista separada en iframe) -->
+<!-- MODAL: Acuse -->
 <div class="modal fade" id="modalAcuse" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-fullscreen-lg-down modal-xl">
     <div class="modal-content">
@@ -293,7 +295,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['caja_ids'], $_POST['i
 (function(){
   const sucursalSelect = document.getElementById('sucursalSelect');
   const btnConfirmar   = document.getElementById('btnConfirmar');
-  const btnSubmit      = document.getElementById('btnSubmit');
   const form           = document.getElementById('formTraspaso');
   const hiddenInputs   = document.getElementById('hiddenInputs');
 
@@ -378,11 +379,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['caja_ids'], $_POST['i
   bulkInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addBulk(); }});
   clearSel.addEventListener('click', ()=>{ Array.from(sel.keys()).forEach(id => setRowSelected(id, 0, false)); });
 
-  // Confirmación (mock rápida: puedes usar tu modal previo)
   function openConfirm(){
     if (!sel.size) return alert('Selecciona al menos una caja.');
     if (!sucursalSelect.value){ sucursalSelect.classList.add('is-invalid'); return; }
-    // Inyecta inputs y envía
     hiddenInputs.innerHTML = '';
     Array.from(sel.keys()).forEach(id=>{
       const input = document.createElement('input'); input.type='hidden'; input.name='caja_ids[]'; input.value=id; hiddenInputs.appendChild(input);
@@ -392,7 +391,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['caja_ids'], $_POST['i
   document.getElementById('fabGenerate').addEventListener('click', openConfirm);
   btnConfirmar.addEventListener('click', openConfirm);
 
-  // ==== ACUSE en modal (vista separada) ====
+  // ==== ACUSE en modal ====
   window.openAcuse = function(id){
     const url = 'acuse_traspaso_sims.php?id=' + encodeURIComponent(id);
     acuseFrame.src = url;
@@ -407,7 +406,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['caja_ids'], $_POST['i
   renderUI();
 
   <?php if ($acuseIdGenerado): ?>
-    // Autoabrir acuse recién generado
     window.addEventListener('DOMContentLoaded', ()=> openAcuse(<?= (int)$acuseIdGenerado ?>));
   <?php endif; ?>
 })();
