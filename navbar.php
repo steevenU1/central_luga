@@ -66,6 +66,11 @@ if($idUsuario>0){
   $st->close();
 }
 
+/* ⛳️ EXCEPCIÓN DINÁMICA:
+   Ejecutivos con acceso a >1 sucursal (según usuario_sucursales)
+   NO heredan permisos cuando “no hay gerente”. */
+$omitirReglaEjecutivo = ($rolUsuario === 'Ejecutivo' && count($misSucursales) > 1);
+
 /* CSRF */
 if (empty($_SESSION['csrf'])) $_SESSION['csrf']=bin2hex(random_bytes(16));
 
@@ -103,6 +108,28 @@ if(($rolUsuario==='GerenteZona')){
 $esAdmin=in_array($rolUsuario,['Admin','Super'],true);
 $primerNombre=first_name($nombreUsuario);
 
+/* ===== Dinámica: ¿sucursal sin gerente activo? y permisos derivados ===== */
+$sucursalSinGerente = false;
+if ($idSucursal > 0) {
+  if ($st = $conn->prepare(
+    "SELECT COUNT(*) FROM usuarios
+     WHERE id_sucursal=? AND rol IN('Gerente','GerenteSucursal') AND activo=1")
+  ) {
+    $st->bind_param("i", $idSucursal);
+    $st->execute();
+    $st->bind_result($cnt);
+    $st->fetch();
+    $st->close();
+    $sucursalSinGerente = ((int)$cnt === 0);
+  }
+}
+/* Permisos para menús especiales */
+$puedeTraspasos = in_array($rolUsuario, ['Gerente','GerenteSucursal','Admin','Super'], true)
+               || ($rolUsuario === 'Ejecutivo' && $sucursalSinGerente && !$omitirReglaEjecutivo);
+
+$puedeCortesYDepositos = in_array($rolUsuario, ['Gerente','GerenteSucursal','Admin','Super'], true)
+                      || ($rolUsuario === 'Ejecutivo' && $sucursalSinGerente && !$omitirReglaEjecutivo);
+
 /* Activo por URL */
 $current=basename(parse_url($_SERVER['REQUEST_URI'],PHP_URL_PATH));
 
@@ -113,7 +140,7 @@ $grpCompras    = ['compras_nueva.php','compras_resumen.php','modelos.php','prove
 $grpTraspasos  = ['generar_traspaso.php','generar_traspaso_sims.php','traspasos_sims_pendientes.php','traspasos_sims_salientes.php','traspasos_pendientes.php','traspasos_salientes.php','traspaso_nuevo.php'];
 $grpEfectivo   = ['cobros.php','cortes_caja.php','generar_corte.php','depositos_sucursal.php','depositos.php','recoleccion_comisiones.php'];
 $grpOperacion  = ['lista_precios.php','prospectos.php','insumos_pedido.php','insumos_admin.php','mantenimiento_solicitar.php','mantenimiento_admin.php','gestionar_usuarios.php','zona_asistencias.php'];
-$grpRH         = ['reporte_nomina.php','reporte_nomina_gerentes_zona.php','admin_expedientes.php','admin_asistencias.php','productividad_ejecutivo.php']; // ← agregado
+$grpRH         = ['reporte_nomina.php','reporte_nomina_gerentes_zona.php','admin_expedientes.php','admin_asistencias.php','productividad_ejecutivo.php'];
 $grpOperativos = ['insumos_catalogo.php','actualizar_precios_modelo.php','cuotas_mensuales.php','cuotas_mensuales_ejecutivos.php','cuotas_sucursales.php','cargar_cuotas_semanales.php','esquemas_comisiones_ejecutivos.php','esquemas_comisiones_gerentes.php','esquemas_comisiones_pospago.php','comisiones_especiales_equipos.php','carga_masiva_productos.php','carga_masiva_sims.php','alta_usuario.php','alta_sucursal.php'];
 $grpCeleb      = ['cumples_aniversarios.php'];
 
@@ -324,7 +351,7 @@ function item_active(string $f,string $c):string{ return $c===$f?'active':''; }
           </li>
         <?php endif; ?>
 
-        <?php if(in_array($rolUsuario,['Gerente','Admin','Super'])): ?>
+        <?php if($puedeTraspasos): ?>
           <?php $pActive=parent_active($grpTraspasos,$current); ?>
           <li class="nav-item dropdown">
             <a class="nav-link dropdown-toggle<?= $pActive?' active-parent':'' ?>" href="#" data-bs-toggle="dropdown">
@@ -349,7 +376,7 @@ function item_active(string $f,string $c):string{ return $c===$f?'active':''; }
               </li>
               <li><a class="dropdown-item <?= item_active('traspasos_sims_salientes.php',$current) ?>" href="traspasos_sims_salientes.php">SIMs salientes</a></li>
 
-              <?php if($rolUsuario==='Gerente'): ?>
+              <?php if($rolUsuario==='Gerente' || ($rolUsuario==='Ejecutivo' && $sucursalSinGerente && !$omitirReglaEjecutivo)): ?>
                 <li><hr class="dropdown-divider"></li>
                 <li class="dropdown-header">Equipos</li>
                 <li><a class="dropdown-item <?= item_active('traspaso_nuevo.php',$current) ?>" href="traspaso_nuevo.php">Generar traspaso entre sucursales</a></li>
@@ -379,10 +406,16 @@ function item_active(string $f,string $c):string{ return $c===$f?'active':''; }
                 <li><a class="dropdown-item <?= item_active('recoleccion_comisiones.php',$current) ?>" href="recoleccion_comisiones.php">Recolección comisiones</a></li>
               <?php else: ?>
                 <li><a class="dropdown-item <?= item_active('cobros.php',$current) ?>" href="cobros.php">Generar cobro</a></li>
-                <li><a class="dropdown-item <?= item_active('cortes_caja.php',$current) ?>" href="cortes_caja.php">Historial Cortes</a></li>
-                <li><a class="dropdown-item <?= item_active('generar_corte.php',$current) ?>" href="generar_corte.php">Generar corte sucursal</a></li>
-                <li><a class="dropdown-item <?= item_active('depositos_sucursal.php',$current) ?>" href="depositos_sucursal.php">Depósitos sucursal</a></li>
-                <?php if($esAdmin): ?><li><a class="dropdown-item <?= item_active('depositos.php',$current) ?>" href="depositos.php">Validar depósitos</a></li><?php endif; ?>
+
+                <?php if($puedeCortesYDepositos): ?>
+                  <li><a class="dropdown-item <?= item_active('cortes_caja.php',$current) ?>" href="cortes_caja.php">Historial Cortes</a></li>
+                  <li><a class="dropdown-item <?= item_active('generar_corte.php',$current) ?>" href="generar_corte.php">Generar corte sucursal</a></li>
+                  <li><a class="dropdown-item <?= item_active('depositos_sucursal.php',$current) ?>" href="depositos_sucursal.php">Depósitos sucursal</a></li>
+                <?php endif; ?>
+
+                <?php if($esAdmin): ?>
+                  <li><a class="dropdown-item <?= item_active('depositos.php',$current) ?>" href="depositos.php">Validar depósitos</a></li>
+                <?php endif; ?>
               <?php endif; ?>
             </ul>
           </li>
@@ -612,3 +645,5 @@ function item_active(string $f,string $c):string{ return $c===$f?'active':''; }
     })();
   </script>
 <?php endif; ?>
+
+

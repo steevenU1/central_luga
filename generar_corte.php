@@ -1,11 +1,43 @@
 <?php
 session_start();
-if (!isset($_SESSION['id_usuario']) || !in_array($_SESSION['rol'], ['Gerente','Admin'])) {
-    header("Location: 403.php");
-    exit();
+if (!isset($_SESSION['id_usuario'])) {
+  header("Location: index.php");
+  exit();
 }
 
-require_once __DIR__ . '/db.php';
+require_once 'db.php';
+
+$rol        = $_SESSION['rol'] ?? '';
+$idSucursal = (int)($_SESSION['id_sucursal'] ?? 0);
+
+// ¿La sucursal del usuario NO tiene gerente activo?
+$sucursalSinGerente = false;
+if ($idSucursal > 0) {
+  if ($st = $conn->prepare("
+        SELECT COUNT(*)
+        FROM usuarios
+        WHERE id_sucursal = ?
+          AND rol IN ('Gerente','GerenteSucursal')
+          AND activo = 1
+      ")) {
+    $st->bind_param("i", $idSucursal);
+    $st->execute();
+    $st->bind_result($cnt);
+    $st->fetch();
+    $st->close();
+    $sucursalSinGerente = ((int)$cnt === 0);
+  }
+}
+
+// ¿Tiene permiso para ver la vista?
+$allow =
+  in_array($rol, ['Admin','Super','Gerente','GerenteSucursal'], true) ||
+  ($rol === 'Ejecutivo' && $sucursalSinGerente);
+
+if (!$allow) {
+  header("Location: 403.php");
+  exit();
+}
 
 $id_usuario  = (int)($_SESSION['id_usuario'] ?? 0);
 $id_sucursal = (int)($_SESSION['id_sucursal'] ?? 0);

@@ -1,14 +1,52 @@
 <?php
 session_start();
-if (!isset($_SESSION['id_usuario']) || !in_array($_SESSION['rol'], ['Gerente','Admin'])) {
+if (!isset($_SESSION['id_usuario'])) {
+    header("Location: index.php");
+    exit();
+}
+
+require_once 'db.php';
+
+$rol        = $_SESSION['rol'] ?? '';
+$idSucursal = (int)($_SESSION['id_sucursal'] ?? 0);
+
+/* ==============================
+   Permisos:
+   - Admin / Super / Gerente / GerenteSucursal => SIEMPRE
+   - Ejecutivo => SOLO si su sucursal NO tiene gerente activo
+================================= */
+$hayGerente = true; // por seguridad, asumir que sí hay gerente
+if ($idSucursal > 0) {
+    if ($st = $conn->prepare("
+        SELECT COUNT(*) 
+        FROM usuarios 
+        WHERE id_sucursal = ? 
+          AND rol IN ('Gerente','GerenteSucursal') 
+          AND activo = 1
+    ")) {
+        $st->bind_param("i", $idSucursal);
+        $st->execute();
+        $st->bind_result($cnt);
+        $st->fetch();
+        $st->close();
+        $hayGerente = ((int)$cnt > 0);
+    }
+}
+
+$allow =
+    in_array($rol, ['Admin','Super','Gerente','GerenteSucursal'], true) ||
+    ($rol === 'Ejecutivo' && !$hayGerente);
+
+if (!$allow) {
     header("Location: 403.php");
     exit();
 }
 
-include 'db.php';
+// -------------------------------------------------------------
+
 include 'navbar.php';
 
-$idSucursal = (int)($_SESSION['id_sucursal'] ?? 0);
+// Puedes seguir usando $idSucursal que ya está seteado arriba
 $hoy = date('Y-m-d');
 
 // 🔹 1️⃣ Consultar cortes de la sucursal (igual que tu versión)

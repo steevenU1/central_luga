@@ -1,16 +1,44 @@
 <?php
 session_start();
-if (!isset($_SESSION['id_usuario']) || !in_array($_SESSION['rol'], ['Gerente','Admin'])) {
-    header("Location: 403.php");
+if (!isset($_SESSION['id_usuario'])) {
+    header("Location: index.php");
     exit();
 }
 
 require_once __DIR__ . '/db.php';
 
-$idUsuario  = (int)($_SESSION['id_usuario'] ?? 0);
-$idSucursal = (int)($_SESSION['id_sucursal'] ?? 0);
 $rol        = $_SESSION['rol'] ?? '';
+$idSucursal = (int)($_SESSION['id_sucursal'] ?? 0);
+$idUsuario  = (int)($_SESSION['id_usuario'] ?? 0);
 
+/*
+  Permisos:
+  - Gerente / Admin => siempre
+  - Ejecutivo       => solo si su sucursal NO tiene gerente activo
+*/
+$hayGerente = true; // por seguridad, asumir que sí hay
+if ($idSucursal > 0) {
+    if ($st = $conn->prepare("
+        SELECT COUNT(*)
+        FROM usuarios
+        WHERE id_sucursal = ?
+          AND rol IN ('Gerente','GerenteSucursal')
+          AND activo = 1
+    ")) {
+        $st->bind_param("i", $idSucursal);
+        $st->execute();
+        $st->bind_result($cnt);
+        $st->fetch();
+        $st->close();
+        $hayGerente = ((int)$cnt > 0);
+    }
+}
+
+$allow = in_array($rol, ['Gerente','Admin'], true) || ($rol === 'Ejecutivo' && !$hayGerente);
+if (!$allow) {
+    header("Location: 403.php");
+    exit();
+}
 function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 
 $idCorte = isset($_GET['id_corte']) ? (int)$_GET['id_corte'] : 0;
@@ -270,7 +298,7 @@ require_once __DIR__ . '/navbar.php';
 
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script> -->
 <script>
 (() => {
   const searchInput = document.getElementById('searchInput');
