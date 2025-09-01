@@ -1,7 +1,14 @@
 <?php
 // inventario_eulalia.php — LUGA (Almacén Central) UI modernizada
 session_start();
-if (!isset($_SESSION['id_usuario']) || ($_SESSION['rol'] ?? '') !== 'Admin') {
+
+if (!isset($_SESSION['id_usuario'])) {
+  header("Location: 403.php"); exit();
+}
+
+$ROL = $_SESSION['rol'] ?? '';
+$ALLOWED = ['Admin','GerenteZona','Super']; // <-- aquí agregamos GerenteZona (y Super opcional)
+if (!in_array($ROL, $ALLOWED, true)) {
   header("Location: 403.php"); exit();
 }
 
@@ -12,7 +19,6 @@ require_once __DIR__.'/navbar.php';
 if (!function_exists('h')) {
   function h($s){ return htmlspecialchars($s ?? '', ENT_QUOTES, 'UTF-8'); }
 }
-
 // ===============================
 //   Obtener ID de Eulalia
 // ===============================

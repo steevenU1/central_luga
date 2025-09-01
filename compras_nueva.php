@@ -339,7 +339,9 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
 </div>
 
 <!-- JS -->
-<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
+<!-- Carga Bootstrap bundle para navbar, collapse y Modal -->
+<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" crossorigin="anonymous"></script> -->
+
 <script>
   // Datos PHP -> JS
   const modelos = <?= json_encode($modelos, JSON_UNESCAPED_UNICODE) ?>;
