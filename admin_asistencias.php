@@ -473,15 +473,19 @@ require_once __DIR__.'/navbar.php';
     body{ background:#f8fafc; }
     .card-elev{border:0; border-radius:1rem; box-shadow:0 10px 24px rgba(15,23,42,.06), 0 2px 6px rgba(15,23,42,.05);}
     .table-xs td, .table-xs th{ padding:.45rem .6rem; font-size:.92rem; }
-    .pill{ display:inline-block; padding:.15rem .5rem; border-radius:999px; font-weight:600; font-size:.78rem; }
-    .pill-ret{ background:#fff3cd; color:#8a6d3b; border:1px solid #ffeeba; }
-    .pill-ok{ background:#e7f5ff; color:#0b7285; border:1px solid #c5e3f6; }
-    .pill-warn{ background:#fde2e1; color:#a61e4d; border:1px solid #f8b4b4; }
-    .pill-rest{ background:#f3f4f6; color:#374151; border:1px solid #e5e7eb; }
-    .pill-closed{ background:#ede9fe; color:#5b21b6; border:1px solid #ddd6fe; }
-    .pill-perm{ background:#e2f0d9; color:#2b6a2b; border:1px solid #c7e3be; }
-    .pill-vac{ background:#fff0f6; color:#9c36b5; border:1px solid #f3d9fa; } /* VACACIONES */
-    .pill-future{ background:#eef2ff; color:#3730a3; border:1px solid #c7d2fe; } /* PENDIENTE */
+    /* Pills compactos */
+    .pill{ display:inline-block; border-radius:999px; font-weight:700; line-height:1; }
+    .pill-compact{ padding:.12rem .38rem; font-size:.72rem; min-width:1.35rem; text-align:center; border:1px solid transparent; }
+    /* Colores */
+    .pill-A{ background:#e6fcf5; color:#0f5132; border-color:#c3fae8; }       /* Asistió (verde) */
+    .pill-R{ background:#fff3cd; color:#8a6d3b; border-color:#ffeeba; }       /* Retardo (ámbar) */
+    .pill-F{ background:#ffe3e3; color:#842029; border-color:#f5c2c7; }       /* Falta (rojo) */
+    .pill-P{ background:#e2f0d9; color:#2b6a2b; border-color:#c7e3be; }       /* Permiso (verde suave) */
+    .pill-V{ background:#fff0f6; color:#9c36b5; border-color:#f3d9fa; }       /* Vacaciones (morado suave) */
+    .pill-D{ background:#f3f4f6; color:#374151; border-color:#e5e7eb; }       /* Descanso (gris) */
+    .pill-X{ background:#ede9fe; color:#5b21b6; border-color:#ddd6fe; }       /* Cerrada (lila) */
+    .pill-PN{ background:#eef2ff; color:#3730a3; border-color:#c7d2fe; }      /* Pendiente (azul) */
+
     .thead-sticky th{ position:sticky; top:0; background:#111827; color:#fff; z-index:2; }
     .kpi{ border:0; border-radius:1rem; padding:1rem 1.25rem; display:flex; gap:.9rem; align-items:center; }
     .kpi i{ font-size:1.3rem; opacity:.9; }
@@ -574,7 +578,20 @@ require_once __DIR__.'/navbar.php';
 
   <!-- MATRIZ -->
   <div class="card card-elev mb-4">
-    <div class="card-header fw-bold">Matriz semanal (Mar→Lun) por persona</div>
+    <div class="card-header fw-bold d-flex align-items-center justify-content-between">
+      <span>Matriz semanal (Mar→Lun) por persona</span>
+      <!-- Leyenda de abreviaturas -->
+      <div class="small text-muted">
+        <span class="pill pill-compact pill-A" title="Asistió">A</span>
+        <span class="pill pill-compact pill-R" title="Retardo">R+min</span>
+        <span class="pill pill-compact pill-F" title="Falta">F</span>
+        <span class="pill pill-compact pill-P" title="Permiso">P</span>
+        <span class="pill pill-compact pill-V" title="Vacaciones">V</span>
+        <span class="pill pill-compact pill-D" title="Descanso">D</span>
+        <span class="pill pill-compact pill-X" title="Sucursal cerrada">X</span>
+        <span class="pill pill-compact pill-PN" title="Pendiente">—</span>
+      </div>
+    </div>
     <div class="card-body p-0">
       <div class="table-responsive">
         <table class="table table-striped table-xs align-middle mb-0">
@@ -598,17 +615,25 @@ require_once __DIR__.'/navbar.php';
               <td><?= h($fila['sucursal']) ?></td>
               <td class="fw-semibold"><?= h($fila['usuario']) ?></td>
               <?php foreach($fila['dias'] as $d):
-                $estado=$d['estado']; $pill='pill-ok'; $txt=$estado;
-                if($estado==='RETARDO'){ $pill='pill-ret'; $txt='Retardo'.($d['retardo_min']>0?' +'.$d['retardo_min'].'m':''); }
-                elseif($estado==='FALTA'){ $pill='pill-warn'; }
-                elseif($estado==='DESCANSO'){ $pill='pill-rest'; }
-                elseif($estado==='CERRADA'){ $pill='pill-closed'; }
-                elseif($estado==='PERMISO'){ $pill='pill-perm'; }
-                elseif($estado==='VACACIONES'){ $pill='pill-vac'; }
-                elseif($estado==='PENDIENTE'){ $pill='pill-future'; $txt='Pendiente'; }
+                $estado=$d['estado'];
+                // Abreviatura y clase
+                $abbr=''; $cls=''; $title='';
+                switch ($estado) {
+                  case 'ASISTIÓ':   $abbr='A'; $cls='pill-A'; $title='Asistió'; break;
+                  case 'RETARDO':   $abbr='R'.($d['retardo_min']>0?'+'.$d['retardo_min'].'m':''); $cls='pill-R'; $title='Retardo'.($d['retardo_min']>0?' +'.$d['retardo_min'].'m':''); break;
+                  case 'FALTA':     $abbr='F'; $cls='pill-F'; $title='Falta'; break;
+                  case 'PERMISO':   $abbr='P'; $cls='pill-P'; $title='Permiso'; break;
+                  case 'VACACIONES':$abbr='V'; $cls='pill-V'; $title='Vacaciones'; break;
+                  case 'DESCANSO':  $abbr='D'; $cls='pill-D'; $title='Descanso'; break;
+                  case 'CERRADA':   $abbr='X'; $cls='pill-X'; $title='Sucursal cerrada'; break;
+                  case 'PENDIENTE': $abbr='—'; $cls='pill-PN'; $title='Pendiente'; break;
+                  default:          $abbr='?'; $cls='pill-PN'; $title=$estado; break;
+                }
+                $tooltip = 'Entrada: '.($d['entrada']??'—').' | Salida: '.($d['salida']??'—').' | Dur: '.$d['dur'].'m';
+                $titleFull = trim($title.' · '.$tooltip);
               ?>
                 <td class="text-center">
-                  <span class="pill <?= $pill ?>" title="<?= 'Entrada: '.($d['entrada']??'—').' | Salida: '.($d['salida']??'—').' | Dur: '.$d['dur'].'m' ?>"><?= h($txt) ?></span>
+                  <span class="pill pill-compact <?= $cls ?>" title="<?= h($titleFull) ?>"><?= h($abbr) ?></span>
                 </td>
               <?php endforeach; ?>
               <td class="text-end"><?= (int)$fila['asis'] ?></td>
@@ -684,7 +709,13 @@ require_once __DIR__.'/navbar.php';
               <tbody>
               <?php if(!$asistDetView): ?>
                 <tr><td colspan="10" class="text-muted">Sin registros.</td></tr>
-              <?php else: foreach($asistDetView as $a): $estado=((int)($a['retardo']??0)===1)?'RETARDO':'OK'; ?>
+              <?php else: foreach($asistDetView as $a):
+                $esRet = ((int)($a['retardo']??0)===1);
+                $retMin = (int)($a['retardo_minutos']??0);
+                $abbr = $esRet ? ('R'.($retMin>0?'+'.$retMin.'m':'')) : 'A';
+                $cls  = $esRet ? 'pill-R' : 'pill-A';
+                $title= $esRet ? ('Retardo'.($retMin>0?' +'.$retMin.'m':'')) : 'Asistió';
+              ?>
                 <tr class="<?= $a['hora_salida'] ? '' : 'table-warning' ?>">
                   <td><?= h($a['sucursal']) ?></td>
                   <td><?= h($a['usuario']) ?></td>
@@ -692,8 +723,8 @@ require_once __DIR__.'/navbar.php';
                   <td><?= h($a['hora_entrada']) ?></td>
                   <td><?= $a['hora_salida']?h($a['hora_salida']):'<span class="text-muted">—</span>' ?></td>
                   <td class="text-end"><?= (int)($a['duracion_minutos']??0) ?></td>
-                  <td><?= $estado==='RETARDO'?'<span class="pill pill-ret">RETARDO</span>':'<span class="pill pill-ok">OK</span>' ?></td>
-                  <td><?= (int)($a['retardo_minutos']??0) ?></td>
+                  <td><span class="pill pill-compact <?= $cls ?>" title="<?= h($title) ?>"><?= h($abbr) ?></span></td>
+                  <td><?= $retMin ?></td>
                   <td><?php if($a['latitud']!==null && $a['longitud']!==null): $url='https://maps.google.com/?q='.urlencode($a['latitud'].','.$a['longitud']); ?>
                     <a href="<?= h($url) ?>" target="_blank" class="btn btn-sm btn-outline-primary">Mapa</a>
                   <?php else: ?><span class="text-muted">—</span><?php endif; ?></td>
