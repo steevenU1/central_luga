@@ -4,7 +4,7 @@ session_start();
 if (!isset($_SESSION['id_usuario'])) { header("Location: 403.php"); exit(); }
 
 $ROL = $_SESSION['rol'] ?? '';
-$ALLOWED = ['Admin','GerenteZona'];
+$ALLOWED = ['Admin','GerenteZona', 'Logistica'];
 if (!in_array($ROL, $ALLOWED, true)) { header("Location: 403.php"); exit(); }
 
 // No se puede editar precio desde esta vista

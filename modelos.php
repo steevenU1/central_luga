@@ -268,9 +268,12 @@ $list = $conn->query("SELECT * FROM catalogo_modelos $where ORDER BY marca, mode
     <div class="d-flex justify-content-between align-items-center p-2">
       <h6 class="m-0">Modelos</h6>
       <div class="d-flex gap-2">
-        <button id="btnExportExcel" class="btn btn-success btn-sm rounded-pill"><i class="bi bi-file-earmark-excel me-1"></i>Exportar Excel</button>
-        <button id="btnExportCSV" class="btn btn-light btn-sm rounded-pill border"><i class="bi bi-filetype-csv me-1"></i>CSV</button>
-        <button id="btnColVis" class="btn btn-light btn-sm rounded-pill border"><i class="bi bi-view-list me-1"></i>Columnas</button>
+        <button id="btnExportExcel" class="btn btn-success btn-sm rounded-pill">
+          <i class="bi bi-file-earmark-excel me-1"></i>Exportar Excel
+        </button>
+        <button id="btnColVis" class="btn btn-light btn-sm rounded-pill border">
+          <i class="bi bi-view-list me-1"></i>Columnas
+        </button>
       </div>
     </div>
 
@@ -350,11 +353,185 @@ $list = $conn->query("SELECT * FROM catalogo_modelos $where ORDER BY marca, mode
       </table>
     </div>
   </div>
+
+  <!-- Modal: Crear/Editar Modelo -->
+  <div class="modal fade" id="mdlModelo" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+      <div class="modal-content">
+        <form method="POST" action="modelos.php">
+          <div class="modal-header">
+            <h5 class="modal-title">
+              <?= $edit ? 'Editar modelo' : 'Nuevo modelo' ?>
+            </h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+          </div>
+
+          <div class="modal-body">
+            <input type="hidden" name="modo" value="<?= $edit ? 'editar' : 'crear' ?>">
+            <input type="hidden" name="id" value="<?= $edit ? (int)$edit['id'] : 0 ?>">
+
+            <div class="row g-3">
+              <!-- Básicos -->
+              <div class="col-md-3">
+                <label class="form-label">Marca <span class="text-danger">*</span></label>
+                <input name="marca" class="form-control" maxlength="80" required
+                       value="<?= $edit ? esc($edit['marca']) : '' ?>">
+              </div>
+              <div class="col-md-4">
+                <label class="form-label">Modelo <span class="text-danger">*</span></label>
+                <input name="modelo" class="form-control" maxlength="80" required
+                       value="<?= $edit ? esc($edit['modelo']) : '' ?>">
+              </div>
+              <div class="col-md-3">
+                <label class="form-label">Color</label>
+                <input name="color" class="form-control" maxlength="50"
+                       value="<?= $edit ? esc($edit['color']) : '' ?>">
+              </div>
+
+              <div class="col-md-2">
+                <label class="form-label">RAM</label>
+                <input name="ram" class="form-control" maxlength="50"
+                       value="<?= $edit ? esc($edit['ram']) : '' ?>">
+              </div>
+              <div class="col-md-2">
+                <label class="form-label">Almacenamiento</label>
+                <input name="capacidad" class="form-control" maxlength="50"
+                       value="<?= $edit ? esc($edit['capacidad']) : '' ?>">
+              </div>
+              <div class="col-md-4">
+                <label class="form-label">Código producto</label>
+                <input name="codigo_producto" class="form-control" maxlength="50"
+                       value="<?= $edit ? esc($edit['codigo_producto']) : '' ?>">
+                <div class="form-text">Usado en compras e inventario.</div>
+              </div>
+
+              <!-- Alineados a productos -->
+              <div class="col-md-6">
+                <label class="form-label">Descripción</label>
+                <textarea name="descripcion" class="form-control" rows="2"><?= $edit ? esc($edit['descripcion']) : '' ?></textarea>
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">Nombre comercial</label>
+                <input name="nombre_comercial" class="form-control" maxlength="255"
+                       value="<?= $edit ? esc($edit['nombre_comercial']) : '' ?>">
+              </div>
+              <div class="col-md-4">
+                <label class="form-label">Compañía</label>
+                <input name="compania" class="form-control" maxlength="100"
+                       value="<?= $edit ? esc($edit['compania']) : '' ?>">
+              </div>
+
+              <!-- Listas controladas -->
+              <div class="col-md-4">
+                <label class="form-label">Financiera</label>
+                <select name="financiera" class="form-select">
+                  <?php foreach ($FINANCIERAS_PERMITIDAS as $opt): ?>
+                    <option value="<?= esc($opt) ?>"
+                      <?= $edit && $edit['financiera']===$opt ? 'selected':'' ?>>
+                      <?= esc($opt) ?>
+                    </option>
+                  <?php endforeach; ?>
+                </select>
+              </div>
+
+              <div class="col-md-4">
+                <label class="form-label">Fecha lanzamiento</label>
+                <input type="date" name="fecha_lanzamiento" class="form-control"
+                       value="<?= $edit ? esc($edit['fecha_lanzamiento']) : '' ?>">
+              </div>
+
+              <div class="col-md-3">
+                <label class="form-label">Precio lista</label>
+                <input type="number" step="0.01" name="precio_lista" class="form-control"
+                       value="<?= $edit && $edit['precio_lista']!==null ? esc($edit['precio_lista']) : '' ?>">
+              </div>
+              <div class="col-md-3">
+                <label class="form-label">Tipo de producto</label>
+                <input name="tipo_producto" class="form-control" maxlength="50"
+                       value="<?= $edit ? esc($edit['tipo_producto']) : '' ?>">
+              </div>
+
+              <div class="col-md-3">
+                <label class="form-label">Subcategoría</label>
+                <select name="subtipo" class="form-select">
+                  <option value="">—</option>
+                  <?php foreach ($SUBTIPOS_PERMITIDOS as $opt): ?>
+                    <option value="<?= esc($opt) ?>"
+                      <?= $edit && strtoupper((string)$edit['subtipo'])===$opt ? 'selected':'' ?>>
+                      <?= esc($opt) ?>
+                    </option>
+                  <?php endforeach; ?>
+                </select>
+              </div>
+
+              <div class="col-md-3">
+                <label class="form-label">Gama</label>
+                <input name="gama" class="form-control" maxlength="50"
+                       value="<?= $edit ? esc($edit['gama']) : '' ?>">
+              </div>
+
+              <div class="col-md-3">
+                <label class="form-label">Ciclo de vida</label>
+                <input name="ciclo_vida" class="form-control" maxlength="50"
+                       value="<?= $edit ? esc($edit['ciclo_vida']) : '' ?>">
+              </div>
+
+              <div class="col-md-3">
+                <label class="form-label">ABC</label>
+                <input name="abc" class="form-control" maxlength="1"
+                       value="<?= $edit ? esc($edit['abc']) : '' ?>">
+              </div>
+
+              <div class="col-md-4">
+                <label class="form-label">Operador</label>
+                <select name="operador" class="form-select">
+                  <?php foreach ($OPERADORES_PERMITIDOS as $opt): ?>
+                    <option value="<?= esc($opt) ?>"
+                      <?= $edit && $edit['operador']===$opt ? 'selected':'' ?>>
+                      <?= esc($opt) ?>
+                    </option>
+                  <?php endforeach; ?>
+                </select>
+              </div>
+
+              <div class="col-md-4">
+                <label class="form-label">Resurtible</label>
+                <select name="resurtible" class="form-select">
+                  <option value="">—</option>
+                  <option value="Sí"  <?= $edit && $edit['resurtible']==='Sí'  ? 'selected':'' ?>>Sí</option>
+                  <option value="No"  <?= $edit && $edit['resurtible']==='No'  ? 'selected':'' ?>>No</option>
+                </select>
+              </div>
+
+              <?php if ($edit): ?>
+                <div class="col-md-4">
+                  <label class="form-label">Estatus</label>
+                  <div>
+                    <?= ((int)$edit['activo']===1)
+                          ? '<span class="badge bg-success">Activo</span>'
+                          : '<span class="badge bg-secondary">Inactivo</span>' ?>
+                  </div>
+                </div>
+              <?php endif; ?>
+            </div>
+          </div>
+
+          <div class="modal-footer">
+            <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
+            <button type="submit" class="btn btn-primary">
+              <i class="bi bi-save2 me-1"></i>Guardar
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
 </div>
 
 <!-- JS -->
 <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
-<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 
 <!-- DataTables core + addons -->
 <script src="https://cdn.datatables.net/1.13.8/js/jquery.dataTables.min.js"></script>
@@ -401,7 +578,6 @@ $list = $conn->query("SELECT * FROM catalogo_modelos $where ORDER BY marca, mode
            "tr" +
            "<'row mt-2'<'col-sm-12 col-md-5'i><'col-sm-12 col-md-7'p>>",
       buttons: [
-        { extend: 'csvHtml5',   className: 'btn btn-light btn-sm rounded-pill border buttons-csv',   text: '<i class="bi bi-filetype-csv me-1"></i>CSV' },
         { extend: 'excelHtml5', className: 'btn btn-light btn-sm rounded-pill border buttons-excel', text: '<i class="bi bi-file-earmark-excel me-1"></i>Excel' },
         { extend: 'colvis',     className: 'btn btn-light btn-sm rounded-pill border buttons-colvis', text: '<i class="bi bi-view-list me-1"></i>Columnas' }
       ],
@@ -413,7 +589,6 @@ $list = $conn->query("SELECT * FROM catalogo_modelos $where ORDER BY marca, mode
 
     // Botones externos (toolbar)
     $('#btnExportExcel').on('click', ()=> dt.button('.buttons-excel').trigger());
-    $('#btnExportCSV').on('click',   ()=> dt.button('.buttons-csv').trigger());
     $('#btnColVis').on('click',      ()=> dt.button('.buttons-colvis').trigger());
   });
 
