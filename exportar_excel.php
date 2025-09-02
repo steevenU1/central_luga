@@ -71,9 +71,7 @@ if (!empty($_GET['buscar'])) {
   array_push($params,$q,$q,$q,$q); $types.="ssss";
 }
 
-/* ========= Consulta ÚNICA (venta + detalle + producto + catálogo) =========
-   Nota: se fuerza collation en los JOIN para evitar "Illegal mix of collations".
-*/
+/* ========= Consulta: agrega ROW_NUMBER para imprimir precio_venta solo en 1 fila ========= */
 $sql = "
 SELECT
   v.id AS id_venta, v.fecha_venta, v.tag, v.nombre_cliente, v.telefono_cliente,
@@ -88,8 +86,12 @@ SELECT
   COALESCE(cm1.descripcion,     cm2.descripcion)                         AS descripcion,
   COALESCE(cm1.nombre_comercial,cm2.nombre_comercial)                    AS nombre_comercial,
 
+  dv.id AS id_detalle,
   dv.imei1,
-  dv.comision_regular, dv.comision_especial, dv.comision AS comision_equipo
+  dv.comision_regular, dv.comision_especial, dv.comision AS comision_equipo,
+
+  /* fila 1 por venta */
+  ROW_NUMBER() OVER (PARTITION BY v.id ORDER BY dv.id) AS rn
 
 FROM ventas v
 INNER JOIN usuarios   u ON v.id_usuario  = u.id
@@ -104,7 +106,7 @@ LEFT  JOIN catalogo_modelos cm1
       AND cm1.codigo_producto IS NOT NULL
       AND cm1.codigo_producto <> ''
 
-/* fallback por clave compuesta: collation igual en cada comparación */
+/* fallback por clave compuesta */
 LEFT  JOIN catalogo_modelos cm2
        ON ( (p.codigo_producto IS NULL OR p.codigo_producto = '')
             AND CONVERT(cm2.marca     USING utf8mb4) COLLATE utf8mb4_general_ci
@@ -120,7 +122,7 @@ LEFT  JOIN catalogo_modelos cm2
           )
 
 {$where}
-ORDER BY v.fecha_venta DESC, v.id DESC
+ORDER BY v.fecha_venta DESC, v.id DESC, dv.id ASC
 ";
 
 $stmt = $conn->prepare($sql);
@@ -161,6 +163,12 @@ echo "<table border='1'><thead><tr style='background:#f2f2f2'>
 
 while ($r = $res->fetch_assoc()) {
   $imei = ($r['imei1']!==null && $r['imei1']!=='') ? '="'.e($r['imei1']).'"' : '';
+
+  // Mostrar precio_venta solo en la PRIMERA fila de cada venta (rn=1)
+  $precioVenta = ($r['rn'] == 1)
+      ? e($r['precio_venta'])
+      : '';
+
   echo "<tr>
     <td>".e($r['id_venta'])."</td>
     <td>".e($r['fecha_venta'])."</td>
@@ -170,7 +178,7 @@ while ($r = $res->fetch_assoc()) {
     <td>".e($r['sucursal'])."</td>
     <td>".e($r['usuario'])."</td>
     <td>".e($r['tipo_venta'])."</td>
-    <td>".e($r['precio_venta'])."</td>
+    <td>{$precioVenta}</td>
     <td>".e($r['comision_venta'])."</td>
     <td>".e($r['enganche'])."</td>
     <td>".e($r['forma_pago_enganche'])."</td>

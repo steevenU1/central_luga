@@ -45,7 +45,8 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 /* ==========================================================
    Agregado por venta (unidades por VENTA, no por detalle)
    - Para 'Financiamiento+Combo' = 2 unidades.
-   - 'modem/mifi' no suman unidades.
+   - 'modem/mifi' NO suman unidades.
+   - Monto = TOTAL CABECERA (v.precio_venta) para cuadrar con export/BD.
 ========================================================== */
 $subVentasAgg = "
   SELECT
@@ -55,9 +56,9 @@ $subVentasAgg = "
       DATE(CONVERT_TZ(v.fecha_venta,'+00:00','-06:00')) AS dia,
       CASE
         WHEN LOWER(v.tipo_venta)='financiamiento+combo' THEN 2
-        ELSE SUM(CASE WHEN LOWER(p.tipo_producto) IN ('modem','mifi') THEN 0 ELSE 1 END)
+        ELSE COALESCE(SUM(CASE WHEN LOWER(p.tipo_producto) IN ('modem','mifi') THEN 0 ELSE 1 END),0)
       END AS unidades,
-      SUM(CASE WHEN LOWER(p.tipo_producto) IN ('modem','mifi') THEN 0 ELSE dv.precio_unitario END) AS monto
+      COALESCE(MAX(v.precio_venta),0) AS monto
   FROM ventas v
   LEFT JOIN detalle_venta dv ON dv.id_venta = v.id
   LEFT JOIN productos p     ON p.id = dv.id_producto

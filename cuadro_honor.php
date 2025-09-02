@@ -94,45 +94,47 @@ if ($tab === 'mes'){
 $iniStr = $ini->format('Y-m-d H:i:s');
 $finStr = $fin->format('Y-m-d H:i:s');
 
-/* ========= Filtros MiFi/Modem ========= */
-$notLike1 = "%modem%";
-$notLike2 = "%mifi%";
-
 /* ========= Consultas ========= */
 $ejecutivos = [];
 $sucursales = [];
 
 try {
-  // Top 3 Ejecutivos (unidades ponderadas)
+
+  /* ====== Top 3 Ejecutivos (unidades) – misma regla que el dash ======
+     - unidades por venta:
+         * si tipo_venta = 'Financiamiento+Combo' => 2
+         * en otro caso => #de detalles que NO sean modem/mifi (tipo_producto)
+     - modem/mifi NO suman unidades
+  */
   $sqlTopEjecutivos = "
     SELECT
       u.id              AS id_usuario,
       u.nombre          AS nombre_usuario,
       s.nombre          AS sucursal,
-      SUM(
-        CASE WHEN v.tipo_venta='Financiamiento+Combo'
-             THEN GREATEST(2, COALESCE(eq.cnt,0))
-             ELSE COALESCE(eq.cnt,0)
-        END
-      ) AS unidades
-    FROM ventas v
-    JOIN usuarios u        ON u.id = v.id_usuario
+      SUM(va.unidades)  AS unidades
+    FROM (
+      SELECT
+        v.id,
+        v.id_usuario,
+        CASE
+          WHEN LOWER(v.tipo_venta)='financiamiento+combo' THEN 2
+          ELSE COALESCE(SUM(CASE WHEN LOWER(p.tipo_producto) IN ('modem','mifi') THEN 0 ELSE 1 END),0)
+        END AS unidades
+      FROM ventas v
+      LEFT JOIN detalle_venta dv ON dv.id_venta = v.id
+      LEFT JOIN productos     p  ON p.id       = dv.id_producto
+      WHERE v.fecha_venta >= ? AND v.fecha_venta < ?
+      GROUP BY v.id
+    ) va
+    JOIN usuarios u   ON u.id = va.id_usuario
     LEFT JOIN sucursales s ON s.id = u.id_sucursal
-    LEFT JOIN (
-      SELECT dv.id_venta, COUNT(*) AS cnt
-      FROM detalle_venta dv
-      JOIN productos p ON p.id = dv.id_producto
-      WHERE LOWER(COALESCE(p.modelo,'')) NOT LIKE ? AND LOWER(COALESCE(p.modelo,'')) NOT LIKE ?
-      GROUP BY dv.id_venta
-    ) eq ON eq.id_venta = v.id
-    WHERE v.fecha_venta >= ? AND v.fecha_venta < ?
     GROUP BY u.id, u.nombre, s.nombre
     HAVING unidades > 0
     ORDER BY unidades DESC, nombre_usuario ASC
     LIMIT 3
   ";
   $stmt = $conn->prepare($sqlTopEjecutivos);
-  $stmt->bind_param("ssss",$notLike1,$notLike2,$iniStr,$finStr);
+  $stmt->bind_param("ss", $iniStr, $finStr);
   $stmt->execute();
   $res = $stmt->get_result();
   while($row = $res->fetch_assoc()){
@@ -141,19 +143,35 @@ try {
   }
   $stmt->close();
 
-  // Top 3 Sucursales (monto $)
+  /* ====== Top 3 Sucursales (monto) – misma regla que el dash ======
+     - monto por venta = v.precio_venta (cabecera)
+     - PERO solo si la venta tiene al menos 1 producto NO modem/mifi
+       (si la venta es 100% modem/mifi => 0)
+  */
   $sqlTopSucursales = "
     SELECT
       s.id                 AS id_sucursal,
       s.nombre             AS sucursal,
       ger.id               AS id_gerente,
       ger.nombre           AS gerente,
-      SUM(dv.precio_unitario) AS monto
-    FROM ventas v
-    JOIN detalle_venta dv ON dv.id_venta = v.id
-    JOIN productos p      ON p.id       = dv.id_producto
-    JOIN usuarios u       ON u.id       = v.id_usuario
-    JOIN sucursales s     ON s.id       = u.id_sucursal
+      SUM(va.monto)        AS monto
+    FROM (
+      SELECT
+        v.id,
+        v.id_usuario,
+        /* ¿La venta tiene algún no-modem? */
+        CASE WHEN COALESCE(SUM(CASE WHEN LOWER(p.tipo_producto) IN ('modem','mifi') THEN 0 ELSE 1 END),0) > 0
+             THEN COALESCE(MAX(v.precio_venta),0)
+             ELSE 0
+        END AS monto
+      FROM ventas v
+      LEFT JOIN detalle_venta dv ON dv.id_venta = v.id
+      LEFT JOIN productos     p  ON p.id       = dv.id_producto
+      WHERE v.fecha_venta >= ? AND v.fecha_venta < ?
+      GROUP BY v.id
+    ) va
+    JOIN usuarios   u ON u.id = va.id_usuario
+    JOIN sucursales s ON s.id = u.id_sucursal
     LEFT JOIN (
       SELECT id_sucursal, MIN(id) AS id_gerente
       FROM usuarios
@@ -161,15 +179,13 @@ try {
       GROUP BY id_sucursal
     ) pick ON pick.id_sucursal = s.id
     LEFT JOIN usuarios ger ON ger.id = pick.id_gerente
-    WHERE v.fecha_venta >= ? AND v.fecha_venta < ?
-      AND LOWER(COALESCE(p.modelo,'')) NOT LIKE ? AND LOWER(COALESCE(p.modelo,'')) NOT LIKE ?
     GROUP BY s.id, s.nombre, ger.id, ger.nombre
     HAVING monto > 0
     ORDER BY monto DESC, sucursal ASC
     LIMIT 3
   ";
   $stmt = $conn->prepare($sqlTopSucursales);
-  $stmt->bind_param("ssss",$iniStr,$finStr,$notLike1,$notLike2);
+  $stmt->bind_param("ss", $iniStr, $finStr);
   $stmt->execute();
   $res = $stmt->get_result();
   while($row = $res->fetch_assoc()){
@@ -201,7 +217,6 @@ try {
     body{ background:var(--bg); color:var(--ink); }
     .container{ max-width: 1040px; }
 
-    /* Navbar móvil cómodo */
     @media (max-width:576px){
       .navbar{ --bs-navbar-padding-y:.65rem; font-size:1rem; }
       .navbar .navbar-brand{ font-size:1.125rem; font-weight:700; }
@@ -264,8 +279,6 @@ try {
     .rank-1 .metric{ font-size:2.2rem; }
     .metric-label{ color:#64748b; font-size:.85rem; }
     .divider{ width:100%; height:1px; background:#eef2f7; margin:6px 0 2px; }
-
-    
   </style>
 </head>
 <body>
@@ -389,7 +402,7 @@ try {
 
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script> -->
 
 <!-- Loader robusto: local -> jsDelivr -> unpkg -->
 <script>
