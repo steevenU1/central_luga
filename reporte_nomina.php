@@ -90,51 +90,93 @@ function obtenerDescuentosSemana($conn, $idUsuario, DateTime $ini, DateTime $fin
 }
 
 /* ========================
-   Armar nómina (igual que antes, con neto)
+   Armar nómina (con PosG separado para Gerente)
 ======================== */
 $nomina = [];
 while ($u = $resUsuarios->fetch_assoc()) {
     $id_usuario  = (int)$u['id'];
     $id_sucursal = (int)$u['id_sucursal'];
 
-    // Comisiones EQUIPOS
+    // Comisiones EQUIPOS (ventas propias del usuario)
     $stmt = $conn->prepare("SELECT IFNULL(SUM(v.comision),0) AS total_comision FROM ventas v WHERE v.id_usuario=? AND v.fecha_venta BETWEEN ? AND ?");
     $stmt->bind_param("iss", $id_usuario, $inicioSemana, $finSemana);
     $stmt->execute();
     $com_equipos = (float)($stmt->get_result()->fetch_assoc()['total_comision'] ?? 0);
+    $stmt->close();
 
-    // SIMs PREPAGO
+    // SIMs PREPAGO (ejecutivo)
     $com_sims = 0.0;
     if ($u['rol'] != 'Gerente') {
-        $stmt = $conn->prepare("SELECT IFNULL(SUM(vs.comision_ejecutivo),0) AS com_sims FROM ventas_sims vs WHERE vs.id_usuario=? AND vs.fecha_venta BETWEEN ? AND ? AND vs.tipo_venta IN ('Nueva','Portabilidad')");
+        $stmt = $conn->prepare("
+            SELECT IFNULL(SUM(vs.comision_ejecutivo),0) AS com_sims
+            FROM ventas_sims vs
+            WHERE vs.id_usuario=? AND vs.fecha_venta BETWEEN ? AND ?
+              AND vs.tipo_venta IN ('Nueva','Portabilidad')
+        ");
         $stmt->bind_param("iss", $id_usuario, $inicioSemana, $finSemana);
         $stmt->execute();
         $com_sims = (float)($stmt->get_result()->fetch_assoc()['com_sims'] ?? 0);
+        $stmt->close();
     }
 
-    // POSPAGO
+    // POSPAGO (ejecutivo)
     $com_pospago = 0.0;
     if ($u['rol'] != 'Gerente') {
-        $stmt = $conn->prepare("SELECT IFNULL(SUM(vs.comision_ejecutivo),0) AS com_pos FROM ventas_sims vs WHERE vs.id_usuario=? AND vs.fecha_venta BETWEEN ? AND ? AND vs.tipo_venta='Pospago'");
+        $stmt = $conn->prepare("
+            SELECT IFNULL(SUM(vs.comision_ejecutivo),0) AS com_pos
+            FROM ventas_sims vs
+            WHERE vs.id_usuario=? AND vs.fecha_venta BETWEEN ? AND ?
+              AND vs.tipo_venta='Pospago'
+        ");
         $stmt->bind_param("iss", $id_usuario, $inicioSemana, $finSemana);
         $stmt->execute();
         $com_pospago = (float)($stmt->get_result()->fetch_assoc()['com_pos'] ?? 0);
+        $stmt->close();
     }
 
-    // GERENTE
-    $com_ger = 0.0;
+    // GERENTE (separando PosG)
+    $com_ger_base = 0.0;      // venta directa + escalonados + mifi/modem + prepago
+    $com_ger_pos  = 0.0;      // pospago gerente (columna PosG)
+    $com_ger      = 0.0;      // total gerente para nómina
+
     if ($u['rol'] == 'Gerente') {
-        $stmt = $conn->prepare("SELECT IFNULL(SUM(v.comision_gerente),0) AS com_ger_vtas FROM ventas v WHERE v.id_sucursal=? AND v.fecha_venta BETWEEN ? AND ?");
+        // Ventas/escala/mifi-modem (sumado ya en ventas.comision_gerente)
+        $stmt = $conn->prepare("
+            SELECT IFNULL(SUM(v.comision_gerente),0) AS com_ger_vtas
+            FROM ventas v
+            WHERE v.id_sucursal=? AND v.fecha_venta BETWEEN ? AND ?
+        ");
         $stmt->bind_param("iss", $id_sucursal, $inicioSemana, $finSemana);
         $stmt->execute();
         $com_ger_vtas = (float)($stmt->get_result()->fetch_assoc()['com_ger_vtas'] ?? 0);
+        $stmt->close();
 
-        $stmt = $conn->prepare("SELECT IFNULL(SUM(vs.comision_gerente),0) AS com_ger_sims FROM ventas_sims vs WHERE vs.id_sucursal=? AND vs.fecha_venta BETWEEN ? AND ?");
+        // Prepago gerente (ventas_sims, Nueva/Porta)
+        $stmt = $conn->prepare("
+            SELECT IFNULL(SUM(vs.comision_gerente),0) AS com_ger_prepago
+            FROM ventas_sims vs
+            WHERE vs.id_sucursal=? AND vs.fecha_venta BETWEEN ? AND ?
+              AND vs.tipo_venta IN ('Nueva','Portabilidad')
+        ");
         $stmt->bind_param("iss", $id_sucursal, $inicioSemana, $finSemana);
         $stmt->execute();
-        $com_ger_sims = (float)($stmt->get_result()->fetch_assoc()['com_ger_sims'] ?? 0);
+        $com_ger_prepago = (float)($stmt->get_result()->fetch_assoc()['com_ger_prepago'] ?? 0);
+        $stmt->close();
 
-        $com_ger = $com_ger_vtas + $com_ger_sims;
+        // Pospago gerente (ventas_sims, Posg)
+        $stmt = $conn->prepare("
+            SELECT IFNULL(SUM(vs.comision_gerente),0) AS com_ger_pos
+            FROM ventas_sims vs
+            WHERE vs.id_sucursal=? AND vs.fecha_venta BETWEEN ? AND ?
+              AND vs.tipo_venta='Pospago'
+        ");
+        $stmt->bind_param("iss", $id_sucursal, $inicioSemana, $finSemana);
+        $stmt->execute();
+        $com_ger_pos = (float)($stmt->get_result()->fetch_assoc()['com_ger_pos'] ?? 0);
+        $stmt->close();
+
+        $com_ger_base = $com_ger_vtas + $com_ger_prepago; // lo que mostramos en "Ger."
+        $com_ger      = $com_ger_base + $com_ger_pos;     // total para nómina
     }
 
     // Descuentos
@@ -151,21 +193,23 @@ while ($u = $resUsuarios->fetch_assoc()) {
     $comentario = $confRow['comentario'] ?? '';
 
     $nomina[] = [
-        'id_usuario'   => $id_usuario,
-        'id_sucursal'  => $id_sucursal,
-        'nombre'       => $u['nombre'],
-        'rol'          => $u['rol'],
-        'sucursal'     => $u['sucursal'],
-        'sueldo'       => (float)$u['sueldo'],
-        'com_equipos'  => $com_equipos,
-        'com_sims'     => $com_sims,
-        'com_pospago'  => $com_pospago,
-        'com_ger'      => $com_ger,
-        'descuentos'   => $descuentos,
-        'total_neto'   => $total_neto,
-        'confirmado'   => $confirmado,
-        'confirmado_en'=> $confirmado_en,
-        'comentario'   => $comentario
+        'id_usuario'     => $id_usuario,
+        'id_sucursal'    => $id_sucursal,
+        'nombre'         => $u['nombre'],
+        'rol'            => $u['rol'],
+        'sucursal'       => $u['sucursal'],
+        'sueldo'         => (float)$u['sueldo'],
+        'com_equipos'    => $com_equipos,
+        'com_sims'       => $com_sims,
+        'com_pospago'    => $com_pospago,   // ejecutivo
+        'com_ger'        => $com_ger,       // total gerente (para neto)
+        'com_ger_base'   => $com_ger_base,  // para columna "Ger."
+        'com_ger_pos'    => $com_ger_pos,   // para columna "PosG."
+        'descuentos'     => $descuentos,
+        'total_neto'     => $total_neto,
+        'confirmado'     => $confirmado,
+        'confirmado_en'  => $confirmado_en,
+        'comentario'     => $comentario
     ];
 }
 
@@ -332,6 +376,7 @@ $pendientes = max($empleados - $confirmados, 0);
             <th class="th-sort num" data-key="equipos">Eq.</th>
             <th class="th-sort num" data-key="sims">SIMs</th>
             <th class="th-sort num" data-key="pospago">Pos.</th>
+            <th class="th-sort num" data-key="posg">PosG.</th>   <!-- NUEVA COLUMNA -->
             <th class="th-sort num" data-key="gerente">Ger.</th>
             <th class="th-sort num" data-key="descuentos">Desc.</th>
             <th class="th-sort num" data-key="neto">Neto</th>
@@ -343,6 +388,9 @@ $pendientes = max($empleados - $confirmados, 0);
           <?php foreach ($nomina as $n):
               $isGer = ($n['rol'] === 'Gerente');
               $isOk  = (int)$n['confirmado'] === 1;
+              // Para ordenamiento/filtrado por columnas numéricas:
+              $valGerenteTabla = $isGer ? (float)$n['com_ger_base'] : 0.0; // Ger. SIN PosG
+              $valPosG         = $isGer ? (float)$n['com_ger_pos']  : 0.0; // Solo PosG
           ?>
           <tr
             data-rol="<?= htmlspecialchars($n['rol'], ENT_QUOTES, 'UTF-8') ?>"
@@ -351,7 +399,8 @@ $pendientes = max($empleados - $confirmados, 0);
             data-equipos="<?= (float)$n['com_equipos'] ?>"
             data-sims="<?= (float)$n['com_sims'] ?>"
             data-pospago="<?= (float)$n['com_pospago'] ?>"
-            data-gerente="<?= (float)$n['com_ger'] ?>"
+            data-posg="<?= $valPosG ?>"
+            data-gerente="<?= $valGerenteTabla ?>"
             data-descuentos="<?= (float)$n['descuentos'] ?>"
             data-neto="<?= (float)$n['total_neto'] ?>"
             data-confirmado="<?= $isOk ? 1 : 0 ?>"
@@ -372,7 +421,8 @@ $pendientes = max($empleados - $confirmados, 0);
             <td class="num">$<?= number_format($n['com_equipos'],2) ?></td>
             <td class="num">$<?= number_format($n['com_sims'],2) ?></td>
             <td class="num">$<?= number_format($n['com_pospago'],2) ?></td>
-            <td class="num">$<?= number_format($n['com_ger'],2) ?></td>
+            <td class="num">$<?= number_format($valPosG,2) ?></td>        <!-- PosG. -->
+            <td class="num">$<?= number_format($valGerenteTabla,2) ?></td><!-- Ger. base -->
             <td class="num text-danger">-$<?= number_format($n['descuentos'],2) ?></td>
             <td class="num fw-semibold">$<?= number_format($n['total_neto'],2) ?></td>
             <td>
@@ -394,7 +444,7 @@ $pendientes = max($empleados - $confirmados, 0);
         </tbody>
         <tfoot class="table-light">
           <tr>
-            <td colspan="8" class="text-end"><strong>Totales</strong></td>
+            <td colspan="9" class="text-end"><strong>Totales</strong></td>
             <td class="num text-danger"><strong>-$<?= number_format($totalGlobalDesc,2) ?></strong></td>
             <td class="num"><strong>$<?= number_format($totalGlobalNeto,2) ?></strong></td>
             <td class="text-start">
@@ -445,6 +495,7 @@ $pendientes = max($empleados - $confirmados, 0);
   });
 
   function sortRows(key, dir){
+    const tbody = document.querySelector('#tablaNomina tbody');
     const rows = [...tbody.rows];
     rows.sort((a,b)=>{
       const va = a.dataset[key] ?? '';

@@ -187,7 +187,8 @@ while ($u = $resUsuarios->fetch_assoc()) {
 
     while ($venta = $resVentas->fetch_assoc()) {
         $id_venta = (int)$venta['id'];
-        $totalVenta = 0;
+        $totalVenta = 0.0;
+        $totalVentaEspecial = 0.0;
 
         $sqlDV = "
             SELECT dv.id, dv.precio_unitario, dv.comision_especial, p.tipo_producto
@@ -201,21 +202,37 @@ while ($u = $resUsuarios->fetch_assoc()) {
         $detalles = $stmtDV->get_result();
 
         while ($det = $detalles->fetch_assoc()) {
-            $comEsp = (float)$det['comision_especial']; // SIEMPRE se paga
+            $espOriginal = (float)$det['comision_especial'];
+            // 🔸 NUEVA REGLA: si NO cumple cuota, no se paga comision especial (queda en 0)
+            $comEsp = $cumpleCuotaEjecutivo ? $espOriginal : 0.0;
+
+            // Si cambió, actualizar el campo en detalle_venta para dejarlo en cero cuando no cumpla
+            if ($comEsp !== $espOriginal) {
+                $stmtUpdEsp = $conn->prepare("UPDATE detalle_venta SET comision_especial=? WHERE id=?");
+                $stmtUpdEsp->bind_param("di", $comEsp, $det['id']);
+                $stmtUpdEsp->execute();
+                $stmtUpdEsp->close();
+            }
+
             $comReg = comisionEjecutivoEquipo((float)$det['precio_unitario'], $det['tipo_producto'], $cumpleCuotaEjecutivo, $esqEje);
             $comTot = $comReg + $comEsp;
 
             $stmtUpdDV = $conn->prepare("UPDATE detalle_venta SET comision_regular=?, comision=? WHERE id=?");
             $stmtUpdDV->bind_param("ddi", $comReg, $comTot, $det['id']);
             $stmtUpdDV->execute();
+            $stmtUpdDV->close();
 
             $totalVenta += $comTot;
+            $totalVentaEspecial += $comEsp;
         }
         $stmtDV->close();
 
-        $stmtUpdV = $conn->prepare("UPDATE ventas SET comision=? WHERE id=?");
-        $stmtUpdV->bind_param("di", $totalVenta, $id_venta);
+        // Guardamos total de la venta y el total de especial aplicado (puede ser 0)
+        // Nota: requiere que la tabla ventas tenga la columna comision_especial (en Luga existe).
+        $stmtUpdV = $conn->prepare("UPDATE ventas SET comision=?, comision_especial=? WHERE id=?");
+        $stmtUpdV->bind_param("ddi", $totalVenta, $totalVentaEspecial, $id_venta);
         $stmtUpdV->execute();
+        $stmtUpdV->close();
     }
     $stmtV->close();
 
@@ -238,6 +255,7 @@ while ($u = $resUsuarios->fetch_assoc()) {
         $stmtUP = $conn->prepare("UPDATE ventas_sims SET comision_ejecutivo=? WHERE id=?");
         $stmtUP->bind_param("di", $com, $id_vs);
         $stmtUP->execute();
+        $stmtUP->close();
     }
     $stmtPrep->close();
 
@@ -262,8 +280,7 @@ while ($u = $resUsuarios->fetch_assoc()) {
             FROM detalle_venta dv
             INNER JOIN ventas v ON dv.id_venta=v.id
             INNER JOIN productos p ON dv.id_producto=p.id
-            WHERE v.id_sucursal=?
-              AND v.fecha_venta BETWEEN ? AND ?
+            WHERE v.id_sucursal=? AND v.fecha_venta BETWEEN ? AND ?
               AND LOWER(p.tipo_producto) NOT IN ('sim','chip','pospago')
         ";
         $stmtMS = $conn->prepare($sqlMontoSuc);
@@ -285,7 +302,7 @@ while ($u = $resUsuarios->fetch_assoc()) {
         $stmt->execute();
         $stmt->close();
 
-        /* 4.3 Venta DIRECTA del gerente (POR VENTA, no por línea) */
+        /* 4.3 Venta DIRECTA del gerente (POR VENTA) */
         $sqlVD = "
             SELECT va.id AS id_venta, va.unidades
             FROM ( $subVentasAggSemana ) va
@@ -339,7 +356,7 @@ while ($u = $resUsuarios->fetch_assoc()) {
             $stmt->close();
         }
 
-        /* 4.5 Modems/MiFi (toda la sucursal) — se mantiene por línea */
+        /* 4.5 Modems/MiFi (toda la sucursal) — por línea */
         $sqlMod = "
             SELECT v.id AS id_venta, COUNT(dv.id) AS unidades
             FROM detalle_venta dv
