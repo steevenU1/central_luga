@@ -5,16 +5,75 @@
 // financiera, fecha_lanzamiento, tipo_producto, gama, ciclo_vida, abc, operador, resurtible, subtipo)
 // y muestra datos del catálogo en la UI.
 //
-// Reglas de "subtipo":
-// - Se sugiere "último subtipo usado" (por código o por marca+modelo+ram+capacidad)
-// - Si el usuario NO captura subtipo en el formulario, se usa el del catálogo (si existe)
-// - Si el usuario captura, se respeta lo capturado (override)
+// Mejora UX (sept-2025):
+// - Validación en vivo de IMEI: formato, Luhn, duplicado en formulario y duplicado en BD (AJAX).
+// - Si hay error al guardar, se conserva lo capturado y se indica IMEI y fila exacta del problema.
 
 session_start();
 if (!isset($_SESSION['id_usuario'])) { header("Location: index.php"); exit(); }
 
 include 'db.php';
 
+/* ============================
+   Mini API: validación AJAX de IMEI
+============================ */
+if (isset($_GET['action']) && $_GET['action'] === 'check_imei') {
+  header('Content-Type: application/json; charset=utf-8');
+  $imei = preg_replace('/\D+/', '', (string)($_GET['imei'] ?? ''));
+  $resp = ['ok'=>false, 'msg'=>'', 'exists'=>false, 'field'=>null];
+
+  // Validación básica
+  if ($imei === '' || !preg_match('/^\d{15}$/', $imei)) {
+    $resp['msg'] = 'Formato inválido: se requieren 15 dígitos.';
+    echo json_encode($resp); exit;
+  }
+
+  // Luhn
+  $luhn_ok = (function($s){
+    $s = preg_replace('/\D+/', '', $s);
+    if (strlen($s) !== 15) return false;
+    $sum = 0;
+    for ($i=0; $i<15; $i++) {
+      $d = (int)$s[$i];
+      if (($i % 2) === 1) { $d *= 2; if ($d > 9) $d -= 9; }
+      $sum += $d;
+    }
+    return ($sum % 10) === 0;
+  })($imei);
+
+  if (!$luhn_ok) {
+    $resp['msg'] = 'IMEI inválido (Luhn).';
+    echo json_encode($resp); exit;
+  }
+
+  // Buscar en productos
+  $sql = "SELECT 
+            CASE WHEN imei1 = ? THEN 'imei1' WHEN imei2 = ? THEN 'imei2' ELSE NULL END AS campo
+          FROM productos
+          WHERE imei1 = ? OR imei2 = ?
+          LIMIT 1";
+  if ($st = $conn->prepare($sql)) {
+    $st->bind_param("ssss", $imei, $imei, $imei, $imei);
+    $st->execute();
+    $res = $st->get_result();
+    if ($row = $res->fetch_assoc()) {
+      $resp['exists'] = true;
+      $resp['field']  = $row['campo'] ?: 'desconocido';
+      $resp['ok']     = true;
+      $resp['msg']    = 'Duplicado en BD (productos.'.($resp['field']).').';
+      echo json_encode($resp); exit;
+    }
+    $st->close();
+  }
+
+  $resp['ok'] = true;
+  $resp['msg'] = 'Disponible.';
+  echo json_encode($resp); exit;
+}
+
+/* ============================
+   Parámetros
+============================ */
 $detalleId = (int)($_GET['detalle'] ?? 0);
 $compraId  = (int)($_GET['compra'] ?? 0);
 if ($detalleId<=0 || $compraId<=0) die("Parámetros inválidos.");
@@ -30,18 +89,13 @@ function parse_money($s) {
   if (preg_match('/^\d{1,3}(\.\d{3})*,\d+$/', $s)) { // 1.234,56
     $s = str_replace('.', '', $s);
     $s = str_replace(',', '.', $s);
-  } else { // 1,234.56
+  } else { // 1,234.56 o 1234.56
     $s = str_replace(',', '', $s);
   }
   return is_numeric($s) ? round((float)$s, 2) : null;
 }
 
-/** Sugerir precio de lista:
- *  0) precio_lista del catálogo (si > 0)
- *  1) último por código
- *  2) último por marca+modelo+ram+capacidad
- *  3) costo + IVA
- */
+/** Sugerir precio de lista */
 function sugerirPrecioLista(mysqli $conn, ?string $codigoProd, string $marca, string $modelo, string $ram, string $capacidad, float $costoConIva, ?float $precioCat) {
   if ($precioCat !== null && $precioCat > 0) {
     return ['precio'=>(float)$precioCat, 'fuente'=>'catálogo de modelos'];
@@ -66,10 +120,7 @@ function sugerirPrecioLista(mysqli $conn, ?string $codigoProd, string $marca, st
   return ['precio'=>$costoConIva, 'fuente'=>'costo + IVA'];
 }
 
-/** Último subtipo usado:
- *  1) por código_producto
- *  2) por marca+modelo+ram+capacidad
- */
+/** Último subtipo usado */
 function ultimoSubtipo(mysqli $conn, ?string $codigoProd, string $marca, string $modelo, string $ram, string $capacidad) {
   if ($codigoProd) {
     $q = $conn->prepare("SELECT subtipo FROM productos
@@ -203,6 +254,10 @@ $precioListaForm = number_format($precioSugerido, 2, '.', '');
 // Prioridad sugerida: último usado → catálogo → vacío
 $subtipoForm = $subtipoUltimo ?? ($cat['subtipo'] ?? '');
 
+// Para repoblar inputs si hubo error
+$oldImei1 = [];
+$oldImei2 = [];
+
 /* ============================
    POST: guardar ingresos
 ============================ */
@@ -222,6 +277,68 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
   $subtipoForm = mb_substr(trim((string)($_POST['subtipo'] ?? '')), 0, 50, 'UTF-8');
   if ($subtipoForm === '') {
     $subtipoForm = isset($cat['subtipo']) ? mb_substr((string)$cat['subtipo'], 0, 50, 'UTF-8') : null;
+  }
+
+  // Normalizamos arrays y guardamos para repoblar si hay error
+  for ($i=0; $i<$n; $i++) {
+    $oldImei1[$i] = preg_replace('/\D+/', '', (string)($_POST['imei1'][$i] ?? ''));
+    $oldImei2[$i] = preg_replace('/\D+/', '', (string)($_POST['imei2'][$i] ?? ''));
+  }
+
+  // Pre-validación: duplicados dentro del formulario y en BD (rápida)
+  if ($errorMsg === "") {
+    // a) Duplicado en el MISMO formulario
+    $seen = [];
+    $dupsForm = [];
+    for ($i=0; $i<$n; $i++) {
+      foreach (['imei1','imei2'] as $col) {
+        $val = preg_replace('/\D+/', '', (string)($_POST[$col][$i] ?? ''));
+        if ($val !== '' && preg_match('/^\d{15}$/', $val)) {
+          $key = $val;
+          if (!isset($seen[$key])) $seen[$key] = [];
+          $seen[$key][] = $i+1;
+        }
+      }
+    }
+    foreach ($seen as $val => $rows) {
+      if (count($rows) > 1) {
+        $dupsForm[$val] = $rows;
+      }
+    }
+    if (!empty($dupsForm)) {
+      // Armamos mensaje claro
+      $msg = "Se detectaron IMEI duplicados en el formulario:\n";
+      foreach ($dupsForm as $val => $rows) {
+        $msg .= " - $val repetido en filas ".implode(', ', $rows)."\n";
+      }
+      $errorMsg = nl2br(esc($msg));
+    }
+  }
+
+  if ($errorMsg === "") {
+    // b) Checar en BD si ya existen (antes de abrir transacción)
+    for ($i=0; $i<$n && $errorMsg === ""; $i++) {
+      foreach ([['col'=>'imei1','label'=>'IMEI1'], ['col'=>'imei2','label'=>'IMEI2']] as $spec) {
+        $raw = trim((string)($_POST[$spec['col']][$i] ?? ''));
+        $val = preg_replace('/\D+/', '', $raw);
+        if ($val === '') continue; // opcional para IMEI2 o no requerido
+        if (!preg_match('/^\d{15}$/', $val)) {
+          $errorMsg = $spec['label']." inválido en la fila ".($i+1)." (deben ser 15 dígitos).";
+          break;
+        }
+        if (!luhn_ok($val)) {
+          $errorMsg = $spec['label']." inválido (Luhn) en la fila ".($i+1).".";
+          break;
+        }
+        $st = $conn->prepare("SELECT COUNT(*) c FROM productos WHERE imei1=? OR imei2=?");
+        $st->bind_param("ss", $val, $val);
+        $st->execute(); $st->bind_result($cdup); $st->fetch(); $st->close();
+        if ($cdup > 0) {
+          $errorMsg = $spec['label']." duplicado en BD en la fila ".($i+1).": $val";
+          break;
+        }
+      }
+    }
   }
 
   if ($errorMsg === "") {
@@ -259,18 +376,18 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
           throw new Exception("IMEI2 inválido (Luhn) en la fila ".($i+1).".");
         }
 
-        // Duplicados: contra imei1 o imei2 existentes
+        // Duplicados: contra imei1 o imei2 existentes (doble seguridad)
         if ($imei1 !== null) {
           $st = $conn->prepare("SELECT COUNT(*) c FROM productos WHERE imei1=? OR imei2=?");
           $st->bind_param("ss", $imei1, $imei1);
           $st->execute(); $st->bind_result($cdup1); $st->fetch(); $st->close();
-          if ($cdup1 > 0) throw new Exception("IMEI duplicado: $imei1");
+          if ($cdup1 > 0) throw new Exception("IMEI duplicado en BD (fila ".($i+1)."): $imei1");
         }
         if ($imei2 !== null) {
           $st = $conn->prepare("SELECT COUNT(*) c FROM productos WHERE imei1=? OR imei2=?");
           $st->bind_param("ss", $imei2, $imei2);
           $st->execute(); $st->bind_result($cdup2); $st->fetch(); $st->close();
-          if ($cdup2 > 0) throw new Exception("IMEI duplicado: $imei2");
+          if ($cdup2 > 0) throw new Exception("IMEI duplicado en BD (fila ".($i+1)."): $imei2");
         }
 
         // Variables catálogo (para insertar en productos)
@@ -395,7 +512,9 @@ include 'navbar.php';
   <?php endif; ?>
 
   <?php if (!empty($errorMsg)): ?>
-    <div class="alert alert-danger"><?= esc($errorMsg) ?></div>
+    <div class="alert alert-danger">
+      <?= $errorMsg // ya viene escapado si se armó con nl2br(esc(...)) ?>
+    </div>
   <?php endif; ?>
 
   <div class="card">
@@ -407,7 +526,7 @@ include 'navbar.php';
       <?php if ($pendientes <= 0): ?>
         <div class="alert alert-success">Este renglón ya está completamente ingresado.</div>
       <?php else: ?>
-        <form id="formIngreso" method="POST" autocomplete="off">
+        <form id="formIngreso" method="POST" autocomplete="off" novalidate>
           <input type="hidden" name="n" value="<?= $pendientes ?>">
 
           <!-- Subtipo por renglón -->
@@ -459,8 +578,8 @@ include 'navbar.php';
               <thead>
                 <tr>
                   <th>#</th>
-                  <th>IMEI1 <?= $requiereImei ? '*' : '' ?></th>
-                  <th>IMEI2 (opcional)</th>
+                  <th style="min-width:220px">IMEI1 <?= $requiereImei ? '*' : '' ?></th>
+                  <th style="min-width:220px">IMEI2 (opcional)</th>
                 </tr>
               </thead>
               <tbody>
@@ -471,7 +590,7 @@ include 'navbar.php';
                       <input
                         id="imei1-<?= $i ?>"
                         data-index="<?= $i ?>"
-                        class="form-control"
+                        class="form-control imei-input imei1"
                         name="imei1[]"
                         <?= $requiereImei ? 'required' : '' ?>
                         inputmode="numeric"
@@ -481,14 +600,17 @@ include 'navbar.php';
                         placeholder="15 dígitos"
                         title="Debe contener exactamente 15 dígitos"
                         autocomplete="off"
+                        value="<?= esc($oldImei1[$i] ?? '') ?>"
                         <?= $i===0 ? 'autofocus' : '' ?>
                       >
+                      <div class="invalid-feedback small">Corrige el IMEI (15 dígitos, Luhn) o quítalo si no aplica.</div>
+                      <div class="form-text text-danger d-none" id="dupmsg-imei1-<?= $i ?>"></div>
                     </td>
                     <td>
                       <input
                         id="imei2-<?= $i ?>"
                         data-index="<?= $i ?>"
-                        class="form-control"
+                        class="form-control imei-input imei2"
                         name="imei2[]"
                         inputmode="numeric"
                         minlength="15"
@@ -497,7 +619,10 @@ include 'navbar.php';
                         placeholder="15 dígitos (opcional)"
                         title="Si lo capturas, deben ser 15 dígitos"
                         autocomplete="off"
+                        value="<?= esc($oldImei2[$i] ?? '') ?>"
                       >
+                      <div class="invalid-feedback small">Corrige el IMEI (15 dígitos, Luhn) o déjalo vacío.</div>
+                      <div class="form-text text-danger d-none" id="dupmsg-imei2-<?= $i ?>"></div>
                     </td>
                   </tr>
                 <?php endfor; ?>
@@ -515,7 +640,7 @@ include 'navbar.php';
   </div>
 </div>
 
-<!-- ===== UX anti-auto-submit por pistola + validación Luhn (cliente) ===== -->
+<!-- ===== UX: validación en vivo (formato, Luhn, duplicado en formulario y BD) ===== -->
 <script>
 (function() {
   const form = document.getElementById('formIngreso');
@@ -527,18 +652,23 @@ include 'navbar.php';
   // Anti-doble envío
   form.addEventListener('submit', (e)=>{
     if (form.dataset.busy === '1') { e.preventDefault(); e.stopPropagation(); return; }
+    // Antes de bloquear envío, validamos que no existan duplicados "marcados"
+    const anyDup = form.querySelector('.dup-bad');
+    if (anyDup) {
+      e.preventDefault();
+      alert('Hay IMEI duplicados. Corrige los campos marcados en rojo.');
+      return;
+    }
     form.dataset.busy = '1';
     if (btnSubmit){ btnSubmit.disabled = true; btnSubmit.innerHTML = 'Ingresando...'; }
   }, { capture: true });
 
-  // Normaliza a solo dígitos y corta a 15
+  // Helpers
   function normalize15(input) {
     const v = input.value.replace(/\D+/g, '').slice(0, 15);
     if (v !== input.value) input.value = v;
     return v;
   }
-
-  // Luhn cliente (estricto: 15 dígitos)
   function imeiLuhnOk(s){
     s = (s||'').replace(/\D+/g,'');
     if (s.length !== 15) return false;
@@ -550,24 +680,165 @@ include 'navbar.php';
     }
     return (sum % 10) === 0;
   }
+  const inputs = Array.from(form.querySelectorAll('.imei-input'));
+  const dupIndexMap = new Map(); // imei -> [elementos]
 
-  // 1) Bloquear Enter dentro de inputs (evitar envío accidental)
+  // Debounce sencillo
+  function debounce(fn, ms) {
+    let t; return (...args)=>{ clearTimeout(t); t = setTimeout(()=>fn(...args), ms); };
+  }
+
+  // Pinta/limpia estado de duplicado local o BD
+  function markDup(el, msg, isBad=true) {
+    const id = el.id.replace(/^(.+)-(\d+)$/, (m,a,b)=>`${a}-${b}`);
+    const help = document.getElementById('dupmsg-'+id);
+    if (isBad) {
+      el.classList.add('is-invalid', 'dup-bad');
+      if (help){ help.classList.remove('d-none'); help.textContent = msg || 'Duplicado.'; }
+    } else {
+      el.classList.remove('dup-bad');
+      if (!el.classList.contains('is-invalid')) {
+        // solo quitar invalid si no hay otros motivos de invalidez
+        el.classList.remove('is-invalid');
+      }
+      if (help){ help.classList.add('d-none'); help.textContent = ''; }
+    }
+  }
+
+  // Revisa duplicados DENTRO del formulario
+  function checkLocalDuplicates() {
+    const map = new Map();
+    inputs.forEach(el=>{
+      const v = (el.value||'').replace(/\D+/g,'');
+      if (v.length === 15) {
+        if (!map.has(v)) map.set(v, []);
+        map.get(v).push(el);
+      }
+    });
+    // Limpia estados
+    inputs.forEach(el=> markDup(el, '', false));
+    // Marca si hay repetidos
+    map.forEach((arr, imei)=>{
+      if (arr.length > 1) {
+        arr.forEach(el=> markDup(el, `Duplicado en formulario: ${imei}`, true));
+      }
+    });
+  }
+
+  // Llamada AJAX para validar en BD
+  const checkRemote = debounce(async (el)=>{
+    const v = (el.value||'').replace(/\D+/g,'');
+    if (v.length !== 15 || !imeiLuhnOk(v)) return; // formato/luhn primero
+    try {
+      el.dataset.loading = '1';
+      const url = `<?= esc(basename(__FILE__)) ?>?action=check_imei&imei=${encodeURIComponent(v)}`;
+      const r = await fetch(url, { headers: { 'Accept': 'application/json' }});
+      const data = await r.json();
+      el.dataset.loading = '';
+
+      if (data && data.ok) {
+        if (data.exists) {
+          markDup(el, `Duplicado en BD (${data.field}): ${v}`, true);
+        } else {
+          // disponible
+          // solo limpiar estado de duplicado; la validez por Luhn/regex se maneja aparte
+          markDup(el, '', false);
+        }
+      } else {
+        // si la API dijo formato inválido/Luhn, marcar invalid
+        el.classList.add('is-invalid');
+      }
+    } catch (e) {
+      el.dataset.loading = '';
+      // En fallo de red no bloqueamos; solo no marcamos disponible.
+    }
+  }, 220);
+
+  // Eventos por input
+  inputs.forEach((el)=>{
+    el.addEventListener('input', ()=>{
+      const v = normalize15(el);
+      // reset mensajes de duplicado al escribir
+      markDup(el, '', false);
+
+      // Reglas de validez por Luhn
+      if (v.length === 15) {
+        if (!imeiLuhnOk(v)) {
+          el.classList.add('is-invalid');
+          el.setCustomValidity('IMEI inválido (Luhn).');
+        } else {
+          el.classList.remove('is-invalid');
+          el.setCustomValidity('');
+          checkLocalDuplicates();
+          checkRemote(el);
+        }
+      } else {
+        el.classList.remove('is-invalid');
+        el.setCustomValidity('');
+        checkLocalDuplicates();
+      }
+    });
+
+    el.addEventListener('blur', ()=>{
+      const v = (el.value||'').replace(/\D+/g,'');
+      if (v && v.length === 15) {
+        if (!imeiLuhnOk(v)) {
+          el.classList.add('is-invalid');
+          el.setCustomValidity('IMEI inválido (Luhn).');
+        } else {
+          // si pasa Luhn, revisar duplicados
+          checkLocalDuplicates();
+          checkRemote(el);
+        }
+      }
+    });
+  });
+
+  // Bloqueo si hay inválidos o duplicados antes de enviar
+  form.addEventListener('submit', function(e){
+    let bad = false;
+
+    // Valida formato/Luhn
+    inputs.forEach(inp=>{
+      const v = (inp.value||'').replace(/\D+/g,'');
+      // IMEI2 es opcional; IMEI1 puede ser requerido según requiereImei
+      if (v) {
+        if (!/^\d{15}$/.test(v) || !imeiLuhnOk(v)) {
+          inp.classList.add('is-invalid');
+          inp.setCustomValidity('IMEI inválido (Luhn).');
+          bad = true;
+        } else {
+          inp.classList.remove('is-invalid');
+          inp.setCustomValidity('');
+        }
+      }
+    });
+
+    checkLocalDuplicates();
+    if (form.querySelector('.dup-bad')) bad = true;
+
+    if (bad) {
+      e.preventDefault(); e.stopPropagation();
+      alert('Corrige los IMEI marcados en rojo (15 dígitos, Luhn y sin duplicados).');
+      form.dataset.busy = ''; // reactivar por si bloqueó
+      if (btnSubmit){ btnSubmit.disabled = false; btnSubmit.innerHTML = 'Ingresar a inventario'; }
+    }
+  }, { capture: true });
+
+  // Navegación con Enter (sin enviar)
   form.addEventListener('keydown', function(e) {
     if (e.key !== 'Enter') return;
-    const isTextInput = e.target.matches('input[name="imei1[]"], input[name="imei2[]"], input[name="precio_lista"], input[name="subtipo"]');
+    const isTextInput = e.target.matches('.imei-input, input[name="precio_lista"], input[name="subtipo"]');
     if (!isTextInput) return;
-    // Permitir Ctrl/Cmd+Enter para enviar intencionalmente
-    if (e.ctrlKey || e.metaKey) { return; }
+    if (e.ctrlKey || e.metaKey) { return; } // permitir Ctrl/Cmd+Enter para enviar
     e.preventDefault();
 
-    // Navegación de foco
     const t = e.target;
-    if (t.name === 'imei1[]') {
-      const idx = parseInt(t.dataset.index, 10) || 0;
-      const imei2 = document.getElementById('imei2-' + idx);
-      if (imei2) imei2.focus();
-    } else if (t.name === 'imei2[]') {
-      const idx = parseInt(t.dataset.index, 10) || 0;
+    const idx = parseInt(t.dataset.index || '0', 10);
+    if (t.classList.contains('imei1')) {
+      const next = document.getElementById('imei2-' + idx);
+      if (next) next.focus();
+    } else if (t.classList.contains('imei2')) {
       const next = document.getElementById('imei1-' + (idx + 1));
       if (next) next.focus();
       else if (btnSubmit) btnSubmit.focus();
@@ -577,77 +848,7 @@ include 'navbar.php';
     }
   });
 
-  // 2) Autolímite, Luhn y salto de foco al llegar a 15
-  for (let i = 0; i < total; i++) {
-    const i1 = document.getElementById('imei1-' + i);
-    const i2 = document.getElementById('imei2-' + i);
-
-    if (i1) {
-      i1.addEventListener('input', function() {
-        const v = normalize15(i1);
-        if (v.length === 15) {
-          // validar Luhn visualmente
-          if (!imeiLuhnOk(v)) { i1.classList.add('is-invalid'); i1.setCustomValidity('IMEI inválido (Luhn).'); }
-          else { i1.classList.remove('is-invalid'); i1.setCustomValidity(''); }
-          if (i2) i2.focus();
-        } else {
-          i1.classList.remove('is-invalid');
-          i1.setCustomValidity('');
-        }
-      });
-      i1.addEventListener('blur', function(){
-        const v = (i1.value||'').replace(/\D+/g,'');
-        if (v && v.length === 15 && !imeiLuhnOk(v)) {
-          i1.classList.add('is-invalid'); i1.setCustomValidity('IMEI inválido (Luhn).');
-        }
-      });
-    }
-    if (i2) {
-      i2.addEventListener('input', function() {
-        const v = normalize15(i2);
-        if (v.length === 15) {
-          if (!imeiLuhnOk(v)) { i2.classList.add('is-invalid'); i2.setCustomValidity('IMEI inválido (Luhn).'); }
-          else { i2.classList.remove('is-invalid'); i2.setCustomValidity(''); }
-          const next = document.getElementById('imei1-' + (i + 1));
-          if (next) next.focus();
-          else if (btnSubmit) btnSubmit.focus();
-        } else {
-          i2.classList.remove('is-invalid');
-          i2.setCustomValidity('');
-        }
-      });
-      i2.addEventListener('blur', function(){
-        const v = (i2.value||'').replace(/\D+/g,'');
-        if (v && v.length === 15 && !imeiLuhnOk(v)) {
-          i2.classList.add('is-invalid'); i2.setCustomValidity('IMEI inválido (Luhn).');
-        }
-      });
-    }
-  }
-
-  // 3) Validación de bloqueo antes de enviar (si hay alguno inválido)
-  form.addEventListener('submit', function(e){
-    let bad = false;
-    form.querySelectorAll('input[name="imei1[]"], input[name="imei2[]"]').forEach(inp=>{
-      const v = (inp.value||'').replace(/\D+/g,'');
-      if (v && (!/^\d{15}$/.test(v) || !imeiLuhnOk(v))) {
-        inp.classList.add('is-invalid');
-        inp.setCustomValidity('IMEI inválido (Luhn).');
-        bad = true;
-      } else {
-        inp.classList.remove('is-invalid');
-        inp.setCustomValidity('');
-      }
-    });
-    if (bad) {
-      e.preventDefault(); e.stopPropagation();
-      alert('Corrige los IMEI marcados en rojo (15 dígitos y válido por Luhn).');
-      form.dataset.busy = ''; // reactivar por si bloqueó
-      if (btnSubmit){ btnSubmit.disabled = false; btnSubmit.innerHTML = 'Ingresar a inventario'; }
-    }
-  }, { capture: true });
-
-  // 4) Atajo Ctrl/Cmd+Enter para enviar
+  // Atajo Ctrl/Cmd+Enter para enviar
   document.addEventListener('keydown', function(e) {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
       if (form && form.dataset.busy !== '1') form.requestSubmit();

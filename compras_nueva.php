@@ -130,7 +130,8 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
             <label class="form-label">Sucursal destino <span class="text-danger">*</span></label>
             <select name="id_sucursal" class="form-select" required>
               <?php foreach ($sucursales as $s): ?>
-                <option value="<?= (int)$s['id'] ?>" <?= $s['id']===$ID_SUCURSAL?'selected':'' ?>><?= h($s['nombre']) ?></option>
+                <?php $sid = (int)$s['id']; ?>
+                <option value="<?= $sid ?>" <?= ($sid === $ID_SUCURSAL ? 'selected' : '') ?>><?= h($s['nombre']) ?></option>
               <?php endforeach; ?>
             </select>
           </div>
@@ -156,7 +157,7 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
           </div>
           <div class="col-md-2">
             <label class="form-label">Días de vencimiento</label>
-            <input type="number" min="0" step="1" id="diasVenc" name="dias_vencimiento" class="form-control" placeholder="ej. 30" list="plazosSugeridos">
+            <input type="number" min="0" step="1" id="diasVencimiento" name="dias_vencimiento" class="form-control" placeholder="ej. 30" list="plazosSugeridos">
             <datalist id="plazosSugeridos">
               <option value="7"><option value="14"><option value="15"><option value="21">
               <option value="30"><option value="45"><option value="60"><option value="90">
@@ -339,7 +340,6 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
 </div>
 
 <!-- JS -->
-<!-- Carga Bootstrap bundle para navbar, collapse y Modal -->
 <!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" crossorigin="anonymous"></script> -->
 
 <script>
@@ -354,7 +354,7 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
   // vencimiento / condición
   const fechaFacturaEl = document.querySelector('input[name="fecha_factura"]');
   const fechaVencEl    = document.querySelector('input[name="fecha_vencimiento"]');
-  const diasVencEl     = document.getElementById('diasVenc');
+  const diasVencEl     = document.getElementById('diasVencimiento');
   const condicionPagoEl= document.getElementById('condicionPago');
 
   // pago contado (modal)
@@ -504,7 +504,7 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
         <input type="number" class="form-control num importe" name="extra_monto[${idx}]"
                step="0.01" min="0" value="0" required>
       </td>
-      <td>
+        <td>
         <input type="number" class="form-control num ivp" name="extra_iva_porcentaje[${idx}]"
                step="0.01" min="0" value="${ivaDefault.value || 16}">
       </td>
