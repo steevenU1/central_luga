@@ -1,6 +1,6 @@
 <?php
 session_start();
-if (!isset($_SESSION['id_usuario']) || !in_array($_SESSION['rol'], ['Admin','RH'])) {
+if (!isset($_SESSION['id_usuario']) || !in_array($_SESSION['rol'], ['Admin', 'RH'])) {
     header("Location: index.php");
     exit();
 }
@@ -10,18 +10,19 @@ include 'db.php';
 /* ========================
    FUNCIONES AUXILIARES
 ======================== */
-function obtenerSemanaPorIndice($offset = 0) {
+function obtenerSemanaPorIndice($offset = 0)
+{
     $hoy = new DateTime();
     $diaSemana = $hoy->format('N'); // 1=Lunes ... 7=Domingo
     $dif = $diaSemana - 2; // martes=2
     if ($dif < 0) $dif += 7;
 
     $inicio = new DateTime();
-    $inicio->modify("-$dif days")->setTime(0,0,0);
-    if ($offset > 0) $inicio->modify("-" . (7*$offset) . " days");
+    $inicio->modify("-$dif days")->setTime(0, 0, 0);
+    if ($offset > 0) $inicio->modify("-" . (7 * $offset) . " days");
 
     $fin = clone $inicio;
-    $fin->modify("+6 days")->setTime(23,59,59);
+    $fin->modify("+6 days")->setTime(23, 59, 59);
 
     return [$inicio, $fin];
 }
@@ -43,9 +44,10 @@ $esqGer = $conn->query("SELECT * FROM esquemas_comisiones_gerentes   ORDER BY fe
 /* ========================
    REGLAS EJECUTIVO
 ======================== */
-function comisionEjecutivoEquipo($precio, $tipoProducto, $cumpleCuota, $e) {
+function comisionEjecutivoEquipo($precio, $tipoProducto, $cumpleCuota, $e)
+{
     $tipo = strtolower($tipoProducto);
-    if (in_array($tipo, ['mifi','modem'])) {
+    if (in_array($tipo, ['mifi', 'modem'])) {
         return $cumpleCuota ? (float)$e['comision_mifi_con'] : (float)$e['comision_mifi_sin'];
     }
     if ($precio <= 3499) return $cumpleCuota ? (float)$e['comision_c_con'] : (float)$e['comision_c_sin'];
@@ -53,7 +55,8 @@ function comisionEjecutivoEquipo($precio, $tipoProducto, $cumpleCuota, $e) {
     return $cumpleCuota ? (float)$e['comision_a_con'] : (float)$e['comision_a_sin'];
 }
 
-function comisionPrepagoEjecutivo($tipoSim, $tipoVenta, $cumpleCuota, $e) {
+function comisionPrepagoEjecutivo($tipoSim, $tipoVenta, $cumpleCuota, $e)
+{
     $op = strtolower(trim($tipoSim));   // 'bait' | 'att'
     $t  = strtolower(trim($tipoVenta)); // 'nueva' | 'portabilidad'
     $nueva = ($t === 'nueva');
@@ -69,10 +72,20 @@ function comisionPrepagoEjecutivo($tipoSim, $tipoVenta, $cumpleCuota, $e) {
 /* ========================
    REGLAS GERENTE
 ======================== */
-function gerenteVentaDirectaMonto($cumpleTienda, $g) { return $cumpleTienda ? (float)$g['venta_directa_con'] : (float)$g['venta_directa_sin']; }
-function gerenteModemMonto($cumpleTienda, $g)       { return $cumpleTienda ? (float)$g['comision_modem_con'] : (float)$g['comision_modem_sin']; }
-function gerenteSimMonto($cumpleTienda, $g)         { return $cumpleTienda ? (float)$g['comision_sim_con']   : (float)$g['comision_sim_sin']; }
-function gerenteEscalonMonto($idx, $cumpleTienda, $g) {
+function gerenteVentaDirectaMonto($cumpleTienda, $g)
+{
+    return $cumpleTienda ? (float)$g['venta_directa_con'] : (float)$g['venta_directa_sin'];
+}
+function gerenteModemMonto($cumpleTienda, $g)
+{
+    return $cumpleTienda ? (float)$g['comision_modem_con'] : (float)$g['comision_modem_sin'];
+}
+function gerenteSimMonto($cumpleTienda, $g)
+{
+    return $cumpleTienda ? (float)$g['comision_sim_con']   : (float)$g['comision_sim_sin'];
+}
+function gerenteEscalonMonto($idx, $cumpleTienda, $g)
+{
     if ($cumpleTienda) {
         if ($idx <= 10) return (float)$g['sucursal_1_10_con'];
         if ($idx <= 20) return (float)$g['sucursal_11_20_con'];
@@ -84,7 +97,8 @@ function gerenteEscalonMonto($idx, $cumpleTienda, $g) {
     }
 }
 
-function comisionPospagoGerente(mysqli $conn, float $planMonto, string $modalidad): float {
+function comisionPospagoGerente(mysqli $conn, float $planMonto, string $modalidad): float
+{
     $sql = "SELECT comision_con_equipo, comision_sin_equipo
             FROM esquemas_comisiones_pospago
             WHERE tipo='Gerente' AND plan_monto=?
@@ -95,7 +109,7 @@ function comisionPospagoGerente(mysqli $conn, float $planMonto, string $modalida
     $row = $stmt->get_result()->fetch_assoc();
     $stmt->close();
     if (!$row) return 0.0;
-    $con = (stripos($modalidad,'con')!==false);
+    $con = (stripos($modalidad, 'con') !== false);
     return (float)($con ? $row['comision_con_equipo'] : $row['comision_sin_equipo']);
 }
 
@@ -261,29 +275,26 @@ while ($u = $resUsuarios->fetch_assoc()) {
 
     /* ===== 4) Recalcular GERENTE: por SUCURSAL ===== */
     if ($rol === 'Gerente') {
-        /* 4.1 Cumplimiento de TIENDA (monto semanal sucursal) */
+        /* 4.1 Cumplimiento de TIENDA (monto semanal sucursal por HEADER) */
         $sqlCuotaPesos = "
-            SELECT cuota_monto
-            FROM cuotas_sucursales
-            WHERE id_sucursal=? AND fecha_inicio <= ?
-            ORDER BY fecha_inicio DESC
-            LIMIT 1
-        ";
+    SELECT cuota_monto
+    FROM cuotas_sucursales
+    WHERE id_sucursal=? AND fecha_inicio <= ?
+    ORDER BY fecha_inicio DESC
+    LIMIT 1
+";
         $stmtQ = $conn->prepare($sqlCuotaPesos);
         $stmtQ->bind_param("is", $id_sucursal, $inicioSemana);
         $stmtQ->execute();
         $cuotaMonto = (float)($stmtQ->get_result()->fetch_assoc()['cuota_monto'] ?? 0);
         $stmtQ->close();
 
-        $sqlMontoSuc = "
-            SELECT SUM(dv.precio_unitario) AS monto
-            FROM detalle_venta dv
-            INNER JOIN ventas v ON dv.id_venta=v.id
-            INNER JOIN productos p ON dv.id_producto=p.id
-            WHERE v.id_sucursal=? AND v.fecha_venta BETWEEN ? AND ?
-              AND LOWER(p.tipo_producto) NOT IN ('sim','chip','pospago')
-        ";
-        $stmtMS = $conn->prepare($sqlMontoSuc);
+        /* 🔹 Monto de tienda alineado al dash/export: SUM(ventas.precio_venta) */
+        $stmtMS = $conn->prepare("
+    SELECT IFNULL(SUM(v.precio_venta),0) AS monto
+    FROM ventas v
+    WHERE v.id_sucursal=? AND v.fecha_venta BETWEEN ? AND ?
+");
         $stmtMS->bind_param("iss", $id_sucursal, $inicioSemana, $finSemana);
         $stmtMS->execute();
         $montoSuc = (float)($stmtMS->get_result()->fetch_assoc()['monto'] ?? 0);
@@ -341,7 +352,7 @@ while ($u = $resUsuarios->fetch_assoc()) {
             $n = (int)$row['unidades'];
             if ($n <= 0) continue;
             $pago = 0.0;
-            for ($i=0; $i<$n; $i++) {
+            for ($i = 0; $i < $n; $i++) {
                 $idx++;
                 $pago += gerenteEscalonMonto($idx, $cumpleTienda, $esqGer);
             }
@@ -421,10 +432,9 @@ while ($u = $resUsuarios->fetch_assoc()) {
         $stmtPG->close();
     }
 
-    echo "<p>".($rol=="Gerente"?"🟩":"🟦")." {$rol} {$u['nombre']} – Unidades(Eje): {$unidades}/{$cuota} → ".($cumpleCuotaEjecutivo?'✅':'❌')."</p>";
+    echo "<p>" . ($rol == "Gerente" ? "🟩" : "🟦") . " {$rol} {$u['nombre']} – Unidades(Eje): {$unidades}/{$cuota} → " . ($cumpleCuotaEjecutivo ? '✅' : '❌') . "</p>";
     $totalProcesados++;
 }
 
 echo "<hr><h4>✅ Recalculo completado. Usuarios procesados: {$totalProcesados}</h4>";
-echo '<a href="reporte_nomina.php?semana='.$semanaSeleccionada.'" class="btn btn-primary mt-3">← Volver al Reporte</a>';
-?>
+echo '<a href="reporte_nomina.php?semana=' . $semanaSeleccionada . '" class="btn btn-primary mt-3">← Volver al Reporte</a>';
