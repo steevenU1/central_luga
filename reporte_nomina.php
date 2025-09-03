@@ -7,6 +7,7 @@ if (!isset($_SESSION['id_usuario']) || !in_array($_SESSION['rol'], ['Admin','RH'
 
 include 'db.php';
 include 'navbar.php';
+include 'helpers_nomina.php';
 
 /* ========================
    Semanas (mar→lun)
@@ -90,7 +91,7 @@ function obtenerDescuentosSemana($conn, $idUsuario, DateTime $ini, DateTime $fin
 }
 
 /* ========================
-   Armar nómina (con PosG separado para Gerente)
+   Armar nómina (con desgloses extra para GERENTE)
 ======================== */
 $nomina = [];
 while ($u = $resUsuarios->fetch_assoc()) {
@@ -134,21 +135,35 @@ while ($u = $resUsuarios->fetch_assoc()) {
         $stmt->close();
     }
 
-    // GERENTE (separando PosG)
-    $com_ger_base = 0.0;      // venta directa + escalonados + mifi/modem + prepago
-    $com_ger_pos  = 0.0;      // pospago gerente (columna PosG)
-    $com_ger      = 0.0;      // total gerente para nómina
+    // ===== GERENTE: desglose =====
+    $com_ger_dir  = 0.0; // ventas directas realizadas por el propio gerente (en 'ventas')
+    $com_ger_esc  = 0.0; // comisiones del gerente por ventas de la sucursal (vendedor != gerente)
+    $com_ger_prep = 0.0; // prepago gerente (ventas_sims Nueva/Porta)
+    $com_ger_pos  = 0.0; // pospago gerente (ventas_sims Pospago)
+    $com_ger_base = 0.0; // base = dir + esc + prepago
+    $com_ger      = 0.0; // total gerente para nómina (base + posg)
 
     if ($u['rol'] == 'Gerente') {
-        // Ventas/escala/mifi-modem (sumado ya en ventas.comision_gerente)
+        // Ventas directas del gerente (tabla ventas)
         $stmt = $conn->prepare("
-            SELECT IFNULL(SUM(v.comision_gerente),0) AS com_ger_vtas
+            SELECT IFNULL(SUM(v.comision_gerente),0) AS dir
             FROM ventas v
-            WHERE v.id_sucursal=? AND v.fecha_venta BETWEEN ? AND ?
+            WHERE v.id_usuario=? AND v.fecha_venta BETWEEN ? AND ?
         ");
-        $stmt->bind_param("iss", $id_sucursal, $inicioSemana, $finSemana);
+        $stmt->bind_param("iss", $id_usuario, $inicioSemana, $finSemana);
         $stmt->execute();
-        $com_ger_vtas = (float)($stmt->get_result()->fetch_assoc()['com_ger_vtas'] ?? 0);
+        $com_ger_dir = (float)($stmt->get_result()->fetch_assoc()['dir'] ?? 0);
+        $stmt->close();
+
+        // Escalonado de equipos de la sucursal (vendedor NO gerente)
+        $stmt = $conn->prepare("
+            SELECT IFNULL(SUM(v.comision_gerente),0) AS esc
+            FROM ventas v
+            WHERE v.id_sucursal=? AND v.id_usuario<>? AND v.fecha_venta BETWEEN ? AND ?
+        ");
+        $stmt->bind_param("iiss", $id_sucursal, $id_usuario, $inicioSemana, $finSemana);
+        $stmt->execute();
+        $com_ger_esc = (float)($stmt->get_result()->fetch_assoc()['esc'] ?? 0);
         $stmt->close();
 
         // Prepago gerente (ventas_sims, Nueva/Porta)
@@ -160,10 +175,10 @@ while ($u = $resUsuarios->fetch_assoc()) {
         ");
         $stmt->bind_param("iss", $id_sucursal, $inicioSemana, $finSemana);
         $stmt->execute();
-        $com_ger_prepago = (float)($stmt->get_result()->fetch_assoc()['com_ger_prepago'] ?? 0);
+        $com_ger_prep = (float)($stmt->get_result()->fetch_assoc()['com_ger_prepago'] ?? 0);
         $stmt->close();
 
-        // Pospago gerente (ventas_sims, Posg)
+        // Pospago gerente (ventas_sims, Pospago)
         $stmt = $conn->prepare("
             SELECT IFNULL(SUM(vs.comision_gerente),0) AS com_ger_pos
             FROM ventas_sims vs
@@ -175,16 +190,44 @@ while ($u = $resUsuarios->fetch_assoc()) {
         $com_ger_pos = (float)($stmt->get_result()->fetch_assoc()['com_ger_pos'] ?? 0);
         $stmt->close();
 
-        $com_ger_base = $com_ger_vtas + $com_ger_prepago; // lo que mostramos en "Ger."
-        $com_ger      = $com_ger_base + $com_ger_pos;     // total para nómina
+        $com_ger_base = $com_ger_dir + $com_ger_esc + $com_ger_prep; // lo que mostramos en "Ger."
+        $com_ger      = $com_ger_base + $com_ger_pos;                // total para nómina
     }
 
     // Descuentos
     $descuentos = obtenerDescuentosSemana($conn, $id_usuario, $inicioSemanaObj, $finSemanaObj);
 
-    // Totales
-    $total_bruto = (float)$u['sueldo'] + $com_equipos + $com_sims + $com_pospago + $com_ger;
-    $total_neto  = $total_bruto - $descuentos;
+    /* ========================
+       Overrides RH por semana
+    ======================== */
+    $ov = fetchOverridesSemana($conn, $id_usuario, $iniISO, $finISO);
+
+    // Copia originales (por trazabilidad/UI)
+    $orig_sueldo   = (float)$u['sueldo'];
+    $orig_equipos  = $com_equipos;
+    $orig_sims     = $com_sims;
+    $orig_pospago  = $com_pospago;
+    $orig_ger_base = $com_ger_base;
+    $orig_ger_pos  = $com_ger_pos;
+    $orig_desc     = $descuentos;
+
+    // Aplicar overrides (NULL => respetar cálculo)
+    $sueldo_forzado = applyOverride($ov['sueldo_override']     ?? null, $orig_sueldo);
+    $com_equipos    = applyOverride($ov['equipos_override']    ?? null, $orig_equipos);
+    $com_sims       = applyOverride($ov['sims_override']       ?? null, $orig_sims);
+    $com_pospago    = applyOverride($ov['pospago_override']    ?? null, $orig_pospago);
+    $com_ger_base   = applyOverride($ov['ger_base_override']   ?? null, $orig_ger_base);
+    $com_ger_pos    = applyOverride($ov['ger_pos_override']    ?? null, $orig_ger_pos);
+    $descuentos     = applyOverride($ov['descuentos_override'] ?? null, $orig_desc);
+
+    $ajuste_neto_extra = (float)($ov['ajuste_neto_extra'] ?? 0.00);
+    $estado_override   = $ov['estado'] ?? null;
+    $nota_override     = $ov['nota']   ?? null;
+
+    // Recalcular totales con forzados
+    $com_ger     = $com_ger_base + $com_ger_pos;
+    $total_bruto = $sueldo_forzado + $com_equipos + $com_sims + $com_pospago + $com_ger;
+    $total_neto  = $total_bruto - $descuentos + $ajuste_neto_extra;
 
     // Confirmación
     $confRow = $confMap[$id_usuario] ?? null;
@@ -192,24 +235,45 @@ while ($u = $resUsuarios->fetch_assoc()) {
     $confirmado_en = $confRow['confirmado_en'] ?? null;
     $comentario = $confRow['comentario'] ?? '';
 
+    // Flags para chips “forzado”
+    $flag_forz = [
+      'sueldo'     => isset($ov['sueldo_override']),
+      'equipos'    => isset($ov['equipos_override']),
+      'sims'       => isset($ov['sims_override']),
+      'pospago'    => isset($ov['pospago_override']),
+      'ger_base'   => isset($ov['ger_base_override']),
+      'ger_pos'    => isset($ov['ger_pos_override']),
+      'descuentos' => isset($ov['descuentos_override']),
+      'ajuste'     => abs($ajuste_neto_extra) > 0.0001,
+      'estado'     => $estado_override,
+      'nota'       => $nota_override
+    ];
+
     $nomina[] = [
         'id_usuario'     => $id_usuario,
         'id_sucursal'    => $id_sucursal,
         'nombre'         => $u['nombre'],
         'rol'            => $u['rol'],
         'sucursal'       => $u['sucursal'],
-        'sueldo'         => (float)$u['sueldo'],
+        'sueldo'         => $sueldo_forzado, // forzado si aplica
         'com_equipos'    => $com_equipos,
         'com_sims'       => $com_sims,
-        'com_pospago'    => $com_pospago,   // ejecutivo
-        'com_ger'        => $com_ger,       // total gerente (para neto)
-        'com_ger_base'   => $com_ger_base,  // para columna "Ger."
-        'com_ger_pos'    => $com_ger_pos,   // para columna "PosG."
+        'com_pospago'    => $com_pospago,     // ejecutivo
+        'com_ger'        => $com_ger,         // total gerente (para neto)
+        'com_ger_base'   => $com_ger_base,    // Ger. base (puede estar forzado)
+        'com_ger_pos'    => $com_ger_pos,     // PosG. (puede estar forzado)
+        // desgloses informativos (no forzados)
+        'com_ger_dir'    => $com_ger_dir,
+        'com_ger_esc'    => $com_ger_esc,
         'descuentos'     => $descuentos,
         'total_neto'     => $total_neto,
         'confirmado'     => $confirmado,
         'confirmado_en'  => $confirmado_en,
-        'comentario'     => $comentario
+        'comentario'     => $comentario,
+        '_forz_flags'    => $flag_forz,
+        '_ajuste_extra'  => $ajuste_neto_extra,
+        '_nota'          => $nota_override,
+        '_estado'        => $estado_override,
     ];
 }
 
@@ -236,39 +300,27 @@ $pendientes = max($empleados - $confirmados, 0);
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css">
   <style>
-    :root{
-      --card-bg:#fff; --muted:#6b7280; --chip:#f1f5f9;
-    }
+    :root{ --card-bg:#fff; --muted:#6b7280; --chip:#f1f5f9; }
     body{ background:#f7f7fb; }
     .page-header{ display:flex; gap:1rem; align-items:center; justify-content:space-between; flex-wrap:wrap; }
     .page-title{ display:flex; gap:.75rem; align-items:center; }
     .page-title .emoji{ font-size:1.6rem; }
     .card-soft{ background:var(--card-bg); border:1px solid #eef2f7; border-radius:1rem; box-shadow:0 6px 18px rgba(16,24,40,.06); }
-    .chip{ display:inline-flex; gap:.4rem; align-items:center; background:var(--chip); border-radius:999px; padding:.25rem .55rem; font-size:.82rem; }
+    .chip{ display:inline-flex; gap:.4rem; align-items:center; background:var(--chip); border-radius:999px; padding:.25rem .55rem; font-size:.72rem; }
+    .chip-warn{ background:#fff3cd; color:#8a6d3b; border:1px solid #ffe9a9; }
+    .chip-note{ background:#eef2ff; color:#3730a3; border:1px solid #e0e7ff; }
     .controls-right{ display:flex; gap:.5rem; flex-wrap:wrap; }
     .table thead th{ position:sticky; top:0; z-index:5; background:#fff; border-bottom:1px solid #e5e7eb; }
-
-    /* ======= Compactar tabla (sin scroll horizontal) ======= */
-    .table-nomina{ font-size: .82rem; }
-    .table-nomina th, .table-nomina td{ padding: .35rem .4rem; white-space: nowrap; vertical-align: middle; }
-    .num{ text-align: right; font-variant-numeric: tabular-nums; }
+    .table-nomina{ font-size:.82rem; }
+    .table-nomina th, .table-nomina td{ padding:.35rem .4rem; white-space:nowrap; vertical-align:middle; }
+    .num{ text-align:right; font-variant-numeric: tabular-nums; }
     .th-sort{ cursor:pointer; white-space:nowrap; }
-    .status-pill{ border-radius: 999px; font-size: .7rem; padding: .18rem .45rem; }
+    .status-pill{ border-radius:999px; font-size:.7rem; padding:.18rem .45rem; }
     .header-mini{ font-size:.85rem; }
-    .no-x-scroll .table-responsive{ overflow-x: visible; } /* desktop: evita scroll */
-
-    /* Badges Rol/Sucursal con colores (fix) */
-    .badge-role{
-      background:#eef2ff; color:#3730a3; border:1px solid #e0e7ff;
-    }
-    .badge-suc{
-      background:#f0fdf4; color:#14532d; border:1px solid #bbf7d0;
-    }
-
-    @media (max-width: 1200px){
-      .table-nomina{ font-size:.78rem; }
-      .status-pill{ font-size:.66rem; }
-    }
+    .no-x-scroll .table-responsive{ overflow-x:visible; }
+    .badge-role{ background:#eef2ff; color:#3730a3; border:1px solid #e0e7ff; }
+    .badge-suc{ background:#f0fdf4; color:#14532d; border:1px solid #bbf7d0; }
+    @media (max-width:1200px){ .table-nomina{ font-size:.78rem; } .status-pill{ font-size:.66rem; } }
     @media print{
       .no-print{ display:none !important; }
       body{ background:#fff; }
@@ -323,28 +375,13 @@ $pendientes = max($empleados - $confirmados, 0);
 
   <!-- Summary cards -->
   <div class="d-flex flex-wrap gap-3 mb-3">
-    <div class="card-soft p-3">
-      <div class="text-muted small mb-1">Empleados</div>
-      <div class="h5 mb-0"><?= number_format($empleados) ?></div>
-    </div>
-    <div class="card-soft p-3">
-      <div class="text-muted small mb-1">Global (Neto)</div>
-      <div class="h5 mb-0">$<?= number_format($totalGlobalNeto,2) ?></div>
-    </div>
-    <div class="card-soft p-3">
-      <div class="text-muted small mb-1">Descuentos</div>
-      <div class="h5 mb-0 text-danger">-$<?= number_format($totalGlobalDesc,2) ?></div>
-    </div>
-    <div class="card-soft p-3">
-      <div class="text-muted small mb-1">Confirmados</div>
-      <div class="h5 mb-0 text-success"><?= number_format($confirmados) ?></div>
-    </div>
-    <div class="card-soft p-3">
-      <div class="text-muted small mb-1">Pendientes</div>
-      <div class="h5 mb-0 text-danger"><?= number_format($pendientes) ?></div>
-    </div>
+    <div class="card-soft p-3"><div class="text-muted small mb-1">Empleados</div><div class="h5 mb-0"><?= number_format($empleados) ?></div></div>
+    <div class="card-soft p-3"><div class="text-muted small mb-1">Global (Neto)</div><div class="h5 mb-0">$<?= number_format($totalGlobalNeto,2) ?></div></div>
+    <div class="card-soft p-3"><div class="text-muted small mb-1">Descuentos</div><div class="h5 mb-0 text-danger">-$<?= number_format($totalGlobalDesc,2) ?></div></div>
+    <div class="card-soft p-3"><div class="text-muted small mb-1">Confirmados</div><div class="h5 mb-0 text-success"><?= number_format($confirmados) ?></div></div>
+    <div class="card-soft p-3"><div class="text-muted small mb-1">Pendientes</div><div class="h5 mb-0 text-danger"><?= number_format($pendientes) ?></div></div>
 
-    <!-- Filtros compactos -->
+    <!-- Filtros -->
     <div class="card-soft p-3 no-print" style="flex:1">
       <div class="row g-2 align-items-end">
         <div class="col-12 col-md-4">
@@ -363,7 +400,7 @@ $pendientes = max($empleados - $confirmados, 0);
     </div>
   </div>
 
-  <!-- Tabla compacta (sin scroll horizontal en desktop) -->
+  <!-- Tabla -->
   <div class="card-soft p-0 no-x-scroll">
     <div class="table-responsive">
       <table id="tablaNomina" class="table table-hover table-sm table-nomina mb-0">
@@ -376,7 +413,9 @@ $pendientes = max($empleados - $confirmados, 0);
             <th class="th-sort num" data-key="equipos">Eq.</th>
             <th class="th-sort num" data-key="sims">SIMs</th>
             <th class="th-sort num" data-key="pospago">Pos.</th>
-            <th class="th-sort num" data-key="posg">PosG.</th>   <!-- NUEVA COLUMNA -->
+            <th class="th-sort num" data-key="posg">PosG.</th>
+            <th class="th-sort num" data-key="ger_dir">DirG.</th>
+            <th class="th-sort num" data-key="ger_esc">Esc.Eq.</th>
             <th class="th-sort num" data-key="gerente">Ger.</th>
             <th class="th-sort num" data-key="descuentos">Desc.</th>
             <th class="th-sort num" data-key="neto">Neto</th>
@@ -388,9 +427,11 @@ $pendientes = max($empleados - $confirmados, 0);
           <?php foreach ($nomina as $n):
               $isGer = ($n['rol'] === 'Gerente');
               $isOk  = (int)$n['confirmado'] === 1;
-              // Para ordenamiento/filtrado por columnas numéricas:
               $valGerenteTabla = $isGer ? (float)$n['com_ger_base'] : 0.0; // Ger. SIN PosG
               $valPosG         = $isGer ? (float)$n['com_ger_pos']  : 0.0; // Solo PosG
+              $valGerDir       = $isGer ? (float)$n['com_ger_dir']  : 0.0; // DirG.
+              $valGerEsc       = $isGer ? (float)$n['com_ger_esc']  : 0.0; // Esc.Eq.
+              $ff = $n['_forz_flags'] ?? [];
           ?>
           <tr
             data-rol="<?= htmlspecialchars($n['rol'], ENT_QUOTES, 'UTF-8') ?>"
@@ -400,6 +441,8 @@ $pendientes = max($empleados - $confirmados, 0);
             data-sims="<?= (float)$n['com_sims'] ?>"
             data-pospago="<?= (float)$n['com_pospago'] ?>"
             data-posg="<?= $valPosG ?>"
+            data-ger_dir="<?= $valGerDir ?>"
+            data-ger_esc="<?= $valGerEsc ?>"
             data-gerente="<?= $valGerenteTabla ?>"
             data-descuentos="<?= (float)$n['descuentos'] ?>"
             data-neto="<?= (float)$n['total_neto'] ?>"
@@ -413,18 +456,57 @@ $pendientes = max($empleados - $confirmados, 0);
                 <?php else: ?>
                   <a href="auditar_comisiones_ejecutivo.php?semana=<?= $semanaSeleccionada ?>&id_usuario=<?= (int)$n['id_usuario'] ?>" title="Detalle ejecutivo">🔍</a>
                 <?php endif; ?>
+                <?php if (!empty($n['_estado'])): ?>
+                  <span class="chip chip-note ms-1" title="Estado overrides">OV: <?= htmlspecialchars($n['_estado']) ?></span>
+                <?php endif; ?>
+                <?php if (!empty($n['_nota'])): ?>
+                  <span class="chip chip-note ms-1" title="Nota RH">“<?= htmlspecialchars($n['_nota']) ?>”</span>
+                <?php endif; ?>
               </div>
             </td>
             <td><span class="badge-role rounded-pill"><?= htmlspecialchars($n['rol'], ENT_QUOTES, 'UTF-8') ?></span></td>
             <td><span class="badge-suc rounded-pill"><?= htmlspecialchars($n['sucursal'], ENT_QUOTES, 'UTF-8') ?></span></td>
-            <td class="num">$<?= number_format($n['sueldo'],2) ?></td>
-            <td class="num">$<?= number_format($n['com_equipos'],2) ?></td>
-            <td class="num">$<?= number_format($n['com_sims'],2) ?></td>
-            <td class="num">$<?= number_format($n['com_pospago'],2) ?></td>
-            <td class="num">$<?= number_format($valPosG,2) ?></td>        <!-- PosG. -->
-            <td class="num">$<?= number_format($valGerenteTabla,2) ?></td><!-- Ger. base -->
-            <td class="num text-danger">-$<?= number_format($n['descuentos'],2) ?></td>
-            <td class="num fw-semibold">$<?= number_format($n['total_neto'],2) ?></td>
+
+            <td class="num">
+              $<?= number_format($n['sueldo'],2) ?>
+              <?php if (!empty($ff['sueldo'])): ?><span class="chip chip-warn ms-1" title="Forzado por RH">forzado</span><?php endif; ?>
+            </td>
+            <td class="num">
+              $<?= number_format($n['com_equipos'],2) ?>
+              <?php if (!empty($ff['equipos'])): ?><span class="chip chip-warn ms-1">forzado</span><?php endif; ?>
+            </td>
+            <td class="num">
+              $<?= number_format($n['com_sims'],2) ?>
+              <?php if (!empty($ff['sims'])): ?><span class="chip chip-warn ms-1">forzado</span><?php endif; ?>
+            </td>
+            <td class="num">
+              $<?= number_format($n['com_pospago'],2) ?>
+              <?php if (!empty($ff['pospago'])): ?><span class="chip chip-warn ms-1">forzado</span><?php endif; ?>
+            </td>
+
+            <td class="num">
+              $<?= number_format($valPosG,2) ?>
+              <?php if (!empty($ff['ger_pos'])): ?><span class="chip chip-warn ms-1">forzado</span><?php endif; ?>
+            </td>
+
+            <td class="num">$<?= number_format($valGerDir,2) ?></td>
+            <td class="num">$<?= number_format($valGerEsc,2) ?></td>
+
+            <td class="num">
+              $<?= number_format($valGerenteTabla,2) ?>
+              <?php if (!empty($ff['ger_base'])): ?><span class="chip chip-warn ms-1">forzado</span><?php endif; ?>
+            </td>
+            <td class="num text-danger">
+              -$<?= number_format($n['descuentos'],2) ?>
+              <?php if (!empty($ff['descuentos'])): ?><span class="chip chip-warn ms-1">forzado</span><?php endif; ?>
+            </td>
+            <td class="num fw-semibold">
+              $<?= number_format($n['total_neto'],2) ?>
+              <?php if (!empty($ff['ajuste'])): ?>
+                <span class="chip chip-note ms-1" title="Ajuste neto extra"><?= $n['_ajuste_extra']>=0?'+':'' ?>$<?= number_format($n['_ajuste_extra'],2) ?></span>
+              <?php endif; ?>
+            </td>
+
             <td>
               <?php if ($isOk): ?>
                 <span class="status-pill bg-success text-white" title="<?= $n['confirmado_en'] ? date('d/m/Y H:i', strtotime($n['confirmado_en'])) : '' ?>">✔</span>
@@ -444,7 +526,8 @@ $pendientes = max($empleados - $confirmados, 0);
         </tbody>
         <tfoot class="table-light">
           <tr>
-            <td colspan="9" class="text-end"><strong>Totales</strong></td>
+            <!-- Aumenta el colspan por las 2 nuevas columnas (DirG. y Esc.Eq.) -->
+            <td colspan="11" class="text-end"><strong>Totales</strong></td>
             <td class="num text-danger"><strong>-$<?= number_format($totalGlobalDesc,2) ?></strong></td>
             <td class="num"><strong>$<?= number_format($totalGlobalNeto,2) ?></strong></td>
             <td class="text-start">
@@ -459,12 +542,13 @@ $pendientes = max($empleados - $confirmados, 0);
   </div>
 
   <div class="mt-2 text-muted small">
-    * Totales netos = sueldo + comisiones – descuentos. Confirmación visible en <em>Mi Nómina</em> desde el martes posterior al cierre (mar→lun).
+    * “Ger.” = DirG. + Esc.Eq. + Prepago Ger. (si no hay override). PosG. se muestra aparte.  
+    * Totales netos = sueldo + comisiones – descuentos ± ajustes de RH. Confirmación visible en <em>Mi Nómina</em> desde el martes posterior al cierre (mar→lun).
   </div>
 </div>
 
 <script>
-  // Buscar + filtro por rol
+  // Buscar + rol
   const fRol = document.getElementById('fRol');
   const fSearch = document.getElementById('fSearch');
   const tbody = document.querySelector('#tablaNomina tbody');
