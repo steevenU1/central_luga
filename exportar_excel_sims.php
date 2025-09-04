@@ -91,6 +91,7 @@ $sql = "
         u.nombre            AS usuario,
         vs.es_esim,                 -- clave para marcar eSIM
         i.iccid,                    -- puede ser NULL si es eSIM
+        vs.tipo_sim,                -- <<< OPERADOR
         vs.tipo_venta,
         vs.modalidad,               -- para pospago
         vs.nombre_cliente,          -- cliente
@@ -179,6 +180,7 @@ echo "<thead>
             <th>Cliente</th>
             <th>Teléfono</th>          <!-- solo export -->
             <th>ICCID / Tipo</th>
+            <th>Operador</th>          <!-- NUEVA COLUMNA -->
             <th>Tipo Venta</th>
             <th>Modalidad</th>
             <th>Precio Total Venta</th>
@@ -196,13 +198,17 @@ while ($row = $res->fetch_assoc()) {
     $telefono   = ($tipoVenta === 'Pospago') ? (string)($row['numero_cliente'] ?? '') : ''; // solo pospago
     $coment     = $row['comentarios'] ?? '';
 
-    // ICCID: eSIM o física (texto para no perder ceros)
+    // ICCID: eSIM o física (como texto para no perder ceros)
     if (!empty($row['es_esim'])) {
         $iccidOut = "eSIM";
     } else {
         $iccid = (string)($row['iccid'] ?? '');
         $iccidOut = $iccid !== '' ? '="'.htmlspecialchars($iccid).'"' : '';
     }
+
+    // Operador
+    $operador = trim((string)($row['tipo_sim'] ?? ''));
+    $operadorOut = $operador !== '' ? htmlspecialchars($operador) : '—';
 
     // Teléfono como texto para preservar ceros a la izquierda
     $telefonoOut = $telefono !== '' ? '="'.htmlspecialchars($telefono).'"' : '';
@@ -215,6 +221,7 @@ while ($row = $res->fetch_assoc()) {
             <td>".htmlspecialchars($cliente)."</td>
             <td>{$telefonoOut}</td>
             <td>{$iccidOut}</td>
+            <td>{$operadorOut}</td>
             <td>".htmlspecialchars($tipoVenta)."</td>
             <td>".htmlspecialchars($modalidad)."</td>
             <td>".number_format((float)$row['precio_total'], 2, '.', '')."</td>

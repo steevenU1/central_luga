@@ -42,11 +42,24 @@ function pctDelta($curr, $prev) {
 }
 function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 
+/** Normaliza cualquier valor de zona a "Zona N" */
+function normalizarZona($raw){
+    $t = trim((string)$raw);
+    if ($t === '') return null;
+    // elimina repeticiones tipo "Zona Zona 1"
+    $t = preg_replace('/^(?:\s*Zona\s+)+/i', 'Zona ', $t);
+    // si trae un número en cualquier formato, úsalo
+    if (preg_match('/(\d+)/', $t, $m)) return 'Zona '.(int)$m[1];
+    // si ya trae "Zona X" sin número, lo dejamos
+    if (preg_match('/^Zona\s+\S+/i', $t)) return preg_replace('/\s+/', ' ', $t);
+    return null;
+}
+
 /* ==========================================================
    Agregado por venta (unidades por VENTA, no por detalle)
    - Para 'Financiamiento+Combo' = 2 unidades.
    - 'modem/mifi' NO suman unidades.
-   - Monto = TOTAL CABECERA (v.precio_venta) para cuadrar con export/BD.
+   - Monto = TOTAL CABECERA (v.precio_venta)
 ========================================================== */
 $subVentasAgg = "
   SELECT
@@ -184,21 +197,27 @@ while ($row = $resSucursales->fetch_assoc()) {
 $porcentajeGlobal = $totalCuotaGlobal>0 ? ($totalVentasGlobal/$totalCuotaGlobal)*100 : 0;
 
 /* ==============================
-   Agrupación por Zonas
+   Agrupación por Zonas (NORMALIZADA)
+   - Llaves exactas: "Zona 1" / "Zona 2"
+   - Más zonas quedarían ignoradas para las cards (puedes extender si quieres)
 ================================= */
-$zonas = [];
+$zonasAgg = []; // ['Zona 1' => [...], 'Zona 2' => [...]]
 foreach ($sucursales as $s) {
-    $z = trim((string)($s['zona'] ?? ''));
-    if ($z === '') $z = 'Sin zona';
-    if (!isset($zonas[$z])) $zonas[$z] = ['unidades'=>0,'ventas'=>0.0,'cuota'=>0.0];
-    $zonas[$z]['unidades'] += (int)$s['unidades'];
-    $zonas[$z]['ventas']   += (float)$s['total_ventas'];
-    $zonas[$z]['cuota']    += (float)$s['cuota_semanal'];
+    $zNorm = normalizarZona($s['zona'] ?? '');
+    if (!$zNorm) continue; // ignora "sin zona" u otros
+    if (!isset($zonasAgg[$zNorm])) $zonasAgg[$zNorm] = ['unidades'=>0,'ventas'=>0.0,'cuota'=>0.0];
+    $zonasAgg[$zNorm]['unidades'] += (int)$s['unidades'];
+    $zonasAgg[$zNorm]['ventas']   += (float)$s['total_ventas'];
+    $zonasAgg[$zNorm]['cuota']    += (float)$s['cuota_semanal'];
 }
-foreach ($zonas as $z => &$info) {
+foreach ($zonasAgg as $k => &$info) {
     $info['cumplimiento'] = $info['cuota']>0 ? ($info['ventas']/$info['cuota']*100.0) : 0.0;
 }
 unset($info);
+
+/* Arma cards en ORDEN FIJO: Zona 1 (izq), Zona 2 (centro) */
+$z1 = $zonasAgg['Zona 1'] ?? ['unidades'=>0,'ventas'=>0.0,'cuota'=>0.0,'cumplimiento'=>0.0];
+$z2 = $zonasAgg['Zona 2'] ?? ['unidades'=>0,'ventas'=>0.0,'cuota'=>0.0,'cumplimiento'=>0.0];
 
 /* ==============================
    Semana anterior (sucursales, por monto)
@@ -347,41 +366,56 @@ foreach ($weekSeries as $sucursalNombre => $serie) {
     <span class="ms-2 text-muted small">Comparando con: <?= $inicioPrevObj->format('d/m/Y') ?> → <?= $finPrevObj->format('d/m/Y') ?></span>
   </form>
 
-  <!-- Tarjetas por zonas + global (montos COMPLETOS) -->
+  <!-- Tarjetas por zonas (orden fijo) + global -->
   <div class="row mb-4">
-    <?php foreach ($zonas as $zona => $info): ?>
+    <?php
+      $cards = [
+        ['label'=>'Zona 1', 'data'=>$z1],
+        ['label'=>'Zona 2', 'data'=>$z2],
+      ];
+      foreach ($cards as $c):
+        $d = $c['data'];
+        $cumpl = (float)$d['cumplimiento'];
+        $barra = $cumpl>=100 ? 'bg-success' : ($cumpl>=60 ? 'bg-warning' : 'bg-danger');
+    ?>
       <div class="col-md-4 mb-3">
         <div class="card shadow text-center">
-          <div class="card-header bg-dark text-white">Zona <?= h($zona) ?></div>
+          <div class="card-header bg-dark text-white"><?= h($c['label']) ?></div>
           <div class="card-body">
-            <h5><?= number_format($info['cumplimiento'],1) ?>% Cumplimiento</h5>
+            <h5><?= number_format($cumpl,1) ?>% Cumplimiento</h5>
             <p>
-              Unidades: <?= (int)$info['unidades'] ?><br>
-              Ventas: $<?= number_format($info['ventas'],2) ?><br>
-              Cuota:  $<?= number_format($info['cuota'],2) ?>
+              Unidades: <?= (int)$d['unidades'] ?><br>
+              Ventas: $<?= number_format($d['ventas'],2) ?><br>
+              Cuota:  $<?= number_format($d['cuota'],2) ?>
             </p>
             <div class="progress" style="height:20px">
-              <div class="progress-bar <?= $info['cumplimiento']>=100?'bg-success':($info['cumplimiento']>=60?'bg-warning':'bg-danger') ?>" style="width:<?= min(100,$info['cumplimiento']) ?>%">
-                <?= number_format(min(100,$info['cumplimiento']),1) ?>%
+              <div class="progress-bar <?= $barra ?>" style="width:<?= min(100,$cumpl) ?>%">
+                <?= number_format(min(100,$cumpl),1) ?>%
               </div>
             </div>
           </div>
         </div>
       </div>
     <?php endforeach; ?>
+
+    <!-- Global (derecha) -->
+    <?php
+      $cumplG = (float)$porcentajeGlobal;
+      $barraG = $cumplG>=100 ? 'bg-success' : ($cumplG>=60 ? 'bg-warning' : 'bg-danger');
+    ?>
     <div class="col-md-4 mb-3">
       <div class="card shadow text-center">
         <div class="card-header bg-primary text-white">Global Compañía</div>
         <div class="card-body">
-          <h5><?= number_format($porcentajeGlobal,1) ?>% Cumplimiento</h5>
+          <h5><?= number_format($cumplG,1) ?>% Cumplimiento</h5>
           <p>
             Unidades: <?= $totalUnidades ?><br>
             Ventas: $<?= number_format($totalVentasGlobal,2) ?><br>
             Cuota:  $<?= number_format($totalCuotaGlobal,2) ?>
           </p>
           <div class="progress" style="height:20px">
-            <div class="progress-bar <?= $porcentajeGlobal>=100?'bg-success':($porcentajeGlobal>=60?'bg-warning':'bg-danger') ?>" style="width:<?= min(100,$porcentajeGlobal) ?>%">
-              <?= number_format(min(100,$porcentajeGlobal),1) ?>%
+            <div class="progress-bar <?= $barraG ?>" style="width:<?= min(100,$cumplG) ?>%">
+              <?= number_format(min(100,$cumplG),1) ?>%
             </div>
           </div>
         </div>
@@ -417,7 +451,7 @@ foreach ($weekSeries as $sucursalNombre => $serie) {
               <thead class="table-dark">
                 <tr>
                   <th>Ejecutivo</th>
-                  <th class="d-none d-sm-table-cell">Sucursal</th> <!-- oculto en móvil -->
+                  <th class="d-none d-sm-table-cell">Sucursal</th>
                   <th class="col-fit">Unidades</th>
                   <th class="d-none d-sm-table-cell col-fit">Total Ventas ($)</th>
                   <th class="col-fit">% Cumpl.</th>
@@ -452,9 +486,7 @@ foreach ($weekSeries as $sucursalNombre => $serie) {
                   <td class="num col-fit"><?= number_format($cumpl,1) ?>% <?= $estado ?></td>
                   <td class="d-none d-sm-table-cell">
                     <div class="progress" style="height:20px">
-                      <div class="progress-bar <?= $progPct>=100?'bg-success':($progPct>=60?'bg-warning':'bg-danger') ?>" style="width:<?= $progPct ?>%">
-                        <?= number_format($progPct,1) ?>%
-                      </div>
+                      <div class="progress-bar <?= $progPct>=100?'bg-success':($progPct>=60?'bg-warning':'bg-danger') ?>" style="width:<?= $progPct ?>%"><?= number_format($progPct,1) ?>%</div>
                     </div>
                   </td>
                 </tr>
@@ -492,10 +524,11 @@ foreach ($weekSeries as $sucursalNombre => $serie) {
                   $dM = (float)$s['delta_monto'];
                   [$icoM, $clsM] = arrowIcon($dM);
                   $pctM = $s['pct_delta_monto'];
+                  $zonaNorm = normalizarZona($s['zona'] ?? '') ?? '—';
                 ?>
                 <tr class="<?= $fila ?>">
                   <td class="clip-branch" title="<?= h($s['sucursal']) ?>"><?= h($s['sucursal']) ?></td>
-                  <td class="d-none d-sm-table-cell">Zona <?= h($s['zona']) ?></td>
+                  <td class="d-none d-sm-table-cell"><?= h($zonaNorm) ?></td>
                   <td class="d-none d-sm-table-cell num"><?= (int)$s['unidades'] ?></td>
 
                   <td class="num col-fit">
@@ -520,9 +553,7 @@ foreach ($weekSeries as $sucursalNombre => $serie) {
 
                   <td class="d-none d-sm-table-cell">
                     <div class="progress" style="height:20px">
-                      <div class="progress-bar <?= $cumpl>=100?'bg-success':($cumpl>=60?'bg-warning':'bg-danger') ?>" style="width:<?= min(100,$cumpl) ?>%">
-                        <?= $cumpl ?>%
-                      </div>
+                      <div class="progress-bar <?= $cumpl>=100?'bg-success':($cumpl>=60?'bg-warning':'bg-danger') ?>" style="width:<?= min(100,$cumpl) ?>%"><?= $cumpl ?>%</div>
                     </div>
                   </td>
                 </tr>

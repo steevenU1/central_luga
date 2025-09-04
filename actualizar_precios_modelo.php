@@ -40,19 +40,12 @@ if($_SERVER['REQUEST_METHOD'] === 'POST'){
         }
 
         // 2) Upsert en precios_combo (precio combo y/o promoción)
-        //    Ejecutar si:
-        //    - viene un precio_combo válido (>0)  ó
-        //    - viene un texto de promoción  ó
-        //    - se pide limpiar la promoción
         if (
             ($nuevoPrecioCombo !== null && $nuevoPrecioCombo > 0) ||
             ($promocionTexto !== '') ||
             $quitarPromo
         ){
-            // Si no viene precio_combo, lo dejamos en NULL para no sobreescribir el vigente.
-            // La expresión COALESCE en el UPDATE mantiene el existente si enviamos NULL.
             $precioComboParam = ($nuevoPrecioCombo !== null && $nuevoPrecioCombo > 0) ? $nuevoPrecioCombo : null;
-            // Si se marca "limpiar", guardaremos NULL; si no, guardamos el texto (o NULL si está vacío)
             $promocionParam   = $quitarPromo ? null : ($promocionTexto !== '' ? $promocionTexto : null);
 
             $sql = "
@@ -63,7 +56,6 @@ if($_SERVER['REQUEST_METHOD'] === 'POST'){
                     promocion    = VALUES(promocion)
             ";
             $stmt = $conn->prepare($sql);
-            // tipos: sss d s  (el d admite NULL; MySQLi lo manda como NULL)
             $stmt->bind_param("sssds", $marca, $modelo, $capacidad, $precioComboParam, $promocionParam);
             $stmt->execute();
             $stmt->close();
@@ -88,11 +80,13 @@ if($_SERVER['REQUEST_METHOD'] === 'POST'){
 }
 
 // 🔹 Obtener modelos únicos de productos con inventario disponible o en tránsito
-$modelos = $conn->query("
+//    Traemos RAM representativa por grupo para mostrarla en la etiqueta de sugerencia.
+$modelosRS = $conn->query("
     SELECT 
         p.marca, 
         p.modelo, 
-        IFNULL(p.capacidad,'') AS capacidad
+        IFNULL(p.capacidad,'') AS capacidad,
+        MAX(IFNULL(p.ram,'')) AS ram
     FROM productos p
     WHERE p.tipo_producto = 'Equipo'
       AND p.id IN (
@@ -103,6 +97,21 @@ $modelos = $conn->query("
     GROUP BY p.marca, p.modelo, p.capacidad
     ORDER BY LOWER(p.marca), LOWER(p.modelo), LOWER(p.capacidad)
 ");
+
+// Armamos un arreglo PHP → JSON con {label, value}
+$sugerencias = [];
+while($m = $modelosRS->fetch_assoc()){
+    $valor = $m['marca'].'|'.$m['modelo'].'|'.$m['capacidad']; // llave interna
+    $ramTxt = trim($m['ram'] ?? '');
+    $capTxt = trim($m['capacidad'] ?? '');
+    $label  = trim($m['marca'].' '.$m['modelo']);
+    if ($ramTxt !== '') { $label .= ' · RAM: '.$ramTxt; }
+    if ($capTxt !== '') { $label .= ' · Capacidad: '.$capTxt; }
+    $sugerencias[] = [
+        'label' => $label,
+        'value' => $valor
+    ];
+}
 ?>
 <!DOCTYPE html>
 <html lang="es">
@@ -111,29 +120,47 @@ $modelos = $conn->query("
     <title>Actualizar Precios por Modelo</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
     <link rel="icon" type="image/x-icon" href="./img/favicon.ico">
+    <style>
+      .autocomplete-list {
+        position: absolute;
+        z-index: 1050;
+        width: 100%;
+        max-height: 260px;
+        overflow-y: auto;
+        background: #fff;
+        border: 1px solid #dee2e6;
+        border-radius: .5rem;
+        box-shadow: 0 6px 18px rgba(0,0,0,.08);
+      }
+      .autocomplete-item {
+        padding: .5rem .75rem;
+        cursor: pointer;
+      }
+      .autocomplete-item:hover, .autocomplete-item.active {
+        background: #f1f5f9;
+      }
+    </style>
 </head>
 <body class="bg-light">
 
 <div class="container mt-4">
     <h2>💰 Actualizar Precios por Modelo</h2>
-    <p>Selecciona un modelo y asigna nuevos precios. Afecta equipos <b>Disponibles</b> o <b>En tránsito</b>.</p>
+    <p>Empieza a escribir el <b>modelo</b> y elige una sugerencia (muestra <b>RAM</b> y <b>Capacidad</b>). Afecta equipos <b>Disponibles</b> o <b>En tránsito</b>.</p>
 
     <?php if($mensaje): ?>
         <div class="alert alert-info"><?= $mensaje ?></div>
     <?php endif; ?>
 
-    <form method="POST" class="card p-3 shadow-sm bg-white" style="max-width:650px;">
-        <div class="mb-3">
-            <label class="form-label">Modelo y Capacidad</label>
-            <select name="modelo" class="form-select" required>
-                <option value="">Seleccione un modelo...</option>
-                <?php while($m = $modelos->fetch_assoc()): 
-                    $valor = $m['marca'].'|'.$m['modelo'].'|'.$m['capacidad'];
-                    $texto = trim($m['marca'].' '.$m['modelo'].' '.$m['capacidad']);
-                ?>
-                <option value="<?= htmlspecialchars($valor) ?>"><?= htmlspecialchars($texto) ?></option>
-                <?php endwhile; ?>
-            </select>
+    <form id="form-precios" method="POST" class="card p-3 shadow-sm bg-white" style="max-width:680px; position: relative;">
+        <!-- Campo visible con autocompletado -->
+        <div class="mb-3 position-relative">
+            <label class="form-label">Modelo (con RAM y Capacidad)</label>
+            <input type="text" id="buscador-modelo" class="form-control" placeholder="Ej. Samsung A15, iPhone 12, Redmi 9..." autocomplete="off">
+            <div id="lista-sugerencias" class="autocomplete-list d-none"></div>
+
+            <!-- Campo oculto que envía la llave interna: marca|modelo|capacidad -->
+            <input type="hidden" name="modelo" id="modelo-hidden" value="">
+            <div class="form-text">Escribe y selecciona una opción de la lista. La llave interna se guarda automáticamente.</div>
         </div>
 
         <div class="row">
@@ -166,6 +193,114 @@ $modelos = $conn->query("
         </div>
     </form>
 </div>
+
+<script>
+(function(){
+  // Sugerencias desde PHP
+  const opciones = <?php echo json_encode($sugerencias, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES); ?>;
+
+  const $input   = document.getElementById('buscador-modelo');
+  const $hidden  = document.getElementById('modelo-hidden');
+  const $lista   = document.getElementById('lista-sugerencias');
+  const $form    = document.getElementById('form-precios');
+
+  let cursor = -1; // para navegar con teclado
+  let actuales = []; // sugerencias filtradas actuales
+
+  function normaliza(s){ return (s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, ''); }
+
+  function render(lista){
+    $lista.innerHTML = '';
+    if (!lista.length) {
+      $lista.classList.add('d-none');
+      return;
+    }
+    lista.slice(0, 50).forEach((opt, idx) => {
+      const div = document.createElement('div');
+      div.className = 'autocomplete-item';
+      div.textContent = opt.label;
+      div.setAttribute('data-value', opt.value);
+      div.addEventListener('mousedown', (e) => { // mousedown para que no se pierda el focus antes del click
+        e.preventDefault();
+        selecciona(opt);
+      });
+      $lista.appendChild(div);
+    });
+    $lista.classList.remove('d-none');
+    cursor = -1;
+  }
+
+  function filtra(q){
+    const nq = normaliza(q);
+    if (!nq) { actuales = []; render(actuales); $hidden.value=''; return; }
+    actuales = opciones.filter(o => normaliza(o.label).includes(nq));
+    render(actuales);
+  }
+
+  function selecciona(opt){
+    $input.value  = opt.label;
+    $hidden.value = opt.value;
+    $lista.classList.add('d-none');
+  }
+
+  // Eventos de entrada
+  $input.addEventListener('input', () => {
+    $hidden.value = '';   // limpiar hasta que elija una opción
+    filtra($input.value);
+  });
+
+  $input.addEventListener('focus', () => {
+    if ($input.value.trim() !== '') filtra($input.value);
+  });
+
+  document.addEventListener('click', (e) => {
+    if (!($lista.contains(e.target) || $input.contains(e.target))) {
+      $lista.classList.add('d-none');
+    }
+  });
+
+  // Navegación con teclado
+  $input.addEventListener('keydown', (e) => {
+    const items = Array.from($lista.querySelectorAll('.autocomplete-item'));
+    if (!items.length) return;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      cursor = Math.min(cursor + 1, items.length - 1);
+      items.forEach(i => i.classList.remove('active'));
+      if (items[cursor]) items[cursor].classList.add('active');
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      cursor = Math.max(cursor - 1, 0);
+      items.forEach(i => i.classList.remove('active'));
+      if (items[cursor]) items[cursor].classList.add('active');
+    } else if (e.key === 'Enter') {
+      if (cursor >= 0 && items[cursor]) {
+        e.preventDefault();
+        const idx = cursor;
+        const opt = actuales[idx];
+        if (opt) selecciona(opt);
+      } else {
+        // Si presiona Enter sin seleccionar, intentamos match exacto por etiqueta
+        const typed = normaliza($input.value.trim());
+        const exact = opciones.find(o => normaliza(o.label) === typed);
+        if (exact) selecciona(exact);
+      }
+    } else if (e.key === 'Escape') {
+      $lista.classList.add('d-none');
+    }
+  });
+
+  // Validación al enviar
+  $form.addEventListener('submit', (e) => {
+    if (!$hidden.value) {
+      e.preventDefault();
+      alert('Selecciona un modelo válido de las sugerencias.');
+      $input.focus();
+    }
+  });
+})();
+</script>
 
 </body>
 </html>

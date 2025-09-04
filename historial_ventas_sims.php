@@ -95,6 +95,7 @@ $sqlVentas = "
         vs.id_usuario,
         vs.nombre_cliente,          -- cliente (nullable)
         vs.es_esim,                 -- <<< clave para mostrar eSIM
+        vs.tipo_sim,                -- <<< OPERADOR DEL SIM
         u.nombre AS usuario,
         s.nombre AS sucursal,
         i.iccid
@@ -318,6 +319,7 @@ foreach ($ventas as $v) {
               <th>Usuario</th>
               <th>Cliente</th>
               <th>ICCID / Tipo</th>
+              <th>Operador</th> <!-- NUEVA COLUMNA -->
               <th>Tipo Venta</th>
               <th>Modalidad</th>
               <th>Precio</th>
@@ -334,6 +336,7 @@ foreach ($ventas as $v) {
                 $puedeEliminar = (($_SESSION['rol'] ?? '') === 'Admin');
                 $isEsim   = (int)($v['es_esim'] ?? 0) === 1;
                 $tipoIcon = $isEsim ? 'bi-sim' : 'bi-sim-fill';
+                $operador = trim((string)($v['tipo_sim'] ?? ''));
               ?>
               <tr>
                 <td><span class="badge text-bg-secondary">#<?= (int)$v['id'] ?></span></td>
@@ -343,6 +346,9 @@ foreach ($ventas as $v) {
                 <td><?= h($v['nombre_cliente'] ?? '') ?></td>
                 <td>
                   <span class="chip chip-purple"><i class="bi <?= $tipoIcon ?>"></i> <?= $isEsim ? 'eSIM' : h($v['iccid']) ?></span>
+                </td>
+                <td>
+                  <span class="chip chip-info"><i class="bi bi-broadcast-pin"></i> <?= $operador !== '' ? h($operador) : '—' ?></span>
                 </td>
                 <td><?= h($v['tipo_venta']) ?></td>
                 <td><?= ($v['tipo_venta']==='Pospago') ? h($v['modalidad']) : '' ?></td>
