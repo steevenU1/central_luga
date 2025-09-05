@@ -318,6 +318,14 @@ function item_active(string $f,string $c):string{ return $c===$f?'active':''; }
               <?php if($rolUsuario==='GerenteZona'): ?>
                 <li><hr class="dropdown-divider"></li>
                 <li class="dropdown-header">Zona (GZ)</li>
+
+                <!-- ✅ NUEVO: Resumen Global visible para GerenteZona -->
+                <li>
+                  <a class="dropdown-item <?= item_active('inventario_resumen.php',$current) ?>" href="inventario_resumen.php">
+                    Resumen Global
+                  </a>
+                </li>
+
                 <li><a class="dropdown-item <?= item_active('generar_traspaso_zona.php',$current) ?>" href="generar_traspaso_zona.php"><i class="bi bi-arrow-left-right me-1"></i>Generar traspaso (Zona)</a></li>
                 <li>
                   <a class="dropdown-item d-flex justify-content-between align-items-center <?= item_active('traspasos_pendientes_zona.php',$current) ?>" href="traspasos_pendientes_zona.php">

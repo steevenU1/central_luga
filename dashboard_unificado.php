@@ -89,9 +89,6 @@ $subVentasAgg = "
 
 /* ==========================================================
    SIMs (tabla separada ventas_sims) – Mapas por usuario y por sucursal
-   Reglas:
-   - Pospago si tipo_venta/tipo_sim/comentarios contienen 'pospago'|'postpago'|'pos'
-   - Prepago si NO contiene pospago NI 'regalo'
 ========================================================== */
 $mapSimsByUser = [];
 $mapSimsBySuc  = [];
@@ -403,128 +400,41 @@ uksort($gruposZona, function ($za, $zb) use ($gruposZona) {
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css">
   <style>
     /* recortes de texto */
-    .clip {
-      max-width: 160px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    .clip-name {
-      max-width: 220px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    .clip-branch {
-      max-width: 200px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
+    .clip { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .clip-name { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .clip-branch { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
     /* num + columnas compactas */
-    .num {
-      font-variant-numeric: tabular-nums;
-      letter-spacing: -.2px;
-    }
+    .num { font-variant-numeric: tabular-nums; letter-spacing: -.2px; }
+    .col-fit { width: 1%; white-space: nowrap; }
 
-    .col-fit {
-      width: 1%;
-      white-space: nowrap;
-    }
+    .trend { font-size: .875rem; white-space: nowrap; }
+    .trend .delta { font-weight: 600; }
 
-    .trend {
-      font-size: .875rem;
-      white-space: nowrap;
-    }
+    .table td:first-child, .table th:first-child { width: auto; }
 
-    .trend .delta {
-      font-weight: 600;
-    }
-
-    .table td:first-child,
-    .table th:first-child {
-      width: auto;
-    }
-
-    #topbar {
-      font-size: 16px;
-    }
+    #topbar { font-size: 16px; }
 
     @media (max-width:576px) {
-      body {
-        font-size: 14px;
-      }
-
-      .container {
-        padding-left: 8px;
-        padding-right: 8px;
-      }
-
-      .card .card-header {
-        padding: .5rem .65rem;
-        font-size: .95rem;
-      }
-
-      .card .card-body {
-        padding: .65rem;
-      }
-
-      .table {
-        font-size: 12px;
-        table-layout: auto;
-      }
-
-      .table thead th {
-        font-size: 11px;
-      }
-
-      .table td,
-      .table th {
-        padding: .35rem .45rem;
-      }
-
-      .trend {
-        font-size: .72rem;
-      }
-
-      .clip {
-        max-width: 130px;
-      }
-
-      .clip-name {
-        max-width: 240px;
-      }
-
-      .clip-branch {
-        max-width: 160px;
-      }
+      body { font-size: 14px; }
+      .container { padding-left: 8px; padding-right: 8px; }
+      .card .card-header { padding: .5rem .65rem; font-size: .95rem; }
+      .card .card-body { padding: .65rem; }
+      .table { font-size: 12px; table-layout: auto; }
+      .table thead th { font-size: 11px; }
+      .table td, .table th { padding: .35rem .45rem; }
+      .trend { font-size: .72rem; }
+      .clip { max-width: 130px; }
+      .clip-name { max-width: 240px; }
+      .clip-branch { max-width: 160px; }
     }
 
     @media (max-width:360px) {
-      .table {
-        font-size: 11px;
-      }
-
-      .table td,
-      .table th {
-        padding: .30rem .40rem;
-      }
-
-      .clip {
-        max-width: 110px;
-      }
-
-      .clip-name {
-        max-width: 200px;
-      }
-
-      .clip-branch {
-        max-width: 140px;
-      }
-
+      .table { font-size: 11px; }
+      .table td, .table th { padding: .30rem .40rem; }
+      .clip { max-width: 110px; }
+      .clip-name { max-width: 200px; }
+      .clip-branch { max-width: 140px; }
       .table .progress{ width:100%; }
     }
   </style>
@@ -713,18 +623,13 @@ uksort($gruposZona, function ($za, $zb) use ($gruposZona) {
 
                 <tbody>
                   <?php foreach ($gruposZona as $zona => $grp): ?>
-                    <!-- Encabezado de grupo (ZONA) - DESPUÉS -->
-                    <!-- XS/SM: 3 columnas visibles -->
+                    <!-- Encabezado de grupo (ZONA) -->
                     <tr class="table-secondary d-table-row d-md-none">
                       <th colspan="3" class="text-start"><?= h($zona) ?></th>
                     </tr>
-
-                    <!-- MD (>=768px y <992px): 7 columnas visibles -->
                     <tr class="table-secondary d-none d-md-table-row d-lg-none">
                       <th colspan="7" class="text-start"><?= h($zona) ?></th>
                     </tr>
-
-                    <!-- LG+ (>=992px): 9 columnas visibles -->
                     <tr class="table-secondary d-none d-lg-table-row">
                       <th colspan="9" class="text-start"><?= h($zona) ?></th>
                     </tr>
@@ -734,6 +639,11 @@ uksort($gruposZona, function ($za, $zb) use ($gruposZona) {
                       $cumpl = round($s['cumplimiento'], 1);
                       $estado = $cumpl >= 100 ? "✅" : ($cumpl >= 60 ? "⚠️" : "❌");
                       $fila = $cumpl >= 100 ? "table-success" : ($cumpl >= 60 ? "table-warning" : "table-danger");
+
+                      // 🔻 Tendencia responsive
+                      $dM   = (float)$s['delta_monto'];
+                      [$icoM, $clsM] = arrowIcon($dM);
+                      $pctM = $s['pct_delta_monto']; // puede ser null
                     ?>
                       <tr class="<?= $fila ?>">
                         <td class="clip-branch" title="<?= h($s['sucursal']) ?>"><?= h($s['sucursal']) ?></td>
@@ -749,6 +659,31 @@ uksort($gruposZona, function ($za, $zb) use ($gruposZona) {
 
                         <td class="num col-fit">
                           <span class="money-abbr" data-raw="<?= (float)$s['total_ventas'] ?>">$<?= number_format($s['total_ventas'], 2) ?></span>
+
+                          <!-- 🖥️ PC (lg+): mostrar Δ monto + Δ % -->
+                          <div class="trend d-none d-lg-block">
+                            <span class="<?= $clsM ?>"><?= $icoM ?></span>
+                            <span class="delta <?= $clsM ?>">
+                              <?= ($dM > 0 ? '+' : ($dM < 0 ? '' : '')) . '$' . number_format($dM, 2) ?>
+                            </span>
+                            <?php if ($pctM !== null): ?>
+                              <span class="text-muted">
+                                (<?= ($pctM >= 0 ? '+' : '') . number_format($pctM, 1) ?>%)
+                              </span>
+                            <?php endif; ?>
+                          </div>
+
+                          <!-- 📱 Móvil/Tablet (xs–md): solo Δ % -->
+                          <div class="trend d-lg-none">
+                            <span class="<?= $clsM ?>"><?= $icoM ?></span>
+                            <span class="delta <?= $clsM ?>">
+                              <?php if ($pctM !== null): ?>
+                                <?= ($pctM >= 0 ? '+' : '') . number_format($pctM, 1) ?>%
+                              <?php else: ?>
+                                —
+                              <?php endif; ?>
+                            </span>
+                          </div>
                         </td>
 
                         <td class="num col-fit"><?= number_format($cumpl, 1) ?>% <?= $estado ?></td>
@@ -762,7 +697,7 @@ uksort($gruposZona, function ($za, $zb) use ($gruposZona) {
                       </tr>
                     <?php endforeach; ?>
 
-                    <!-- Totales por ZONA: XS/SM -->
+                    <!-- Totales por ZONA -->
                     <?php
                     $tzU = (int)$grp['tot']['unidades'];
                     $tzV = (float)$grp['tot']['ventas'];
@@ -778,7 +713,6 @@ uksort($gruposZona, function ($za, $zb) use ($gruposZona) {
                       <td class="num col-fit"><?= number_format($tzP, 1) ?>%</td>
                     </tr>
 
-                    <!-- Totales por ZONA: MD+ -->
                     <tr class="table-light fw-semibold d-none d-md-table-row">
                       <td colspan="2" class="text-end">Total <?= h($zona) ?>:</td>
                       <td class="num"><?= $tzU ?></td>
@@ -807,38 +741,28 @@ uksort($gruposZona, function ($za, $zb) use ($gruposZona) {
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script>
     /* ===========================
-   Datos completos de sucursales (para el chart)
-=========================== */
+       Datos completos de sucursales (para el chart)
+    =========================== */
     const ALL_SUC = <?= json_encode($seriesSucursales, JSON_UNESCAPED_UNICODE | JSON_NUMERIC_CHECK) ?>;
     const TOP_BARS = <?= (int)$TOP_BARS ?>;
 
     function palette(i) {
-      const colors = ['#2563eb', '#16a34a', '#f59e0b', '#ef4444', '#8b5cf6', '#14b8a6', '#f97316', '#22c55e', '#0ea5e9', '#e11d48', '#7c3aed', '#10b981', '#eab308', '#dc2626', '#06b6d4', '#a3e635'];
+      const colors = ['#2563eb','#16a34a','#f59e0b','#ef4444','#8b5cf6','#14b8a6','#f97316','#22c55e','#0ea5e9','#e11d48','#7c3aed','#10b981','#eab308','#dc2626','#06b6d4','#a3e635'];
       return colors[i % colors.length];
     }
 
     function buildTop(metric) {
       const arr = [...ALL_SUC].sort((a, b) => (b[metric] || 0) - (a[metric] || 0));
-      const labels = [],
-        data = [];
+      const labels = [], data = [];
       let otras = 0;
       arr.forEach((r, idx) => {
-        if (idx < TOP_BARS) {
-          labels.push(r.label);
-          data.push(r[metric] || 0);
-        } else {
-          otras += (r[metric] || 0);
-        }
+        if (idx < TOP_BARS) { labels.push(r.label); data.push(r[metric] || 0); }
+        else { otras += (r[metric] || 0); }
       });
-      if (otras > 0) {
-        labels.push('Otras');
-        data.push(otras);
-      }
-      return {
-        labels,
-        data
-      };
+      if (otras > 0) { labels.push('Otras'); data.push(otras); }
+      return { labels, data };
     }
+
     let currentMetric = 'unidades';
     let chart = null;
 
@@ -849,74 +773,47 @@ uksort($gruposZona, function ($za, $zb) use ($gruposZona) {
       const isMoney = (currentMetric === 'ventas');
       const data = {
         labels: series.labels,
-        datasets: [{
-          label: isMoney ? 'Ventas ($)' : 'Unidades (semana)',
-          data: series.data,
-          backgroundColor: bg,
-          borderWidth: 0
-        }]
+        datasets: [{ label: isMoney ? 'Ventas ($)' : 'Unidades (semana)', data: series.data, backgroundColor: bg, borderWidth: 0 }]
       };
       const options = {
         responsive: true,
         maintainAspectRatio: false,
         plugins: {
-          legend: {
-            display: false
-          },
+          legend: { display: false },
           tooltip: {
             callbacks: {
-              label: (ctx) => isMoney ? ' $' + Number(ctx.parsed.y).toLocaleString('es-MX', {
-                minimumFractionDigits: 2,
-                maximumFractionDigits: 2
-              }) : ' ' + ctx.parsed.y.toLocaleString('es-MX') + ' u.'
+              label: (ctx) => isMoney
+                ? ' $' + Number(ctx.parsed.y).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+                : ' ' + ctx.parsed.y.toLocaleString('es-MX') + ' u.'
             }
           }
         },
         scales: {
           x: {
-            title: {
-              display: true,
-              text: 'Sucursales'
-            },
+            title: { display: true, text: 'Sucursales' },
             ticks: {
-              autoSkip: false,
-              maxRotation: 45,
-              minRotation: 0,
+              autoSkip: false, maxRotation: 45, minRotation: 0,
               callback: (v, i) => {
                 const l = series.labels[i] || '';
                 return l.length > 14 ? l.slice(0, 12) + '…' : l;
               }
             },
-            grid: {
-              display: false
-            }
+            grid: { display: false }
           },
           y: {
             beginAtZero: true,
-            title: {
-              display: true,
-              text: isMoney ? 'Ventas ($)' : 'Unidades'
-            }
+            title: { display: true, text: isMoney ? 'Ventas ($)' : 'Unidades' }
           }
         },
-        elements: {
-          bar: {
-            borderRadius: 4,
-            barThickness: 'flex',
-            maxBarThickness: 42
-          }
-        }
+        elements: { bar: { borderRadius: 4, barThickness: 'flex', maxBarThickness: 42 } }
       };
       if (chart) chart.destroy();
-      chart = new Chart(ctx, {
-        type: 'bar',
-        data,
-        options
-      });
+      chart = new Chart(ctx, { type: 'bar', data, options });
     }
+
     renderChart();
     const btnU = document.getElementById('btnUnidades'),
-      btnV = document.getElementById('btnVentas');
+          btnV = document.getElementById('btnVentas');
     btnU.addEventListener('click', () => {
       currentMetric = 'unidades';
       btnU.className = 'btn btn-primary';
@@ -934,10 +831,7 @@ uksort($gruposZona, function ($za, $zb) use ($gruposZona) {
        Abreviar montos (tablas)
     =========================== */
     (function() {
-      const nf = new Intl.NumberFormat('es-MX', {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2
-      });
+      const nf = new Intl.NumberFormat('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
       function abbr(n) {
         const abs = Math.abs(n);
