@@ -47,10 +47,7 @@ function pctDelta($curr, $prev)
   if ($prev == 0) return null;
   return (($curr - $prev) / $prev) * 100.0;
 }
-function h($s)
-{
-  return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8');
-}
+function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 
 /** Normaliza cualquier valor de zona a "Zona N" */
 function normalizarZona($raw)
@@ -61,6 +58,12 @@ function normalizarZona($raw)
   if (preg_match('/(\d+)/', $t, $m)) return 'Zona ' . (int)$m[1];
   if (preg_match('/^Zona\s+\S+/i', $t)) return preg_replace('/\s+/', ' ', $t);
   return null;
+}
+
+/** Nombre de sucursal “corto” para móvil: quita prefijo Luga */
+function sucursalCorta($nombre) {
+  $n = preg_replace('/^\s*Luga\s+/i', '', (string)$nombre);
+  return trim($n);
 }
 
 /* ==========================================================
@@ -268,6 +271,9 @@ $sucursales = [];
 $totalUnidades = 0;
 $totalVentasGlobal = 0;
 $totalCuotaGlobal = 0;
+$totalSimPre = 0;
+$totalSimPos = 0;
+
 while ($row = $resSucursales->fetch_assoc()) {
   $row['unidades']      = (int)$row['unidades'];
   $row['total_ventas']  = (float)$row['total_ventas'];
@@ -284,6 +290,8 @@ while ($row = $resSucursales->fetch_assoc()) {
   $totalUnidades     += $row['unidades'];
   $totalVentasGlobal += $row['total_ventas'];
   $totalCuotaGlobal  += $row['cuota_semanal'];
+  $totalSimPre       += $row['sim_prepago'];
+  $totalSimPos       += $row['sim_pospago'];
 }
 $porcentajeGlobal = $totalCuotaGlobal > 0 ? ($totalVentasGlobal / $totalCuotaGlobal) * 100 : 0;
 
@@ -437,6 +445,9 @@ uksort($gruposZona, function ($za, $zb) use ($gruposZona) {
       .clip-branch { max-width: 140px; }
       .table .progress{ width:100%; }
     }
+
+    /* mini ajuste del botón de descarga */
+    .card-header .btn.btn-sm { padding: .15rem .4rem; line-height: 1; }
   </style>
 </head>
 
@@ -541,8 +552,13 @@ uksort($gruposZona, function ($za, $zb) use ($gruposZona) {
     <div class="tab-content">
       <!-- Ejecutivos -->
       <div class="tab-pane fade show active" id="ejecutivos">
-        <div class="card mb-4 shadow">
-          <div class="card-header bg-dark text-white">Ranking de Ejecutivos</div>
+        <div class="card mb-4 shadow" id="card_ejecutivos">
+          <div class="card-header bg-dark text-white d-flex align-items-center justify-content-between">
+            <span>Ranking de Ejecutivos</span>
+            <button type="button" id="btnSnapEj" class="btn btn-outline-light btn-sm" title="Descargar imagen">
+              <i class="bi bi-download"></i>
+            </button>
+          </div>
           <div class="card-body">
             <div class="table-responsive-sm">
               <table class="table table-striped table-bordered align-middle table-sm">
@@ -602,20 +618,37 @@ uksort($gruposZona, function ($za, $zb) use ($gruposZona) {
 
       <!-- Sucursales (AGRUPADAS POR ZONA) -->
       <div class="tab-pane fade" id="sucursales">
-        <div class="card mb-4 shadow">
-          <div class="card-header bg-dark text-white">Ranking de Sucursales (agrupado por zona)</div>
+        <div class="card mb-4 shadow" id="card_sucursales">
+          <div class="card-header bg-dark text-white d-flex align-items-center justify-content-between">
+            <span>Ranking de Sucursales (agrupado por zona)</span>
+            <button type="button" id="btnSnapSuc" class="btn btn-outline-light btn-sm" title="Descargar imagen">
+              <i class="bi bi-download"></i>
+            </button>
+          </div>
           <div class="card-body">
             <div class="table-responsive-sm">
               <table class="table table-striped table-bordered align-middle table-sm">
                 <thead class="table-dark">
                   <tr>
                     <th>Sucursal</th>
+
+                    <!-- columnas móviles nuevas -->
+                    <th class="d-table-cell d-md-none col-fit">Uds</th>
+                    <th class="d-table-cell d-md-none col-fit">Pre</th>
+                    <th class="d-table-cell d-md-none col-fit">Pos</th>
+
+                    <!-- columnas md+ existentes -->
                     <th class="d-none d-md-table-cell">Zona</th>
                     <th class="d-none d-md-table-cell">Unidades</th>
                     <th class="d-none d-md-table-cell col-fit">SIM Prep.</th>
                     <th class="d-none d-md-table-cell col-fit">SIM Pos.</th>
                     <th class="d-none d-lg-table-cell col-fit">Cuota ($)</th>
-                    <th class="col-fit">Total Ventas ($)</th>
+
+                    <!-- Ventas ($) con etiqueta corta en móvil -->
+                    <th class="col-fit">
+                      <span class="d-none d-md-inline">Total Ventas ($)</span>
+                      <span class="d-inline d-md-none">$</span>
+                    </th>
                     <th class="col-fit">% Cumpl.</th>
                     <th class="d-none d-lg-table-cell">Progreso</th>
                   </tr>
@@ -625,12 +658,15 @@ uksort($gruposZona, function ($za, $zb) use ($gruposZona) {
                   <?php foreach ($gruposZona as $zona => $grp): ?>
                     <!-- Encabezado de grupo (ZONA) -->
                     <tr class="table-secondary d-table-row d-md-none">
-                      <th colspan="3" class="text-start"><?= h($zona) ?></th>
+                      <!-- móvil: Sucursal + Uds + Pre + Pos + $ + %  => 6 columnas -->
+                      <th colspan="6" class="text-start"><?= h($zona) ?></th>
                     </tr>
                     <tr class="table-secondary d-none d-md-table-row d-lg-none">
+                      <!-- md: 7 columnas visibles -->
                       <th colspan="7" class="text-start"><?= h($zona) ?></th>
                     </tr>
                     <tr class="table-secondary d-none d-lg-table-row">
+                      <!-- lg+: 9 columnas visibles -->
                       <th colspan="9" class="text-start"><?= h($zona) ?></th>
                     </tr>
 
@@ -640,23 +676,32 @@ uksort($gruposZona, function ($za, $zb) use ($gruposZona) {
                       $estado = $cumpl >= 100 ? "✅" : ($cumpl >= 60 ? "⚠️" : "❌");
                       $fila = $cumpl >= 100 ? "table-success" : ($cumpl >= 60 ? "table-warning" : "table-danger");
 
-                      // 🔻 Tendencia responsive
+                      // Tendencia SOLO para PC (quitada en móvil)
                       $dM   = (float)$s['delta_monto'];
                       [$icoM, $clsM] = arrowIcon($dM);
                       $pctM = $s['pct_delta_monto']; // puede ser null
                     ?>
                       <tr class="<?= $fila ?>">
-                        <td class="clip-branch" title="<?= h($s['sucursal']) ?>"><?= h($s['sucursal']) ?></td>
+                        <td class="clip-branch" title="<?= h($s['sucursal']) ?>">
+                          <span class="d-none d-md-inline"><?= h($s['sucursal']) ?></span>
+                          <span class="d-inline d-md-none"><?= h(sucursalCorta($s['sucursal'])) ?></span>
+                        </td>
+
+                        <!-- columnas móviles -->
+                        <td class="d-table-cell d-md-none num"><?= (int)$s['unidades'] ?></td>
+                        <td class="d-table-cell d-md-none num"><?= (int)$s['sim_prepago'] ?></td>
+                        <td class="d-table-cell d-md-none num"><?= (int)$s['sim_pospago'] ?></td>
+
+                        <!-- columnas md+ -->
                         <td class="d-none d-md-table-cell"><?= h(normalizarZona($s['zona'] ?? '') ?? '—') ?></td>
                         <td class="d-none d-md-table-cell num"><?= (int)$s['unidades'] ?></td>
-
                         <td class="d-none d-md-table-cell num col-fit"><?= (int)$s['sim_prepago'] ?></td>
                         <td class="d-none d-md-table-cell num col-fit"><?= (int)$s['sim_pospago'] ?></td>
-
                         <td class="d-none d-lg-table-cell num col-fit">
                           <span class="money-abbr" data-raw="<?= (float)$s['cuota_semanal'] ?>">$<?= number_format($s['cuota_semanal'], 2) ?></span>
                         </td>
 
+                        <!-- Ventas -->
                         <td class="num col-fit">
                           <span class="money-abbr" data-raw="<?= (float)$s['total_ventas'] ?>">$<?= number_format($s['total_ventas'], 2) ?></span>
 
@@ -673,17 +718,7 @@ uksort($gruposZona, function ($za, $zb) use ($gruposZona) {
                             <?php endif; ?>
                           </div>
 
-                          <!-- 📱 Móvil/Tablet (xs–md): solo Δ % -->
-                          <div class="trend d-lg-none">
-                            <span class="<?= $clsM ?>"><?= $icoM ?></span>
-                            <span class="delta <?= $clsM ?>">
-                              <?php if ($pctM !== null): ?>
-                                <?= ($pctM >= 0 ? '+' : '') . number_format($pctM, 1) ?>%
-                              <?php else: ?>
-                                —
-                              <?php endif; ?>
-                            </span>
-                          </div>
+                          <!-- 📱 Móvil: sin comparativo -->
                         </td>
 
                         <td class="num col-fit"><?= number_format($cumpl, 1) ?>% <?= $estado ?></td>
@@ -707,12 +742,17 @@ uksort($gruposZona, function ($za, $zb) use ($gruposZona) {
                     $tzPos = (int)$grp['tot']['sim_pos'];
                     $cls = $tzP >= 100 ? 'bg-success' : ($tzP >= 60 ? 'bg-warning' : 'bg-danger');
                     ?>
+                    <!-- móvil -->
                     <tr class="table-light fw-semibold d-table-row d-md-none">
                       <td class="text-end">Total <?= h($zona) ?>:</td>
-                      <td class="num col-fit"><span class="money-abbr" data-raw="<?= $tzV ?>">$<?= number_format($tzV, 2) ?></span></td>
-                      <td class="num col-fit"><?= number_format($tzP, 1) ?>%</td>
+                      <td class="num"><?= $tzU ?></td>
+                      <td class="num"><?= $tzPre ?></td>
+                      <td class="num"><?= $tzPos ?></td>
+                      <td class="num"><span class="money-abbr" data-raw="<?= $tzV ?>">$<?= number_format($tzV, 2) ?></span></td>
+                      <td class="num"><?= number_format($tzP, 1) ?>%</td>
                     </tr>
 
+                    <!-- md+ -->
                     <tr class="table-light fw-semibold d-none d-md-table-row">
                       <td colspan="2" class="text-end">Total <?= h($zona) ?>:</td>
                       <td class="num"><?= $tzU ?></td>
@@ -729,6 +769,37 @@ uksort($gruposZona, function ($za, $zb) use ($gruposZona) {
                     </tr>
 
                   <?php endforeach; ?>
+
+                  <!-- ====== TOTAL GLOBAL (móvil y escritorio) ====== -->
+                  <?php
+                  $clsG = $porcentajeGlobal >= 100 ? 'bg-success' : ($porcentajeGlobal >= 60 ? 'bg-warning' : 'bg-danger');
+                  ?>
+                  <!-- móvil -->
+                  <tr class="table-primary fw-bold d-table-row d-md-none">
+                    <td class="text-end">Total global:</td>
+                    <td class="num"><?= (int)$totalUnidades ?></td>
+                    <td class="num"><?= (int)$totalSimPre ?></td>
+                    <td class="num"><?= (int)$totalSimPos ?></td>
+                    <td class="num"><span class="money-abbr" data-raw="<?= (float)$totalVentasGlobal ?>">$<?= number_format($totalVentasGlobal, 2) ?></span></td>
+                    <td class="num"><?= number_format($porcentajeGlobal, 1) ?>%</td>
+                  </tr>
+                  <!-- md+ -->
+                  <tr class="table-primary fw-bold d-none d-md-table-row">
+                    <td colspan="2" class="text-end">Total global:</td>
+                    <td class="num"><?= (int)$totalUnidades ?></td>
+                    <td class="d-none d-md-table-cell num col-fit"><?= (int)$totalSimPre ?></td>
+                    <td class="d-none d-md-table-cell num col-fit"><?= (int)$totalSimPos ?></td>
+                    <td class="d-none d-lg-table-cell num col-fit"><span class="money-abbr" data-raw="<?= (float)$totalCuotaGlobal ?>">$<?= number_format($totalCuotaGlobal, 2) ?></span></td>
+                    <td class="num col-fit"><span class="money-abbr" data-raw="<?= (float)$totalVentasGlobal ?>">$<?= number_format($totalVentasGlobal, 2) ?></span></td>
+                    <td class="num col-fit"><?= number_format($porcentajeGlobal, 1) ?>%</td>
+                    <td class="d-none d-lg-table-cell">
+                      <div class="progress" style="height:20px">
+                        <div class="progress-bar <?= $clsG ?>" style="width:<?= min(100, $porcentajeGlobal) ?>%"><?= number_format(min(100, $porcentajeGlobal), 1) ?>%</div>
+                      </div>
+                    </td>
+                  </tr>
+                  <!-- ====== /TOTAL GLOBAL ====== -->
+
                 </tbody>
               </table>
             </div>
@@ -738,7 +809,10 @@ uksort($gruposZona, function ($za, $zb) use ($gruposZona) {
     </div>
   </div>
 
+  <!-- libs -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+
   <script>
     /* ===========================
        Datos completos de sucursales (para el chart)
@@ -849,6 +923,74 @@ uksort($gruposZona, function ($za, $zb) use ($gruposZona) {
       }
       render();
       window.addEventListener('resize', render);
+    })();
+
+    /* ===========================
+       Descargar imagen de la tarjeta (html2canvas)
+    =========================== */
+    (function() {
+      const rango = "<?= $inicioObj->format('Ymd') ?>-<?= $finObj->format('Ymd') ?>";
+
+      function prepOverflow(el, setVisible) {
+        const affected = [];
+        el.querySelectorAll('.table-responsive, .table-responsive-sm, .table-responsive-md, .table-responsive-lg').forEach(div => {
+          affected.push({node: div, prev: div.style.overflow});
+          if (setVisible) div.style.overflow = 'visible';
+        });
+        return affected;
+      }
+
+      async function snapCard(cardId, filename) {
+        const el = document.getElementById(cardId);
+        if (!el) return;
+
+        // guardar estado y preparar
+        const prev = {
+          overflow: el.style.overflow,
+          scrollTop: el.scrollTop,
+          scrollLeft: el.scrollLeft,
+          boxShadow: el.style.boxShadow
+        };
+        el.style.overflow = 'visible';
+        // el.style.boxShadow = 'none'; // descomenta si no quieres sombra en la imagen
+
+        const overflowFixes = prepOverflow(el, true);
+
+        const scale = Math.min(3, (window.devicePixelRatio || 1) * 1.5);
+        const canvas = await html2canvas(el, {
+          backgroundColor: '#ffffff',
+          scale,
+          useCORS: true,
+          logging: false,
+          windowWidth: document.documentElement.scrollWidth,
+          windowHeight: document.documentElement.scrollHeight
+        });
+
+        // restaurar
+        el.style.overflow = prev.overflow;
+        el.scrollTop = prev.scrollTop;
+        el.scrollLeft = prev.scrollLeft;
+        el.style.boxShadow = prev.boxShadow;
+        overflowFixes.forEach(({node, prev}) => node.style.overflow = prev);
+
+        // descargar
+        const link = document.createElement('a');
+        link.download = filename;
+        link.href = canvas.toDataURL('image/png');
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+      }
+
+      const btnEj = document.getElementById('btnSnapEj');
+      if (btnEj) btnEj.addEventListener('click', () =>
+        snapCard('card_ejecutivos', `ranking_ejecutivos_${rango}.png`)
+      );
+
+      const btnSu = document.getElementById('btnSnapSuc');
+      if (btnSu) btnSu.addEventListener('click', () =>
+        snapCard('card_sucursales', `ranking_sucursales_${rango}.png`)
+      );
     })();
   </script>
 </body>

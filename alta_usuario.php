@@ -37,7 +37,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if (empty($errores)) {
         // Verificar duplicado case-insensitive
-        // Usamos LOWER(usuario) = LOWER(?) para evitar 'Juan' vs 'juan'
         $sqlDup = "SELECT COUNT(*) FROM usuarios WHERE LOWER(usuario) = LOWER(?)";
         $stmt = $conn->prepare($sqlDup);
         $stmt->bind_param("s", $usuario);
@@ -52,16 +51,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             // Hash de contraseña
             $passwordHash = password_hash($password, PASSWORD_BCRYPT);
 
-            // Insert
+            // Forzar cambio de contraseña en el primer inicio de sesión
+            $must_change_password = 1;
+
+            // Insert con must_change_password=1
             $stmt = $conn->prepare("
-                INSERT INTO usuarios (nombre, usuario, password, id_sucursal, rol)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO usuarios (nombre, usuario, password, id_sucursal, rol, must_change_password)
+                VALUES (?, ?, ?, ?, ?, ?)
             ");
-            // tipos: nombre(s), usuario(s), password(s), id_sucursal(i), rol(s) => "sssis"
-            $stmt->bind_param("sssis", $nombre, $usuario, $passwordHash, $id_sucursal, $rol);
+            // tipos: nombre(s), usuario(s), password(s), id_sucursal(i), rol(s), must_change_password(i)
+            $stmt->bind_param("sssisi", $nombre, $usuario, $passwordHash, $id_sucursal, $rol, $must_change_password);
 
             if ($stmt->execute()) {
-                $mensaje = "<div class='alert alert-success'>✅ Usuario <b>" . htmlspecialchars($usuario) . "</b> registrado correctamente.</div>";
+                $mensaje = "<div class='alert alert-success'>✅ Usuario <b>" . htmlspecialchars($usuario) . "</b> registrado correctamente. Se le pedirá cambiar la contraseña al ingresar.</div>";
                 // Limpiar campos del form tras éxito
                 $nombre_post = $usuario_post = $id_sucursal_post = $rol_post = '';
             } else {
@@ -132,7 +134,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <select name="rol" class="form-select" required>
                 <option value="">-- Selecciona rol --</option>
                 <?php
-                $roles = ['Ejecutivo' => 'Ejecutivo', 'Gerente' => 'Gerente', 'Supervisor' => 'Supervisor', 'GerenteZona' => 'Gerente de Zona', 'Admin' => 'Administrador'];
+                $roles = [
+                    'Ejecutivo'   => 'Ejecutivo',
+                    'Gerente'     => 'Gerente',
+                    'Supervisor'  => 'Supervisor',
+                    'GerenteZona' => 'Gerente de Zona',
+                    'Admin'       => 'Administrador'
+                ];
                 foreach ($roles as $value => $label):
                 ?>
                     <option value="<?= $value ?>" <?= ($rol_post === $value) ? 'selected' : '' ?>><?= $label ?></option>

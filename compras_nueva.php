@@ -291,6 +291,42 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
   <?php endforeach; ?>
 </datalist>
 
+<!-- Modal de confirmación previo a guardar -->
+<div class="modal fade" id="modalConfirm" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Confirma datos de la factura</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+      </div>
+      <div class="modal-body">
+        <p class="mb-2">Comprueba que los datos capturados <b>(Modelos, Colores y costos)</b> sean correctos.</p>
+        <div class="table-responsive">
+          <table class="table table-sm table-striped align-middle">
+            <thead class="table-light">
+              <tr>
+                <th>#</th>
+                <th>Código / Modelo</th>
+                <th>Color</th>
+                <th>RAM</th>
+                <th>Capacidad</th>
+                <th class="text-end">Cantidad</th>
+                <th class="text-end">P. Unitario</th>
+              </tr>
+            </thead>
+            <tbody id="cfBody"></tbody>
+          </table>
+        </div>
+        <small class="text-muted">Si ves algún dato incorrecto, cierra este cuadro y corrígelo antes de guardar.</small>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Revisar de nuevo</button>
+        <button type="button" class="btn btn-primary" id="btnConfirmarDatos">Sí, todo está correcto</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Modal de pago (Contado) -->
 <div class="modal fade" id="modalPago" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered">
@@ -357,7 +393,10 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
   const diasVencEl     = document.getElementById('diasVencimiento');
   const condicionPagoEl= document.getElementById('condicionPago');
 
-  // pago contado (modal)
+  // modales
+  const modalConfirm = new bootstrap.Modal(document.getElementById('modalConfirm'));
+  const cfBody       = document.getElementById('cfBody');
+
   const modalPago   = new bootstrap.Modal(document.getElementById('modalPago'));
   const mpTotalEl   = document.getElementById('mpTotal');
   const mpFechaEl   = document.getElementById('mpFecha');
@@ -375,7 +414,7 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
 
   let rowIdx = 0;
   let cargoIdx = 0;
-  let forceSubmit = false;
+  let forceSubmit = false; // evita loop al reenviar
 
   function formato(n){ return new Intl.NumberFormat('es-MX',{minimumFractionDigits:2, maximumFractionDigits:2}).format(n||0); }
 
@@ -435,6 +474,27 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
     mm.setCustomValidity('');
   }
 
+  // Validación de PU: deja capturar 0 pero NO deja enviar si queda en 0 o negativo.
+  function wirePrecioUnitarioValidation(inputPU){
+    inputPU.min = '0';        // permite 0 mientras capturas
+    inputPU.step = '0.01';
+
+    const validatePU = () => {
+      const v = parseFloat(inputPU.value);
+      if (!isFinite(v) || v <= 0) {
+        inputPU.classList.add('is-invalid');
+        inputPU.setCustomValidity('El precio unitario debe ser mayor a 0.');
+      } else {
+        inputPU.classList.remove('is-invalid');
+        inputPU.setCustomValidity('');
+      }
+    };
+
+    // Validamos cuando terminas de editar
+    inputPU.addEventListener('blur', validatePU);
+    inputPU.addEventListener('change', validatePU);
+  }
+
   function agregarRenglon(){
     const idx = rowIdx++;
     const tr = document.createElement('tr');
@@ -452,7 +512,10 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
       <td class="col-ram"><input type="text" class="form-control ram" name="ram[${idx}]" readonly></td>
       <td class="col-cap"><input type="text" class="form-control capacidad" name="capacidad[${idx}]" readonly required></td>
       <td class="col-qty"><input type="number" min="1" value="1" class="form-control num qty" name="cantidad[${idx}]" required></td>
-      <td class="col-pu"><input type="number" step="0.01" min="0" value="0" class="form-control num pu" name="precio_unitario[${idx}]" required></td>
+      <td class="col-pu">
+        <input type="number" step="0.01" min="0" value="0" class="form-control num pu" name="precio_unitario[${idx}]" required>
+        <div class="invalid-feedback">El precio unitario debe ser mayor a 0.</div>
+      </td>
       <td class="col-ivp"><input type="number" step="0.01" min="0" class="form-control num ivp" name="iva_porcentaje[${idx}]" value="${ivaDefault.value || 16}"></td>
       <td class="col-sub rsub">$0.00</td>
       <td class="col-iva riva">$0.00</td>
@@ -467,26 +530,27 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
 
     const input  = tr.querySelector('.mm-buscar');
     const hidden = tr.querySelector('.mm-id');
+    const pu     = tr.querySelector('.pu');
 
-    function intentarAplicar(){
+    // candado PU (pero dejando default 0)
+    wirePrecioUnitarioValidation(pu);
+
+    function handleTryApply() {
       const raw = (input.value || '').trim();
-      let m = byCodigo[raw];
-      if (!m) m = byEtiqueta[raw.toLowerCase()];
+      const m = byCodigo[raw] || byEtiqueta[raw.toLowerCase()];
       if (m) {
         aplicarModeloEnRenglon(m, tr);
       } else {
         hidden.value = '';
-        input.classList.add('is-invalid');
-        input.setCustomValidity('Selecciona un código válido.');
+        input.classList.remove('is-invalid');
+        input.setCustomValidity('');
       }
     }
 
-    input.addEventListener('change', intentarAplicar);
-    input.addEventListener('input', () => {
-      input.classList.remove('is-invalid');
-      input.setCustomValidity('');
-      hidden.value = '';
-    });
+    // Robustez para datalist/pegado + guardar
+    input.addEventListener('input', handleTryApply);
+    input.addEventListener('change', handleTryApply);
+    input.addEventListener('blur', handleTryApply);
 
     calcTotales();
   }
@@ -532,35 +596,93 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
   // arranca con 1 renglón de modelo
   agregarRenglon();
 
-  // Validación + modal contado
+  // ===== SUBMIT: validación, confirmación y (si aplica) pago contado =====
   document.getElementById('formCompra').addEventListener('submit', function(e){
     if (forceSubmit) return;
 
     if (!tbody.querySelector('tr')) {
       e.preventDefault(); alert('Agrega al menos un renglón'); return;
     }
-    let ok = true;
-    document.querySelectorAll('#tablaDetalle tbody tr').forEach(tr => {
-      const hidden = tr.querySelector('.mm-id');
-      if (!hidden.value) ok = false;
-    });
-    if (!ok) { e.preventDefault(); alert('Verifica que todos los renglones tengan un código válido.'); return; }
 
+    // Pre-aplicar por seguridad (por si no hubo blur/change)
+    document.querySelectorAll('#tablaDetalle tbody tr.renglon .mm-buscar')
+      .forEach(inp => {
+        const tr = inp.closest('tr');
+        const hidden = tr.querySelector('.mm-id');
+        const raw = (inp.value || '').trim();
+        const m = byCodigo[raw] || byEtiqueta[raw.toLowerCase()];
+        if (m) aplicarModeloEnRenglon(m, tr);
+      });
+
+    // Validaciones por renglón
+    let ok = true; let msg = '';
+    const rows = document.querySelectorAll('#tablaDetalle tbody tr.renglon');
+    rows.forEach(tr => {
+      const hidden = tr.querySelector('.mm-id');
+      const qty    = parseFloat(tr.querySelector('.qty').value);
+      const puEl   = tr.querySelector('.pu');
+      const pu     = parseFloat(puEl.value);
+
+      if (!hidden.value) { ok = false; msg = 'Verifica que todos los renglones tengan un código válido.'; }
+      if (!isFinite(qty) || qty < 1) { ok = false; msg = 'Hay cantidades inválidas (deben ser ≥ 1).'; }
+      if (!isFinite(pu) || pu <= 0) {
+        ok = false; msg = 'Hay precios unitarios en 0 o inválidos.';
+        puEl.classList.add('is-invalid'); puEl.setCustomValidity('El precio unitario debe ser mayor a 0.');
+      }
+    });
+
+    if (!ok) { e.preventDefault(); alert(msg); return; }
+
+    // Construir resumen para el modal de confirmación
+    cfBody.innerHTML = '';
+    rows.forEach((tr, idx) => {
+      const codTxt = tr.querySelector('.mm-buscar').value || '';
+      const color  = tr.querySelector('.color').value || '';
+      const ram    = tr.querySelector('.ram').value || '';
+      const cap    = tr.querySelector('.capacidad').value || '';
+      const qty    = parseFloat(tr.querySelector('.qty').value) || 0;
+      const pu     = parseFloat(tr.querySelector('.pu').value) || 0;
+      const trHtml = `
+        <tr>
+          <td>${idx+1}</td>
+          <td>${codTxt ? htmlesc(codTxt) : '-'}</td>
+          <td>${color ? htmlesc(color) : '-'}</td>
+          <td>${ram ? htmlesc(ram) : '-'}</td>
+          <td>${cap ? htmlesc(cap) : '-'}</td>
+          <td class="text-end">${qty}</td>
+          <td class="text-end">$${formato(pu)}</td>
+        </tr>
+      `;
+      cfBody.insertAdjacentHTML('beforeend', trHtml);
+    });
+
+    // Mostrar modal de confirmación
+    e.preventDefault();
+    modalConfirm.show();
+  });
+
+  // Confirmación final del usuario
+  document.getElementById('btnConfirmarDatos').addEventListener('click', () => {
+    modalConfirm.hide();
+
+    // Si es contado, abrimos modal de pago; si no, enviamos directo
     if (condicionPagoEl.value === 'Contado') {
-      e.preventDefault();
       calcTotales();
       const total = parseFloat(document.getElementById('inpTotal').value || '0') || 0;
       mpTotalEl.textContent = '$' + formato(total);
       mpMontoEl.value = total.toFixed(2);
       mpFechaEl.value = fechaFacturaEl.value || new Date().toISOString().slice(0,10);
       modalPago.show();
+    } else {
+      forceSubmit = true;
+      document.getElementById('formCompra').submit();
     }
   });
 
   // Confirmar modal contado
   document.getElementById('btnConfirmarPago').addEventListener('click', () => {
     const monto = parseFloat(mpMontoEl.value || '0');
-    if (isNaN(monto) || monto < 0) { alert('Importe de pago inválido'); return; }
+    if (isNaN(monto) || monto <= 0) { alert('Importe de pago inválido'); return; }
     document.getElementById('registrarPago').value = '1';
     document.getElementById('pagoMonto').value  = monto.toFixed(2);
     document.getElementById('pagoMetodo').value = mpMetodoEl.value || 'Efectivo';
@@ -622,6 +744,16 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
     if (condicionPagoEl.value === 'Contado') setContadoUI(); else setCreditoUI();
   });
   setContadoUI();
+
+  // Utilidad para escapar HTML en el resumen
+  function htmlesc(s){
+    return String(s)
+      .replaceAll('&','&amp;')
+      .replaceAll('<','&lt;')
+      .replaceAll('>','&gt;')
+      .replaceAll('"','&quot;')
+      .replaceAll("'",'&#039;');
+  }
 </script>
 </body>
 </html>

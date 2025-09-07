@@ -72,31 +72,59 @@ if ($id_sucursal) {
 $esSubdistribuidor = ($subtipoSucursal === 'Subdistribuidor');
 
 /* =========================================================
-   Usuarios para filtro (SOLO activos de la sucursal)
-   Soporta:
-   - usuarios.activo (1/0)
-   - usuarios.estatus ('Activo', 'Activa', 'Alta')
-   - usuarios.fecha_baja (NULL/'0000-00-00' = activo)
+   Usuarios para filtro:
+   - SIEMPRE activos de la sucursal
+   - INACTIVOS solo si tuvieron ventas en la semana seleccionada
+   Compat esquema: activo / estatus / fecha_baja
 ========================================================= */
-$condActivos = '';
+$activosExpr = '';
 if (hasColumn($conn, 'usuarios', 'activo')) {
-    $condActivos = " AND u.activo = 1";
+    $activosExpr = "u.activo = 1";
 } elseif (hasColumn($conn, 'usuarios', 'estatus')) {
-    $condActivos = " AND LOWER(u.estatus) IN ('activo','activa','alta')";
+    $activosExpr = "LOWER(u.estatus) IN ('activo','activa','alta')";
 } elseif (hasColumn($conn, 'usuarios', 'fecha_baja')) {
-    $condActivos = " AND (u.fecha_baja IS NULL OR u.fecha_baja='0000-00-00')";
+    $activosExpr = "(u.fecha_baja IS NULL OR u.fecha_baja='0000-00-00')";
 }
 
+$existsVentas = "EXISTS (
+    SELECT 1
+    FROM ventas v
+    WHERE v.id_usuario = u.id
+      AND DATE(v.fecha_venta) BETWEEN ? AND ?
+)";
+
+$esInactivoCase = $activosExpr
+    ? "CASE WHEN {$activosExpr} THEN 0 ELSE 1 END"
+    : "CASE WHEN {$existsVentas} THEN 1 ELSE 0 END"; // si no podemos detectar 'activo', marcamos inactivo=1 solo si vino por ventas
+
 $sqlUsuarios = "
-    SELECT u.id, u.nombre
+    SELECT u.id, u.nombre,
+           {$esInactivoCase} AS es_inactivo
     FROM usuarios u
-    WHERE u.id_sucursal = ? {$condActivos}
-    ORDER BY u.nombre
+    WHERE u.id_sucursal = ?
+      AND (
+            " . ($activosExpr ? "{$activosExpr} OR " : "") . "
+            {$existsVentas}
+          )
+    ORDER BY es_inactivo ASC, u.nombre ASC
 ";
 $stmtUsuarios = $conn->prepare($sqlUsuarios);
-$stmtUsuarios->bind_param("i", $id_sucursal);
+// tipos: id_sucursal (i), inicio (s), fin (s)
+$stmtUsuarios->bind_param("iss", $id_sucursal, $inicioSemana, $finSemana);
 $stmtUsuarios->execute();
-$usuarios = $stmtUsuarios->get_result();
+$resUsuarios = $stmtUsuarios->get_result();
+
+// Separamos para optgroups
+$usuariosActivos = [];
+$usuariosInactivos = [];
+while ($row = $resUsuarios->fetch_assoc()) {
+    if ((int)$row['es_inactivo'] === 1) {
+        $usuariosInactivos[] = $row;
+    } else {
+        $usuariosActivos[] = $row;
+    }
+}
+$stmtUsuarios->close();
 
 /* =========================================================
    WHERE base para consultas de ventas
@@ -340,9 +368,26 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
         <label class="small-muted">Usuario</label>
         <select name="usuario" class="form-select">
           <option value="">Todos</option>
-          <?php while($u = $usuarios->fetch_assoc()): ?>
-            <option value="<?= (int)$u['id'] ?>" <?= (($_GET['usuario'] ?? '')==$u['id'])?'selected':'' ?>><?= h($u['nombre']) ?></option>
-          <?php endwhile; ?>
+
+          <?php if (!empty($usuariosActivos)): ?>
+            <optgroup label="Activos">
+              <?php foreach ($usuariosActivos as $u): ?>
+                <option value="<?= (int)$u['id'] ?>" <?= (($_GET['usuario'] ?? '')==$u['id'])?'selected':'' ?>>
+                  <?= h($u['nombre']) ?>
+                </option>
+              <?php endforeach; ?>
+            </optgroup>
+          <?php endif; ?>
+
+          <?php if (!empty($usuariosInactivos)): ?>
+            <optgroup label="Inactivos (con ventas en semana)">
+              <?php foreach ($usuariosInactivos as $u): ?>
+                <option value="<?= (int)$u['id'] ?>" <?= (($_GET['usuario'] ?? '')==$u['id'])?'selected':'' ?>>
+                  <?= h($u['nombre']) ?> (inactivo)
+                </option>
+              <?php endforeach; ?>
+            </optgroup>
+          <?php endif; ?>
         </select>
       </div>
 

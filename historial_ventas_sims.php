@@ -10,6 +10,21 @@ include 'db.php';
 /* ========================
    FUNCIONES AUXILIARES
 ======================== */
+function hasColumn(mysqli $conn, string $table, string $column): bool {
+    $tableEsc  = $conn->real_escape_string($table);
+    $columnEsc = $conn->real_escape_string($column);
+    $sql = "
+        SELECT 1
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME   = '{$tableEsc}'
+          AND COLUMN_NAME  = '{$columnEsc}'
+        LIMIT 1
+    ";
+    $res = $conn->query($sql);
+    return $res && $res->num_rows > 0;
+}
+
 function obtenerSemanaPorIndice($offset = 0) {
     // Semana martes-lunes
     $hoy = new DateTime();
@@ -42,15 +57,57 @@ $finSemana    = $finSemanaObj->format('Y-m-d');
 $id_sucursal = (int)($_SESSION['id_sucursal'] ?? 0);
 $rol         = $_SESSION['rol'] ?? 'Ejecutivo';
 
-// Obtener usuarios de la sucursal para filtro
-$sqlUsuarios = "SELECT id, nombre FROM usuarios WHERE id_sucursal=?";
+/* =========================================================
+   Usuarios para filtro:
+   - SIEMPRE activos de la sucursal
+   - INACTIVOS solo si tuvieron ventas en la semana seleccionada
+   Compat: activo / estatus / fecha_baja
+========================================================= */
+$activosExpr = '';
+if (hasColumn($conn, 'usuarios', 'activo')) {
+    $activosExpr = "u.activo = 1";
+} elseif (hasColumn($conn, 'usuarios', 'estatus')) {
+    $activosExpr = "LOWER(u.estatus) IN ('activo','activa','alta')";
+} elseif (hasColumn($conn, 'usuarios', 'fecha_baja')) {
+    $activosExpr = "(u.fecha_baja IS NULL OR u.fecha_baja='0000-00-00')";
+}
+
+$existsVentasSemana = "EXISTS (
+    SELECT 1
+    FROM ventas_sims vs
+    WHERE vs.id_usuario = u.id
+      AND DATE(vs.fecha_venta) BETWEEN ? AND ?
+)";
+
+$esInactivoCase = $activosExpr
+    ? "CASE WHEN {$activosExpr} THEN 0 ELSE 1 END"
+    : "CASE WHEN {$existsVentasSemana} THEN 1 ELSE 0 END";
+
+$sqlUsuarios = "
+    SELECT u.id, u.nombre,
+           {$esInactivoCase} AS es_inactivo
+    FROM usuarios u
+    WHERE u.id_sucursal = ?
+      AND (
+            " . ($activosExpr ? "{$activosExpr} OR " : "") . "
+            {$existsVentasSemana}
+          )
+    ORDER BY es_inactivo ASC, u.nombre ASC
+";
 $stmtUsuarios = $conn->prepare($sqlUsuarios);
-$stmtUsuarios->bind_param("i", $id_sucursal);
+$stmtUsuarios->bind_param("iss", $id_sucursal, $inicioSemana, $finSemana);
 $stmtUsuarios->execute();
-$usuarios = $stmtUsuarios->get_result();
+$resUsuarios = $stmtUsuarios->get_result();
+$usuariosActivos = [];
+$usuariosInactivos = [];
+while ($row = $resUsuarios->fetch_assoc()) {
+    if ((int)$row['es_inactivo'] === 1) $usuariosInactivos[] = $row; else $usuariosActivos[] = $row;
+}
 $stmtUsuarios->close();
 
-// Construcción del WHERE base
+/* ========================
+   WHERE base
+======================== */
 $where  = " WHERE DATE(vs.fecha_venta) BETWEEN ? AND ?";
 $params = [$inicioSemana, $finSemana];
 $types  = "ss";
@@ -78,6 +135,20 @@ if (!empty($_GET['usuario'])) {
     $types   .= "i";
 }
 
+// Buscar por ICCID o Cliente (server-side)
+if (!empty($_GET['buscar'])) {
+    $where   .= " AND (vs.nombre_cliente LIKE ? OR EXISTS(
+                    SELECT 1
+                    FROM detalle_venta_sims d2
+                    LEFT JOIN inventario_sims i2 ON d2.id_sim = i2.id
+                    WHERE d2.id_venta = vs.id AND i2.iccid LIKE ?
+                 ))";
+    $busqueda = "%".$_GET['buscar']."%";
+    $params[] = $busqueda;
+    $params[] = $busqueda;
+    $types   .= "ss";
+}
+
 /* ========================
    CONSULTA HISTORIAL
    (LEFT JOIN para incluir eSIM)
@@ -94,8 +165,8 @@ $sqlVentas = "
         vs.comentarios,
         vs.id_usuario,
         vs.nombre_cliente,          -- cliente (nullable)
-        vs.es_esim,                 -- <<< clave para mostrar eSIM
-        vs.tipo_sim,                -- <<< OPERADOR DEL SIM
+        vs.es_esim,                 -- eSIM?
+        vs.tipo_sim,                -- Operador
         u.nombre AS usuario,
         s.nombre AS sucursal,
         i.iccid
@@ -115,7 +186,7 @@ $ventas = $res->fetch_all(MYSQLI_ASSOC);
 $stmt->close();
 
 /* ========================
-   RESÚMENES (solo front, sin tocar DB)
+   RESÚMENES (front)
 ======================== */
 $totalVentas   = count($ventas);
 $sumPrecio     = 0.0;
@@ -271,14 +342,33 @@ foreach ($ventas as $v) {
         <label class="small-muted">Usuario</label>
         <select name="usuario" class="form-select">
           <option value="">Todos</option>
-          <?php while($u = $usuarios->fetch_assoc()): ?>
-            <option value="<?= (int)$u['id'] ?>" <?= (($_GET['usuario'] ?? '')==$u['id'])?'selected':'' ?>><?= h($u['nombre']) ?></option>
-          <?php endwhile; ?>
+
+          <?php if (!empty($usuariosActivos)): ?>
+            <optgroup label="Activos">
+              <?php foreach ($usuariosActivos as $u): ?>
+                <option value="<?= (int)$u['id'] ?>" <?= (($_GET['usuario'] ?? '')==$u['id'])?'selected':'' ?>>
+                  <?= h($u['nombre']) ?>
+                </option>
+              <?php endforeach; ?>
+            </optgroup>
+          <?php endif; ?>
+
+          <?php if (!empty($usuariosInactivos)): ?>
+            <optgroup label="Inactivos (con ventas en semana)">
+              <?php foreach ($usuariosInactivos as $u): ?>
+                <option value="<?= (int)$u['id'] ?>" <?= (($_GET['usuario'] ?? '')==$u['id'])?'selected':'' ?>>
+                  <?= h($u['nombre']) ?> (inactivo)
+                </option>
+              <?php endforeach; ?>
+            </optgroup>
+          <?php endif; ?>
         </select>
       </div>
       <div class="col-md-3">
-        <label class="small-muted">Búsqueda rápida (front)</label>
-        <input id="searchInput" type="text" class="form-control" placeholder="Filtra por cualquier campo de la tabla…">
+        <label class="small-muted">Buscar (ICCID o Cliente)</label>
+        <input id="searchInput" name="buscar" type="text" class="form-control"
+               value="<?= h($_GET['buscar'] ?? '') ?>"
+               placeholder="Ej. 8952..., Juan Pérez">
       </div>
     </div>
 
@@ -307,7 +397,7 @@ foreach ($ventas as $v) {
     <div class="card card-surface mt-3">
       <div class="p-3 pb-0 d-flex align-items-center justify-content-between flex-wrap gap-2">
         <h5 class="m-0"><i class="bi bi-table me-2"></i>Listado</h5>
-        <div class="small-muted">Tip: usa la búsqueda rápida para filtrar en vivo.</div>
+        <div class="small-muted">Tip: el campo de búsqueda también filtra en vivo esta tabla.</div>
       </div>
       <div class="p-3 pt-2 tbl-wrap">
         <table id="tablaSims" class="table table-hover align-middle mb-0">
@@ -319,7 +409,7 @@ foreach ($ventas as $v) {
               <th>Usuario</th>
               <th>Cliente</th>
               <th>ICCID / Tipo</th>
-              <th>Operador</th> <!-- NUEVA COLUMNA -->
+              <th>Operador</th>
               <th>Tipo Venta</th>
               <th>Modalidad</th>
               <th>Precio</th>
@@ -332,7 +422,6 @@ foreach ($ventas as $v) {
           <tbody>
             <?php foreach ($ventas as $v): ?>
               <?php
-                // ❗Eliminar: solo Admin
                 $puedeEliminar = (($_SESSION['rol'] ?? '') === 'Admin');
                 $isEsim   = (int)($v['es_esim'] ?? 0) === 1;
                 $tipoIcon = $isEsim ? 'bi-sim' : 'bi-sim-fill';
@@ -407,13 +496,13 @@ modalSim?.addEventListener('show.bs.modal', (ev) => {
   document.getElementById('modalIdVentaSim').value = id;
 });
 
-// Búsqueda rápida (front)
+// Búsqueda rápida (front) usando el mismo campo 'buscar'
 (function(){
   const input = document.getElementById('searchInput');
   const rows  = Array.from(document.querySelectorAll('#tablaSims tbody tr'));
   const norm  = s => (s||'').toString().toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu,'');
   function filtra(){
-    const q = norm(input.value);
+    const q = norm(input?.value || '');
     rows.forEach(tr => {
       const ok = !q || norm(tr.innerText).includes(q);
       tr.style.display = ok ? '' : 'none';
