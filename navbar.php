@@ -140,7 +140,7 @@ $current=basename(parse_url($_SERVER['REQUEST_URI'],PHP_URL_PATH));
 
 $grpDashboard  = ['productividad_dia.php','dashboard_unificado.php','dashboard_mensual.php'];
 $grpVentas     = ['nueva_venta.php','venta_sim_prepago.php','venta_sim_pospago.php','historial_ventas.php','historial_ventas_sims.php'];
-$grpInventario = ['panel.php','inventario_subdistribuidor.php','inventario_global.php','inventario_resumen.php','inventario_eulalia.php','inventario_retiros.php','inventario_historico.php','generar_traspaso_zona.php','traspasos_pendientes_zona.php'];
+$grpInventario = ['panel.php','inventario_subdistribuidor.php','inventario_global.php','inventario_resumen.php','inventario_eulalia.php','inventario_retiros.php','inventario_historico.php','generar_traspaso_zona.php','traspasos_pendientes_zona.php','inventario_sims_resumen.php']; 
 $grpCompras    = ['compras_nueva.php','compras_resumen.php','modelos.php','proveedores.php','compras_ingreso.php'];
 $grpTraspasos  = ['generar_traspaso.php','generar_traspaso_sims.php','traspasos_sims_pendientes.php','traspasos_sims_salientes.php','traspasos_pendientes.php','traspasos_salientes.php','traspaso_nuevo.php'];
 $grpEfectivo   = ['cobros.php','cortes_caja.php','generar_corte.php','depositos_sucursal.php','depositos.php','recoleccion_comisiones.php'];
@@ -161,8 +161,8 @@ function item_active(string $f,string $c):string{ return $c===$f?'active':''; }
   #topbar{ --nav-base:16px; font-size:var(--nav-base); -webkit-text-size-adjust:100%; text-size-adjust:100%; }
   /* ↓ Ajustes globales de tipografía/padding de NAV */
   #topbar{ --brand-font: clamp(13px, 1.6vw, 20px);
-           --nav-font: .80em;       /* tamaño base de items */
-           --drop-font:.84em;       /* tamaño en menú desplegable */
+           --nav-font: .80em;
+           --drop-font:.84em;
            --icon-em:.90em;
            --pad-y:.30em; --pad-x:.42em; }
   #topbar *{ font-size:inherit; }
@@ -189,7 +189,7 @@ function item_active(string $f,string $c):string{ return $c===$f?'active':''; }
   .navbar-luga .nav-link i{ font-size:var(--icon-em); margin-right:.24rem; }
   .navbar-luga .nav-link:hover{ background:rgba(255,255,255,.06); }
 
-  /* Quitar carets (flechitas) de todos los dropdowns */
+  /* Quitar carets */
   .navbar-luga .dropdown-toggle::after{ display:none !important; }
 
   .navbar-luga .dropdown-menu{
@@ -211,7 +211,6 @@ function item_active(string $f,string $c):string{ return $c===$f?'active':''; }
   .user-chip{ color:#e7eef7; font-weight:600; }
   .user-chip small{ color:#a7b4c2; font-weight:500; }
 
-  /* Badges compactos + estilos */
   .nav-badge{
     display:inline-flex; align-items:center; justify-content:center;
     font-size:.72em; font-weight:700; line-height:1;
@@ -235,7 +234,6 @@ function item_active(string $f,string $c):string{ return $c===$f?'active':''; }
   .pulse-ring::after{ content:""; position:absolute; inset:-4px; border-radius:50%; border:2px solid rgba(13,110,253,.65); animation:ring 1.8s ease-out infinite; }
   @keyframes ring{ 0%{transform:scale(.8);opacity:.9;} 70%{transform:scale(1.25);opacity:.1;} 100%{transform:scale(1.4);opacity:0;} }
 
-  /* Compresión específica para pantallas medianas de PC SIN colapsar */
   @media (min-width:1200px) and (max-width:1400px){
     #topbar{ --nav-font:.78em; --drop-font:.82em; --pad-x:.38em; --icon-em:.88em; }
     .navbar-luga .nav-link i{ margin-right:.20rem; }
@@ -315,17 +313,19 @@ function item_active(string $f,string $c):string{ return $c===$f?'active':''; }
                 <li><a class="dropdown-item <?= item_active('inventario_global.php',$current) ?>" href="inventario_global.php">Inventario global</a></li>
               <?php endif; ?>
 
+              <!-- ✅ NUEVO: SIMs (Resumen) SOLO para Gerente y Admin -->
+              <?php if(in_array($rolUsuario,['Gerente','Admin'], true)): ?>
+                <li><a class="dropdown-item <?= item_active('inventario_resumen_sim.php',$current) ?>" href="inventario_sims_resumen.php">Invenario SIMs</a></li>
+              <?php endif; ?>
+
               <?php if($rolUsuario==='GerenteZona'): ?>
                 <li><hr class="dropdown-divider"></li>
                 <li class="dropdown-header">Zona (GZ)</li>
-
-                <!-- ✅ NUEVO: Resumen Global visible para GerenteZona -->
                 <li>
                   <a class="dropdown-item <?= item_active('inventario_resumen.php',$current) ?>" href="inventario_resumen.php">
                     Resumen Global
                   </a>
                 </li>
-
                 <li><a class="dropdown-item <?= item_active('generar_traspaso_zona.php',$current) ?>" href="generar_traspaso_zona.php"><i class="bi bi-arrow-left-right me-1"></i>Generar traspaso (Zona)</a></li>
                 <li>
                   <a class="dropdown-item d-flex justify-content-between align-items-center <?= item_active('traspasos_pendientes_zona.php',$current) ?>" href="traspasos_pendientes_zona.php">
@@ -607,7 +607,7 @@ function item_active(string $f,string $c):string{ return $c===$f?'active':''; }
                     <input type="hidden" name="csrf" value="<?= e($_SESSION['csrf']) ?>">
                     <select name="sucursal_id" class="form-select form-select-sm">
                       <?php foreach($misSucursales as $s): ?>
-                        <option value="<?= (int)$s['id'] ?>" <?= ($s['id']==$idSucursal?'selected':'') ?>><?= e($s['nombre']) ?></option>
+                        <option value="<?= (int)$s['id'] ?>" <?= ($s['id']===$idSucursal?'selected':'') ?>><?= e($s['nombre']) ?></option>
                       <?php endforeach; ?>
                     </select>
                     <button class="btn btn-secondary btn-sm" type="submit">Cambiar</button>

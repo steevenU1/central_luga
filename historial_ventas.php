@@ -72,6 +72,11 @@ if ($id_sucursal) {
 $esSubdistribuidor = ($subtipoSucursal === 'Subdistribuidor');
 
 /* =========================================================
+   Detección del nombre de columna de tipo de producto
+========================================================= */
+$colTipoProd = hasColumn($conn, 'productos', 'tipo') ? 'tipo' : 'tipo_producto';
+
+/* =========================================================
    Usuarios para filtro:
    - SIEMPRE activos de la sucursal
    - INACTIVOS solo si tuvieron ventas en la semana seleccionada
@@ -95,7 +100,7 @@ $existsVentas = "EXISTS (
 
 $esInactivoCase = $activosExpr
     ? "CASE WHEN {$activosExpr} THEN 0 ELSE 1 END"
-    : "CASE WHEN {$existsVentas} THEN 1 ELSE 0 END"; // si no podemos detectar 'activo', marcamos inactivo=1 solo si vino por ventas
+    : "CASE WHEN {$existsVentas} THEN 1 ELSE 0 END";
 
 $sqlUsuarios = "
     SELECT u.id, u.nombre,
@@ -109,12 +114,10 @@ $sqlUsuarios = "
     ORDER BY es_inactivo ASC, u.nombre ASC
 ";
 $stmtUsuarios = $conn->prepare($sqlUsuarios);
-// tipos: id_sucursal (i), inicio (s), fin (s)
 $stmtUsuarios->bind_param("iss", $id_sucursal, $inicioSemana, $finSemana);
 $stmtUsuarios->execute();
 $resUsuarios = $stmtUsuarios->get_result();
 
-// Separamos para optgroups
 $usuariosActivos = [];
 $usuariosInactivos = [];
 while ($row = $resUsuarios->fetch_assoc()) {
@@ -142,7 +145,7 @@ if ($ROL === 'Ejecutivo') {
     $where .= " AND v.id_sucursal=?";
     $params[] = $id_sucursal;
     $types .= "i";
-} // Admin ve todo
+}
 
 // Filtros GET
 if (!empty($_GET['tipo_venta'])) {
@@ -163,11 +166,66 @@ if (!empty($_GET['buscar'])) {
     $types .= "ssss";
 }
 
-// Tarjetas resumen
+/* =========================================================
+   MÉTRICAS PARA CARDS (ajustadas)
+   - Unidades (SIN módem/MiFi)
+   - Módems (unidades)
+   - Combos (unidades = 1 por venta F+Combo)
+   - Monto vendido (0 si venta solo tiene módem/MiFi)
+========================================================= */
+
+// Unidades sin módem y módems (detalle_venta)
+$sqlUnits = "
+    SELECT
+      SUM(CASE WHEN LOWER(COALESCE(p.$colTipoProd,'')) IN ('modem','mifi') THEN 0 ELSE 1 END) AS unidades_sin_modem,
+      SUM(CASE WHEN LOWER(COALESCE(p.$colTipoProd,'')) IN ('modem','mifi') THEN 1 ELSE 0 END) AS unidades_modem
+    FROM detalle_venta dv
+    INNER JOIN ventas v ON dv.id_venta = v.id
+    INNER JOIN productos p ON p.id = dv.id_producto
+    $where
+";
+$stU = $conn->prepare($sqlUnits);
+$stU->bind_param($types, ...$params);
+$stU->execute();
+$rowU = $stU->get_result()->fetch_assoc();
+$totalUnidades          = (int)($rowU['unidades_sin_modem'] ?? 0);
+$totalModemsUnidades    = (int)($rowU['unidades_modem'] ?? 0);
+$stU->close();
+
+// Combos (1 unidad por venta Financiamiento+Combo)
+$sqlCombos = "
+  SELECT SUM(CASE WHEN LOWER(v.tipo_venta)='financiamiento+combo' THEN 1 ELSE 0 END) AS combos_u
+  FROM ventas v
+  $where
+";
+$stC = $conn->prepare($sqlCombos);
+$stC->bind_param($types, ...$params);
+$stC->execute();
+$totalCombosUnidades = (int)($stC->get_result()->fetch_assoc()['combos_u'] ?? 0);
+$stC->close();
+
+// Monto vendido excluyendo ventas solo-módem
+$sqlMonto = "
+  SELECT IFNULL(SUM(CASE WHEN d.has_non_modem=1 THEN v.precio_venta ELSE 0 END),0) AS total_monto
+  FROM ventas v
+  LEFT JOIN (
+    SELECT dv.id_venta,
+           MAX(CASE WHEN LOWER(COALESCE(p.$colTipoProd,'')) IN ('modem','mifi') THEN 0 ELSE 1 END) AS has_non_modem
+    FROM detalle_venta dv
+    INNER JOIN productos p ON p.id = dv.id_producto
+    GROUP BY dv.id_venta
+  ) d ON d.id_venta = v.id
+  $where
+";
+$stM = $conn->prepare($sqlMonto);
+$stM->bind_param($types, ...$params);
+$stM->execute();
+$totalMonto = (float)($stM->get_result()->fetch_assoc()['total_monto'] ?? 0);
+$stM->close();
+
+// Comisiones (igual que antes)
 $sqlResumen = "
-    SELECT 
-        COUNT(dv.id) AS total_unidades,
-        IFNULL(SUM(dv.comision_regular + dv.comision_especial),0) AS total_comisiones
+    SELECT IFNULL(SUM(dv.comision_regular + dv.comision_especial),0) AS total_comisiones
     FROM detalle_venta dv
     INNER JOIN ventas v ON dv.id_venta = v.id
     $where
@@ -176,18 +234,12 @@ $stmtResumen = $conn->prepare($sqlResumen);
 $stmtResumen->bind_param($types, ...$params);
 $stmtResumen->execute();
 $resumen = $stmtResumen->get_result()->fetch_assoc();
-$totalUnidades   = (int)($resumen['total_unidades'] ?? 0);
 $totalComisiones = (float)($resumen['total_comisiones'] ?? 0);
 $stmtResumen->close();
 
-// Monto total vendido
-$sqlMonto = "SELECT IFNULL(SUM(v.precio_venta),0) AS total_monto FROM ventas v $where";
-$stmtMonto = $conn->prepare($sqlMonto);
-$stmtMonto->bind_param($types, ...$params);
-$stmtMonto->execute();
-$totalMonto = (float)($stmtMonto->get_result()->fetch_assoc()['total_monto'] ?? 0);
-$stmtMonto->close();
-
+/* =========================================================
+   Datos del listado
+========================================================= */
 // Ventas (con enganche y comentarios)
 $sqlVentas = "
     SELECT v.id, v.tag, v.nombre_cliente, v.telefono_cliente, v.tipo_venta,
@@ -281,7 +333,7 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 
   <!-- Tarjetas resumen -->
   <div class="row g-3 mt-1">
-    <div class="col-12 col-md-4">
+    <div class="col-12 col-md-3">
       <div class="card card-surface p-3 h-100">
         <div class="stat">
           <div class="icon"><i class="bi bi-bag-check"></i></div>
@@ -292,33 +344,35 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
         </div>
       </div>
     </div>
-    <div class="col-12 col-md-4">
+    <div class="col-12 col-md-3">
+      <div class="card card-surface p-3 h-100">
+        <div class="stat">
+          <div class="icon"><i class="bi bi-router"></i></div>
+          <div>
+            <div class="small-muted">Módems</div>
+            <div class="h4 m-0"><?= (int)$totalModemsUnidades ?></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="col-12 col-md-3">
+      <div class="card card-surface p-3 h-100">
+        <div class="stat">
+          <div class="icon"><i class="bi bi-box-seam"></i></div>
+          <div>
+            <div class="small-muted">Combos</div>
+            <div class="h4 m-0"><?= (int)$totalCombosUnidades ?></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="col-12 col-md-3">
       <div class="card card-surface p-3 h-100">
         <div class="stat">
           <div class="icon"><i class="bi bi-currency-dollar"></i></div>
           <div>
             <div class="small-muted">Monto vendido</div>
             <div class="h4 m-0">$<?= number_format($totalMonto,2) ?></div>
-          </div>
-        </div>
-      </div>
-    </div>
-    <div class="col-12 col-md-4">
-      <div class="card card-surface p-3 h-100">
-        <div class="stat">
-          <div class="icon"><i class="bi bi-coin"></i></div>
-          <div>
-            <div class="small-muted">Total comisiones</div>
-            <div class="h4 m-0">
-              <?php if ($esSubdistribuidor): ?>
-                <span class="small-muted">No disponible</span>
-              <?php else: ?>
-                $<?= number_format($totalComisiones,2) ?>
-              <?php endif; ?>
-            </div>
-            <?php if (!$esSubdistribuidor): ?>
-              <div class="small-muted">* Aproximado, sujeto a recálculo semanal</div>
-            <?php endif; ?>
           </div>
         </div>
       </div>

@@ -37,28 +37,66 @@ $ini = (new DateTime("$anio-$mes-01 00:00:00"))->format('Y-m-d H:i:s');
 $fin = (new DateTime("$anio-$mes-01 00:00:00"))->modify('last day of this month')->setTime(23,59,59)->format('Y-m-d H:i:s');
 
 /* ================================
+   Detección columna de tipo de producto
+================================ */
+$colTipoProd = hasColumn($conn,'productos','tipo') ? 'tipo' : 'tipo_producto';
+
+/* ================================
    Datos base del mes (TODOS los ejecutivos, incluso 0 ventas)
-   Base = usuarios (rol=Ejecutivo) → LEFT JOIN ventas/detalle en el periodo
+   Ahora usando agregado por VENTA para cuadrar unidades y monto:
+   - F+Combo = 2 unidades
+   - Venta con al menos 1 producto NO módem/MiFi = 1 unidad (monto = v.precio_venta)
+   - Venta solo con módem/MiFi = 0 unidades (monto = 0)
 ================================ */
 $condU = ["u.rol='Ejecutivo'"];
 if (!$permAdmin) { $condU[] = 'u.id = '.$ID_USUARIO; }
+
 $condVentas = ["v.fecha_venta BETWEEN '$ini' AND '$fin'"];
-if (hasColumn($conn,'ventas','estatus'))      $condVentas[] = "LOWER(COALESCE(v.estatus,'')) NOT IN ('cancelada','cancelado')";
+if (hasColumn($conn,'ventas','estatus'))       $condVentas[] = "LOWER(COALESCE(v.estatus,'')) NOT IN ('cancelada','cancelado')";
 elseif (hasColumn($conn,'ventas','cancelada')) $condVentas[] = "COALESCE(v.cancelada,0)=0";
 $condV = implode(' AND ', $condVentas);
 
-$sql = "SELECT
-  u.id   AS id_usuario,
-  u.nombre AS ejecutivo,
-  s.nombre AS sucursal,
-  COALESCE(COUNT(dv.id),0)                    AS unidades,
-  COALESCE(SUM(dv.precio_unitario),0)         AS monto
-FROM usuarios u
-LEFT JOIN sucursales s ON s.id = u.id_sucursal
-LEFT JOIN ventas v ON v.id_usuario = u.id AND ($condV)
-LEFT JOIN detalle_venta dv ON dv.id_venta = v.id
-WHERE u.activo=1 AND ".implode(' AND ',$condU)."
-GROUP BY u.id, u.nombre, s.nombre";
+// Subconsulta por venta (agrega unidades/monto a nivel VENTA)
+$subVentasAgg = "
+  SELECT
+    v.id,
+    v.id_usuario,
+    CASE
+      WHEN LOWER(v.tipo_venta)='financiamiento+combo' THEN 2
+      ELSE COALESCE(d.has_non_modem,1)
+    END AS unidades,
+    CASE
+      WHEN COALESCE(d.has_non_modem,1)=1 THEN v.precio_venta
+      ELSE 0
+    END AS monto
+  FROM ventas v
+  LEFT JOIN (
+    SELECT dv.id_venta,
+           MAX(CASE
+                 WHEN LOWER(COALESCE(p.$colTipoProd,'')) IN ('modem','mifi') THEN 0
+                 ELSE 1
+               END) AS has_non_modem
+    FROM detalle_venta dv
+    LEFT JOIN productos p ON p.id = dv.id_producto
+    GROUP BY dv.id_venta
+  ) d ON d.id_venta = v.id
+  WHERE $condV
+";
+
+// Agregado por ejecutivo usando la subconsulta
+$sql = "
+  SELECT
+    u.id   AS id_usuario,
+    u.nombre AS ejecutivo,
+    s.nombre AS sucursal,
+    IFNULL(SUM(va.unidades),0) AS unidades,
+    IFNULL(SUM(va.monto),0)    AS monto
+  FROM usuarios u
+  LEFT JOIN sucursales s ON s.id = u.id_sucursal
+  LEFT JOIN ( $subVentasAgg ) va ON va.id_usuario = u.id
+  WHERE u.activo=1 AND ".implode(' AND ',$condU)."
+  GROUP BY u.id, u.nombre, s.nombre
+";
 
 $rows=[]; $tot_unid=0; $tot_monto=0;
 if ($rs=$conn->query($sql)){
@@ -74,15 +112,6 @@ if ($rs=$conn->query($sql)){
 
 /* ================================
    Cuotas mensuales por ejecutivo (detección flexible)
-   Tablas posibles (usa la primera que exista):
-   - cuotas_mensuales_ejecutivos  (preferida)
-   - cuota_mensual_ejecutivos     (singular/plural mix)
-   - cuota_menusal_ejecutivos     (typo: menusal)
-   Columnas flexibles:
-   - id_usuario | usuario_id | idUser  (si NO existe → cuota GLOBAL del mes)
-   - cuota_unidades | unidades | cuota_u | meta_unidades
-   - cuota_monto    | monto    | cuota_m | meta_monto
-   Fallback: si no hay filas del mes elegido, usa la ÚLTIMA disponible.
 ================================ */
 $cuotas = [];
 $cuotaDefaultU = null; $cuotaDefaultM = null; // cuotas globales
@@ -112,10 +141,8 @@ if ($tablaCuotas) {
       $uid = $c['id_usuario'] ?? $c['usuario_id'] ?? $c['idUser'] ?? null; if ($uid===null) continue;
       $cuotas[(int)$uid] = ['u'=>$cuotaU, 'm'=>$cuotaM];
     } else {
-      // Tabla sin id de usuario: tratamos las cuotas como GLOBAL del mes
       if ($cuotaU!==null) $cuotaDefaultU = $cuotaU;
       if ($cuotaM!==null) $cuotaDefaultM = $cuotaM;
-      // dejamos el loop por si hay múltiples filas, la última prevalece (o podrías promediar)
     }
   }
 }

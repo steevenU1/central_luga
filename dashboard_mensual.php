@@ -60,6 +60,10 @@ $qe->close();
 
 /* --------------------------
    Subconsulta: ventas por VENTA (mes)
+   Reglas:
+   - Monto = v.precio_venta (cabecera) UNA sola vez por venta.
+   - 'Financiamiento+Combo' = 2 unidades, monto una vez.
+   - Si la venta solo tiene modem/mifi, NO suma unidades ni monto.
 ---------------------------*/
 $subVentasAggMes = "
   SELECT
@@ -67,11 +71,18 @@ $subVentasAggMes = "
       v.id_usuario,
       v.id_sucursal,
       DATE(CONVERT_TZ(v.fecha_venta,'+00:00','-06:00')) AS dia,
+      /* Unidades: combo=2; si no, cuenta items no-modem */
       CASE
         WHEN LOWER(v.tipo_venta)='financiamiento+combo' THEN 2
         ELSE SUM(CASE WHEN LOWER(p.tipo_producto) IN ('modem','mifi') THEN 0 ELSE 1 END)
       END AS unidades,
-      SUM(CASE WHEN LOWER(p.tipo_producto) IN ('modem','mifi') THEN 0 ELSE dv.precio_unitario END) AS monto
+      /* Monto: cabecera solo si hay al menos 1 no-modem, o si es combo */
+      CASE
+        WHEN LOWER(v.tipo_venta)='financiamiento+combo' THEN COALESCE(MAX(v.precio_venta),0)
+        WHEN SUM(CASE WHEN LOWER(p.tipo_producto) IN ('modem','mifi') THEN 0 ELSE 1 END) > 0
+          THEN COALESCE(MAX(v.precio_venta),0)
+        ELSE 0
+      END AS monto
   FROM ventas v
   LEFT JOIN detalle_venta dv ON dv.id_venta = v.id
   LEFT JOIN productos p      ON p.id       = dv.id_producto
@@ -173,6 +184,9 @@ $sucursales = [];
 $totalGlobalUnidades = 0;
 $totalGlobalVentas   = 0;
 $totalGlobalCuota    = 0;
+/* 👇 Totales globales de SIMs para la fila global */
+$totalSimPre         = 0;
+$totalSimPos         = 0;
 
 // Cuotas mensuales por sucursal
 $cuotasSuc = [];
@@ -214,6 +228,10 @@ while ($row = $res->fetch_assoc()) {
     $totalGlobalUnidades += (int)$row['unidades'];
     $totalGlobalVentas   += (float)$row['ventas'];
     $totalGlobalCuota    += (float)$cuotaMonto;
+
+    /* 👇 Acumular SIMs para la fila global */
+    $totalSimPre         += (int)$simS['pre'];
+    $totalSimPos         += (int)$simS['pos'];
 }
 $stmt->close();
 
@@ -294,8 +312,7 @@ foreach ($sucursales as $s) {
     $zonaNorm = normalizarZona($s['zona'] ?? '') ?? 'Sin zona';
     if (!isset($gruposZona[$zonaNorm])) {
         $gruposZona[$zonaNorm] = [
-            'rows' => [],
-            'tot'  => ['unidades'=>0, 'ventas'=>0.0, 'cuota'=>0.0, 'cumpl'=>0.0, 'sim_pre'=>0, 'sim_pos'=>0]
+            'rows' => [], 'tot'  => ['unidades'=>0, 'ventas'=>0.0, 'cuota'=>0.0, 'cumpl'=>0.0, 'sim_pre'=>0, 'sim_pos'=>0]
         ];
     }
     $gruposZona[$zonaNorm]['rows'][] = $s;
@@ -518,7 +535,7 @@ uksort($gruposZona, function($za,$zb) use ($gruposZona){
                   <td class="num col-fit">$<?= number_format($tzV,2) ?></td>
                   <td class="num col-fit"><?= number_format($tzP,1) ?>%</td>
                 </tr>
-                <!-- MD+ (la fila sirve para MD y LG; celdas LG llevan d-none d-lg-table-cell) -->
+                <!-- MD+ (fila sirve para MD y LG; celdas LG llevan d-none d-lg-table-cell) -->
                 <tr class="table-light fw-semibold d-none d-md-table-row">
                   <td colspan="2" class="text-end">Total <?= htmlspecialchars($zona) ?>:</td>
                   <td class="num"><?= $tzU ?></td>
@@ -535,6 +552,36 @@ uksort($gruposZona, function($za,$zb) use ($gruposZona){
                 </tr>
 
               <?php endforeach; ?>
+
+              <?php
+                /* ====== TOTAL GLOBAL (móvil y escritorio) ====== */
+                $clsG = $porcentajeGlobal >= 100 ? 'bg-success' : ($porcentajeGlobal >= 60 ? 'bg-warning' : 'bg-danger');
+              ?>
+              <!-- XS/SM -->
+              <tr class="table-primary fw-bold d-table-row d-md-none">
+                <td class="text-end">Total global:</td>
+                <td class="num col-fit">$<?= number_format($totalGlobalVentas, 2) ?></td>
+                <td class="num col-fit"><?= number_format($porcentajeGlobal, 1) ?>%</td>
+              </tr>
+              <!-- MD+ -->
+              <tr class="table-primary fw-bold d-none d-md-table-row">
+                <td colspan="2" class="text-end">Total global:</td>
+                <td class="num"><?= (int)$totalGlobalUnidades ?></td>
+                <td class="d-none d-md-table-cell num col-fit"><?= (int)$totalSimPre ?></td>
+                <td class="d-none d-md-table-cell num col-fit"><?= (int)$totalSimPos ?></td>
+                <td class="d-none d-lg-table-cell num col-fit">$<?= number_format($totalGlobalCuota, 2) ?></td>
+                <td class="num col-fit">$<?= number_format($totalGlobalVentas, 2) ?></td>
+                <td class="num col-fit"><?= number_format($porcentajeGlobal, 1) ?>%</td>
+                <td class="d-none d-lg-table-cell">
+                  <div class="progress" style="height:20px">
+                    <div class="progress-bar <?= $clsG ?>" style="width:<?= min(100, $porcentajeGlobal) ?>%">
+                      <?= number_format(min(100, $porcentajeGlobal), 1) ?>%
+                    </div>
+                  </div>
+                </td>
+              </tr>
+              <!-- ====== /TOTAL GLOBAL ====== -->
+
               </tbody>
             </table>
           </div>

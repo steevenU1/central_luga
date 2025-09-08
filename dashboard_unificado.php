@@ -67,25 +67,50 @@ function sucursalCorta($nombre) {
 }
 
 /* ==========================================================
+   Detectar columna de tipo en productos (tipo vs tipo_producto)
+========================================================== */
+$colTipoProd = 'tipo_producto';
+try {
+  $rs = $conn->query("SHOW COLUMNS FROM productos LIKE 'tipo'");
+  if ($rs && $rs->num_rows > 0) {
+    $colTipoProd = 'tipo';
+  } else {
+    $rs2 = $conn->query("SHOW COLUMNS FROM productos LIKE 'tipo_producto'");
+    if ($rs2 && $rs2->num_rows > 0) $colTipoProd = 'tipo_producto';
+  }
+} catch(Exception $e){ /* fallback a tipo_producto */ }
+
+/* ==========================================================
    Agregado por venta (unidades por VENTA, no por detalle)
    - Para 'Financiamiento+Combo' = 2 unidades.
-   - 'modem/mifi' NO suman unidades.
-   - Monto = TOTAL CABECERA (v.precio_venta)
+   - Módem/MiFi NO suman unidades NI monto (venta completa se excluye si sólo hay módem/MiFi).
+   - Monto = TOTAL CABECERA (v.precio_venta) sólo si hay al menos un detalle que NO sea módem/MiFi.
 ========================================================== */
 $subVentasAgg = "
   SELECT
-      v.id,
-      v.id_usuario,
-      v.id_sucursal,
-      DATE(CONVERT_TZ(v.fecha_venta,'+00:00','-06:00')) AS dia,
-      CASE
-        WHEN LOWER(v.tipo_venta)='financiamiento+combo' THEN 2
-        ELSE COALESCE(SUM(CASE WHEN LOWER(p.tipo_producto) IN ('modem','mifi') THEN 0 ELSE 1 END),0)
-      END AS unidades,
-      COALESCE(MAX(v.precio_venta),0) AS monto
+    v.id,
+    v.id_usuario,
+    v.id_sucursal,
+    DATE(CONVERT_TZ(v.fecha_venta,'+00:00','-06:00')) AS dia,
+    CASE
+      WHEN LOWER(v.tipo_venta)='financiamiento+combo' THEN 2
+      ELSE COALESCE(d.has_non_modem,1)
+    END AS unidades,
+    CASE
+      WHEN COALESCE(d.has_non_modem,1)=1 THEN v.precio_venta
+      ELSE 0
+    END AS monto
   FROM ventas v
-  LEFT JOIN detalle_venta dv ON dv.id_venta = v.id
-  LEFT JOIN productos p     ON p.id = dv.id_producto
+  LEFT JOIN (
+    SELECT dv.id_venta,
+           MAX(CASE
+                 WHEN LOWER(COALESCE(p.$colTipoProd,'')) IN ('modem','mifi') THEN 0
+                 ELSE 1
+               END) AS has_non_modem
+    FROM detalle_venta dv
+    LEFT JOIN productos p ON p.id = dv.id_producto
+    GROUP BY dv.id_venta
+  ) d ON d.id_venta = v.id
   WHERE DATE(CONVERT_TZ(v.fecha_venta,'+00:00','-06:00')) BETWEEN ? AND ?
   GROUP BY v.id
 ";
@@ -396,6 +421,20 @@ unset($g);
 uksort($gruposZona, function ($za, $zb) use ($gruposZona) {
   return $gruposZona[$zb]['tot']['ventas'] <=> $gruposZona[$za]['tot']['ventas'];
 });
+
+/* ==============================
+   % OBJETIVO HOY (marcador verde discreto)
+================================= */
+$hoyMX = new DateTime('now', new DateTimeZone('America/Mexico_City'));
+$hoyStr = $hoyMX->format('Y-m-d');
+if ($hoyStr < $inicioSemana) {
+  $pctObjetivoSem = 0;
+} elseif ($hoyStr > $finSemana) {
+  $pctObjetivoSem = 100;
+} else {
+  $diasTrans = (new DateTime($inicioSemana))->diff(new DateTime($hoyStr))->days + 1;
+  $pctObjetivoSem = min(100, ($diasTrans / 7) * 100);
+}
 ?>
 <!DOCTYPE html>
 <html lang="es">
@@ -448,6 +487,41 @@ uksort($gruposZona, function ($za, $zb) use ($gruposZona) {
 
     /* mini ajuste del botón de descarga */
     .card-header .btn.btn-sm { padding: .15rem .4rem; line-height: 1; }
+
+    /* ===== Marcador verde discreto en la barra ===== */
+    .progress { position: relative; }
+    .progress-target {
+      position: absolute;
+      left: var(--target, 0%);
+      transform: translateX(-50%);
+      top: -2px;              /* que quede apenas arriba de la barra */
+      height: 18px;
+      width: 0;
+      pointer-events: none;
+    }
+    .progress-target .tick {
+      position: absolute;
+      bottom: 0;
+      left: -1px;
+      width: 2px;
+      height: 16px;
+      background: #16a34a;    /* verde */
+      opacity: .85;
+      border-radius: 1px;
+      box-shadow: 0 0 0 1px rgba(0,0,0,.06);
+    }
+    .progress-target .dot {
+      position: absolute;
+      top: -6px;
+      left: -4px;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #16a34a;      /* verde */
+      border: 2px solid #fff;   /* borde blanco para contraste */
+      box-shadow: 0 0 0 1px rgba(0,0,0,.12);
+      opacity: .95;
+    }
   </style>
 </head>
 
@@ -495,6 +569,11 @@ uksort($gruposZona, function ($za, $zb) use ($gruposZona) {
               </p>
               <div class="progress" style="height:20px">
                 <div class="progress-bar <?= $barra ?>" style="width:<?= min(100, $cumpl) ?>%"><?= number_format(min(100, $cumpl), 1) ?>%</div>
+                <!-- marcador objetivo -->
+                <div class="progress-target" style="--target: <?= number_format($pctObjetivoSem, 2) ?>%" title="Meta hoy: <?= number_format($pctObjetivoSem,1) ?>%">
+                  <span class="tick"></span>
+                  <span class="dot"></span>
+                </div>
               </div>
             </div>
           </div>
@@ -518,6 +597,11 @@ uksort($gruposZona, function ($za, $zb) use ($gruposZona) {
             </p>
             <div class="progress" style="height:20px">
               <div class="progress-bar <?= $barraG ?>" style="width:<?= min(100, $cumplG) ?>%"><?= number_format(min(100, $cumplG), 1) ?>%</div>
+              <!-- marcador objetivo -->
+              <div class="progress-target" style="--target: <?= number_format($pctObjetivoSem, 2) ?>%" title="Meta hoy: <?= number_format($pctObjetivoSem,1) ?>%">
+                <span class="tick"></span>
+                <span class="dot"></span>
+              </div>
             </div>
           </div>
         </div>
@@ -952,7 +1036,6 @@ uksort($gruposZona, function ($za, $zb) use ($gruposZona) {
           boxShadow: el.style.boxShadow
         };
         el.style.overflow = 'visible';
-        // el.style.boxShadow = 'none'; // descomenta si no quieres sombra en la imagen
 
         const overflowFixes = prepOverflow(el, true);
 

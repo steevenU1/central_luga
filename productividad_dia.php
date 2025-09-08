@@ -13,8 +13,7 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 // =====================
 // Parámetros
 // =====================
-$tzOffset        = '-06:00'; // Hora CDMX
-$diasProductivos = 5;        // para cuotas diarias
+$diasProductivos = 5; // para cuotas diarias
 
 $hoyLocal  = (new DateTime('now',       new DateTimeZone('America/Mexico_City')))->format('Y-m-d');
 $ayerLocal = (new DateTime('yesterday', new DateTimeZone('America/Mexico_City')))->format('Y-m-d');
@@ -22,29 +21,77 @@ $ayerLocal = (new DateTime('yesterday', new DateTimeZone('America/Mexico_City'))
 $fecha = $_GET['fecha'] ?? $ayerLocal;
 if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $fecha)) $fecha = $ayerLocal;
 
+/* ===============================================================
+   Detectar nombre real de la columna de tipo en productos:
+   puede ser `tipo` o `tipo_producto`
+================================================================ */
+$colTipoProd = null;
+$stmt = $conn->prepare("
+  SELECT 1
+  FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE()
+    AND TABLE_NAME   = 'productos'
+    AND COLUMN_NAME  = 'tipo'
+  LIMIT 1
+");
+$stmt->execute();
+if ($stmt->get_result()->num_rows > 0) $colTipoProd = 'tipo';
+$stmt->close();
+
+if ($colTipoProd === null) {
+  $stmt = $conn->prepare("
+    SELECT 1
+    FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME   = 'productos'
+      AND COLUMN_NAME  = 'tipo_producto'
+    LIMIT 1
+  ");
+  $stmt->execute();
+  if ($stmt->get_result()->num_rows > 0) $colTipoProd = 'tipo_producto';
+  $stmt->close();
+}
+
+/* Si no existe ninguna, no marcamos nada como módem (seguir operando) */
+$modemCase = $colTipoProd
+  ? "CASE WHEN LOWER(p.`$colTipoProd`) IN ('modem','mifi') THEN 1 ELSE 0 END"
+  : "0";
+
 /* ==================================================================
    Subconsulta re-usable (AGREGADA POR VENTA para el día seleccionado)
+   Reglas:
+   - Monto = ventas.precio_venta
+   - Unidades = 2 si tipo_venta = 'Financiamiento+Combo', de lo contrario 1
+   - Si la venta incluye algún producto de tipo Modem/MiFi => unidades = 0 y monto = 0
 ================================================================== */
 $subVentasAggDay = "
   SELECT
       v.id,
       v.id_usuario,
       v.id_sucursal,
-      CASE
-        WHEN LOWER(v.tipo_venta)='financiamiento+combo' THEN 2
-        ELSE SUM(CASE WHEN LOWER(p.tipo_producto) IN ('modem','mifi') THEN 0 ELSE 1 END)
+      CASE 
+        WHEN IFNULL(vm.es_modem,0) = 1 THEN 0
+        WHEN LOWER(v.tipo_venta) = 'financiamiento+combo' THEN 2
+        ELSE 1
       END AS unidades,
-      SUM(CASE WHEN LOWER(p.tipo_producto) IN ('modem','mifi') THEN 0 ELSE dv.precio_unitario END) AS monto
+      CASE 
+        WHEN IFNULL(vm.es_modem,0) = 1 THEN 0
+        ELSE v.precio_venta
+      END AS monto
   FROM ventas v
-  LEFT JOIN detalle_venta dv ON dv.id_venta = v.id
-  LEFT JOIN productos p     ON p.id       = dv.id_producto
-  WHERE DATE(CONVERT_TZ(v.fecha_venta,'+00:00', ? )) = ?
-  GROUP BY v.id
+  LEFT JOIN (
+      SELECT dv.id_venta,
+             MAX($modemCase) AS es_modem
+      FROM detalle_venta dv
+      JOIN productos p ON p.id = dv.id_producto
+      GROUP BY dv.id_venta
+  ) vm ON vm.id_venta = v.id
+  WHERE DATE(v.fecha_venta) = ?
 ";
 
-// =====================
-// TARJETAS GLOBALES
-// =====================
+/* =====================
+   TARJETAS GLOBALES
+===================== */
 $sqlGlobal = "
   SELECT
     COUNT(*)                            AS tickets,
@@ -53,7 +100,7 @@ $sqlGlobal = "
   FROM ( $subVentasAggDay ) va
 ";
 $stmt = $conn->prepare($sqlGlobal);
-$stmt->bind_param("ss", $tzOffset, $fecha);
+$stmt->bind_param("s", $fecha);
 $stmt->execute();
 $glob = $stmt->get_result()->fetch_assoc();
 $stmt->close();
@@ -63,9 +110,9 @@ $ventasValidas   = (float)($glob['ventas_validas'] ?? 0);
 $unidadesValidas = (int)($glob['unidades_validas'] ?? 0);
 $ticketProm      = $tickets > 0 ? ($ventasValidas / $tickets) : 0.0;
 
-// =====================
-// Cuota diaria GLOBAL (u.)
-// =====================
+/* =====================
+   Cuota diaria GLOBAL (u.)
+===================== */
 $sqlCuotaDiariaGlobalU = "
   SELECT IFNULL(SUM(cuota_calc),0) AS cuota_diaria_global_u FROM (
     SELECT 
@@ -97,9 +144,9 @@ $stmt->close();
 
 $cuotaDiariaGlobalU = (float)($cdgU['cuota_diaria_global_u'] ?? 0);
 
-// =====================
-// Cuota diaria GLOBAL ($) y % de cumplimiento en monto
-// =====================
+/* =====================
+   Cuota diaria GLOBAL ($)
+===================== */
 $sqlCuotaDiariaGlobalM = "
   SELECT IFNULL(SUM(cuota_diaria),0) AS cuota_diaria_global_monto FROM (
     SELECT s.id,
@@ -124,10 +171,9 @@ $stmt->close();
 $cuotaDiariaGlobalM = (float)($cdgM['cuota_diaria_global_monto'] ?? 0);
 $cumplGlobalM = $cuotaDiariaGlobalM > 0 ? ($ventasValidas / $cuotaDiariaGlobalM) * 100 : 0;
 
-// =====================
-// RANKING EJECUTIVOS + GERENTES (por venta)
-// (⚠️ sin columna Rol en SELECT)
-// =====================
+/* =====================
+   RANKING EJECUTIVOS + GERENTES (por venta)
+===================== */
 $sqlEjecutivos = "
   SELECT
     u.id,
@@ -155,8 +201,8 @@ $sqlEjecutivos = "
   ORDER BY unidades_validas DESC, ventas_validas DESC
 ";
 $stmt = $conn->prepare($sqlEjecutivos);
-/* params: fecha (cuota), dias, tzOffset, fecha (subconsulta) */
-$stmt->bind_param("siss", $fecha, $diasProductivos, $tzOffset, $fecha);
+/* params: fecha (cuota), dias, fecha (subconsulta) */
+$stmt->bind_param("sis", $fecha, $diasProductivos, $fecha);
 $stmt->execute();
 $resEj = $stmt->get_result();
 
@@ -171,9 +217,9 @@ while ($r = $resEj->fetch_assoc()) {
 }
 $stmt->close();
 
-// =====================
-// RANKING SUCURSALES (cumplimiento MONTO) – por venta
-// =====================
+/* =====================
+   RANKING SUCURSALES (cumplimiento MONTO) – por venta
+===================== */
 $sqlSucursales = "
   SELECT
     s.id AS id_sucursal,
@@ -199,8 +245,8 @@ $sqlSucursales = "
   ORDER BY ventas_validas DESC
 ";
 $stmt = $conn->prepare($sqlSucursales);
-/* params: fecha (cuota), dias, tzOffset, fecha (subconsulta) */
-$stmt->bind_param("siss", $fecha, $diasProductivos, $tzOffset, $fecha);
+/* params: fecha (cuota), dias, fecha (subconsulta) */
+$stmt->bind_param("sis", $fecha, $diasProductivos, $fecha);
 $stmt->execute();
 $resSuc = $stmt->get_result();
 
@@ -223,15 +269,11 @@ $stmt->close();
   <link rel="icon" type="image/x-icon" href="./img/favicon.ico">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
 
-  <!-- ===== Estilos ===== -->
   <style>
-    /* Utilidades */
     .num { font-variant-numeric: tabular-nums; letter-spacing: -.2px; }
     .clip { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .progress{height:20px}
     .progress-bar{font-size:.75rem}
-
-    /* Topbar tweaks (ya usabas en otras vistas) */
     #topbar, .navbar-luga{ font-size:16px; }
     @media (max-width:576px){
       #topbar, .navbar-luga{
@@ -246,17 +288,12 @@ $stmt->close();
       #topbar .navbar-toggler, .navbar-luga .navbar-toggler{ padding:.45em .7em; }
     }
     @media (max-width:360px){ #topbar, .navbar-luga{ font-size:15px; } }
-
-    /* 👇 Compactación y nombres completos en móvil */
     @media (max-width:576px){
       body { font-size: 14px; }
       .container { padding-left: 8px; padding-right: 8px; }
-
       .table { font-size: 12px; table-layout: fixed; }
       .table thead th { font-size: 11px; }
       .table td, .table th { padding: .30rem .40rem; }
-
-      /* permitir que NOMBRE y SUCURSAL se envuelvan en varias líneas */
       .person-name, .suc-col, .suc-name{
         max-width: none !important;
         white-space: normal !important;
@@ -264,8 +301,7 @@ $stmt->close();
         text-overflow: unset !important;
         word-break: break-word;
       }
-
-      .clip { max-width: 120px; } /* el resto sí puede recortarse */
+      .clip { max-width: 120px; }
     }
     @media (max-width:360px){
       .table { font-size: 11px; }
@@ -386,13 +422,10 @@ $stmt->close();
                   <th>Nombre</th>
                   <th>Sucursal</th>
                   <th>Unidades</th>
-                  <!-- oculto en móvil -->
                   <th class="d-none d-sm-table-cell">Ventas $</th>
-                  <!-- oculto en móvil -->
                   <th class="d-none d-sm-table-cell">Tickets</th>
                   <th>Cuota <span class="d-none d-sm-inline">diaria </span>(u.)</th>
                   <th>% Cumpl.<span class="d-none d-sm-inline">imiento</span></th>
-                  <!-- oculto en móvil -->
                   <th class="d-none d-sm-table-cell">Progreso</th>
                 </tr>
               </thead>
@@ -407,13 +440,10 @@ $stmt->close();
                   <td class="person-name" title="<?= h($e['nombre']) ?>"><?= h($e['nombre']) ?></td>
                   <td class="suc-col" title="<?= h($e['sucursal']) ?>"><?= h($e['sucursal']) ?></td>
                   <td class="num"><?= (int)$e['unidades_validas'] ?></td>
-                  <!-- oculto en móvil -->
                   <td class="d-none d-sm-table-cell num">$<?= number_format($e['ventas_validas'],2) ?></td>
-                  <!-- oculto en móvil -->
                   <td class="d-none d-sm-table-cell num"><?= (int)$e['tickets'] ?></td>
                   <td class="num"><?= number_format($cuotaDiaU,2) ?></td>
                   <td class="num"><?= number_format($cumpl,1) ?>%</td>
-                  <!-- oculto en móvil -->
                   <td class="d-none d-sm-table-cell" style="min-width:160px">
                     <div class="progress">
                       <div class="progress-bar <?= $cls ?>" style="width:<?= min(100,$cumpl) ?>%"></div>
@@ -438,14 +468,11 @@ $stmt->close();
               <thead class="table-dark">
                 <tr>
                   <th>Sucursal</th>
-                  <!-- oculto en móvil -->
                   <th class="d-none d-sm-table-cell">Zona</th>
-                  <!-- oculto en móvil -->
                   <th class="d-none d-sm-table-cell">Unidades</th>
                   <th class="w-120">Ventas $</th>
                   <th>Cuota diaria ($)</th>
                   <th>% Cumpl. <span class="d-none d-sm-inline">(monto)</span></th>
-                  <!-- oculto en móvil -->
                   <th class="d-none d-sm-table-cell">Progreso</th>
                 </tr>
               </thead>
@@ -456,16 +483,12 @@ $stmt->close();
                   $cls  = $cumpl>=100?'bg-success':($cumpl>=60?'bg-warning':'bg-danger');
                 ?>
                 <tr class="<?= $fila ?>">
-                  <!-- nombre completo en móvil -->
                   <td class="suc-name" title="<?= h($s['sucursal']) ?>"><?= h($s['sucursal']) ?></td>
-                  <!-- oculto en móvil -->
                   <td class="d-none d-sm-table-cell">Zona <?= h($s['zona']) ?></td>
-                  <!-- oculto en móvil -->
                   <td class="d-none d-sm-table-cell num"><?= (int)$s['unidades_validas'] ?></td>
                   <td class="num">$<?= number_format($s['ventas_validas'],2) ?></td>
                   <td class="num">$<?= number_format($s['cuota_diaria_monto'],2) ?></td>
                   <td class="num"><?= number_format($cumpl,1) ?>%</td>
-                  <!-- oculto en móvil -->
                   <td class="d-none d-sm-table-cell" style="min-width:160px">
                     <div class="progress">
                       <div class="progress-bar <?= $cls ?>" style="width:<?= min(100,$cumpl) ?>%"></div>

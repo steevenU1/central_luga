@@ -27,6 +27,16 @@ function obtenerSemanaPorIndice($offset = 0)
     return [$inicio, $fin];
 }
 
+/* Detección de columna de tipo de producto (tipo vs tipo_producto) */
+function hasColumn(mysqli $conn, string $table, string $column): bool {
+    $t = $conn->real_escape_string($table);
+    $c = $conn->real_escape_string($column);
+    $sql = "SHOW COLUMNS FROM `$t` LIKE '$c'";
+    if ($rs = $conn->query($sql)) { $ok = $rs->num_rows > 0; $rs->close(); return $ok; }
+    return false;
+}
+$colTipoProd = hasColumn($conn, 'productos', 'tipo') ? 'tipo' : 'tipo_producto';
+
 $semanaSeleccionada = isset($_GET['semana']) ? (int)$_GET['semana'] : 0;
 list($inicioSemanaObj, $finSemanaObj) = obtenerSemanaPorIndice($semanaSeleccionada);
 $inicioSemana = $inicioSemanaObj->format('Y-m-d 00:00:00');
@@ -115,9 +125,10 @@ function comisionPospagoGerente(mysqli $conn, float $planMonto, string $modalida
 
 /* ============================================================
    SUBCONSULTA BASE: Unidades/Monto POR VENTA en la semana
+   *** Alineada con dashboards ***
    - Combos => 2 unidades
-   - No combo => cuenta productos válidos (excluye mifi, modem, sim, chip, pospago)
-   - Incluye fecha para ordenar (escalonados)
+   - Si la venta tiene al menos UN producto que NO es módem/MiFi => 1 unidad y monto = v.precio_venta
+   - Si la venta es SOLO módem/MiFi => 0 unidades y monto = 0
 ============================================================ */
 $subVentasAggSemana = "
   SELECT
@@ -127,16 +138,23 @@ $subVentasAggSemana = "
       v.fecha_venta AS fecha,
       CASE
         WHEN LOWER(v.tipo_venta)='financiamiento+combo' THEN 2
-        ELSE SUM(
-               CASE 
-                 WHEN LOWER(p.tipo_producto) IN ('mifi','modem','sim','chip','pospago') THEN 0
-                 ELSE 1
-               END
-             )
-      END AS unidades
+        ELSE COALESCE(d.has_non_modem,1)
+      END AS unidades,
+      CASE
+        WHEN COALESCE(d.has_non_modem,1)=1 THEN v.precio_venta
+        ELSE 0
+      END AS monto
   FROM ventas v
-  LEFT JOIN detalle_venta dv ON dv.id_venta = v.id
-  LEFT JOIN productos p      ON p.id       = dv.id_producto
+  LEFT JOIN (
+    SELECT dv.id_venta,
+           MAX(CASE
+                 WHEN LOWER(COALESCE(p.$colTipoProd,'')) IN ('modem','mifi') THEN 0
+                 ELSE 1
+               END) AS has_non_modem
+    FROM detalle_venta dv
+    LEFT JOIN productos p ON p.id = dv.id_producto
+    GROUP BY dv.id_venta
+  ) d ON d.id_venta = v.id
   WHERE v.fecha_venta BETWEEN ? AND ?
   GROUP BY v.id
 ";
@@ -205,7 +223,7 @@ while ($u = $resUsuarios->fetch_assoc()) {
         $totalVentaEspecial = 0.0;
 
         $sqlDV = "
-            SELECT dv.id, dv.precio_unitario, dv.comision_especial, p.tipo_producto
+            SELECT dv.id, dv.precio_unitario, dv.comision_especial, p.$colTipoProd AS tipo_producto
             FROM detalle_venta dv
             INNER JOIN productos p ON dv.id_producto=p.id
             WHERE dv.id_venta=?
@@ -217,10 +235,9 @@ while ($u = $resUsuarios->fetch_assoc()) {
 
         while ($det = $detalles->fetch_assoc()) {
             $espOriginal = (float)$det['comision_especial'];
-            // 🔸 NUEVA REGLA: si NO cumple cuota, no se paga comision especial (queda en 0)
+            // 🔸 Si NO cumple cuota, no se paga comision especial
             $comEsp = $cumpleCuotaEjecutivo ? $espOriginal : 0.0;
 
-            // Si cambió, actualizar el campo en detalle_venta para dejarlo en cero cuando no cumpla
             if ($comEsp !== $espOriginal) {
                 $stmtUpdEsp = $conn->prepare("UPDATE detalle_venta SET comision_especial=? WHERE id=?");
                 $stmtUpdEsp->bind_param("di", $comEsp, $det['id']);
@@ -241,8 +258,6 @@ while ($u = $resUsuarios->fetch_assoc()) {
         }
         $stmtDV->close();
 
-        // Guardamos total de la venta y el total de especial aplicado (puede ser 0)
-        // Nota: requiere que la tabla ventas tenga la columna comision_especial (en Luga existe).
         $stmtUpdV = $conn->prepare("UPDATE ventas SET comision=?, comision_especial=? WHERE id=?");
         $stmtUpdV->bind_param("ddi", $totalVenta, $totalVentaEspecial, $id_venta);
         $stmtUpdV->execute();
@@ -275,27 +290,27 @@ while ($u = $resUsuarios->fetch_assoc()) {
 
     /* ===== 4) Recalcular GERENTE: por SUCURSAL ===== */
     if ($rol === 'Gerente') {
-        /* 4.1 Cumplimiento de TIENDA (monto semanal sucursal por HEADER) */
+        /* 4.1 Cumplimiento de TIENDA (monto semanal sucursal) 
+           → Alineado al dashboard: suma de MONTO de subconsulta (excluye ventas solo módem/MiFi) */
         $sqlCuotaPesos = "
-    SELECT cuota_monto
-    FROM cuotas_sucursales
-    WHERE id_sucursal=? AND fecha_inicio <= ?
-    ORDER BY fecha_inicio DESC
-    LIMIT 1
-";
+          SELECT cuota_monto
+          FROM cuotas_sucursales
+          WHERE id_sucursal=? AND fecha_inicio <= ?
+          ORDER BY fecha_inicio DESC
+          LIMIT 1
+        ";
         $stmtQ = $conn->prepare($sqlCuotaPesos);
         $stmtQ->bind_param("is", $id_sucursal, $inicioSemana);
         $stmtQ->execute();
         $cuotaMonto = (float)($stmtQ->get_result()->fetch_assoc()['cuota_monto'] ?? 0);
         $stmtQ->close();
 
-        /* 🔹 Monto de tienda alineado al dash/export: SUM(ventas.precio_venta) */
         $stmtMS = $conn->prepare("
-    SELECT IFNULL(SUM(v.precio_venta),0) AS monto
-    FROM ventas v
-    WHERE v.id_sucursal=? AND v.fecha_venta BETWEEN ? AND ?
-");
-        $stmtMS->bind_param("iss", $id_sucursal, $inicioSemana, $finSemana);
+          SELECT IFNULL(SUM(va.monto),0) AS monto
+          FROM ( $subVentasAggSemana ) va
+          WHERE va.id_sucursal=?
+        ");
+        $stmtMS->bind_param("ssi", $inicioSemana, $finSemana, $id_sucursal);
         $stmtMS->execute();
         $montoSuc = (float)($stmtMS->get_result()->fetch_assoc()['monto'] ?? 0);
         $stmtMS->close();
@@ -374,7 +389,7 @@ while ($u = $resUsuarios->fetch_assoc()) {
             INNER JOIN ventas v ON dv.id_venta=v.id
             INNER JOIN productos p ON dv.id_producto=p.id
             WHERE v.id_sucursal=? AND v.fecha_venta BETWEEN ? AND ?
-              AND LOWER(p.tipo_producto) IN ('mifi','modem')
+              AND LOWER(p.$colTipoProd) IN ('mifi','modem')
             GROUP BY v.id
         ";
         $stmtMod = $conn->prepare($sqlMod);
