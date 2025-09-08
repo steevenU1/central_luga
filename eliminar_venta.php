@@ -41,48 +41,57 @@ if (!$venta) {
     exit();
 }
 
-/* 2) Validar ventana (solo semana actual) */
-$fechaVenta = new DateTime($venta['fecha_venta']);
-if ($fechaVenta < $inicioSemana || $fechaVenta > $finSemana) {
-    header("Location: historial_ventas.php?msg=" . urlencode("❌ Solo puedes eliminar ventas de esta semana"));
-    exit();
-}
-
-/* 3) Permisos
-   - Admin: puede eliminar cualquier venta (de esta semana)
-   - Ejecutivo/Gerente: solo sus propias ventas (de esta semana)
+/* 2) Permisos
+   - Admin: puede eliminar cualquier venta (SIN límite por semana)
+   - Ejecutivo/Gerente: solo sus propias ventas Y solo si están en semana actual
 */
 $puedeEliminar = false;
+
 if ($rolUsuario === 'Admin') {
-    $puedeEliminar = true;
-} elseif (in_array($rolUsuario, ['Ejecutivo','Gerente'], true) && (int)$venta['id_usuario'] === $idUsuario) {
-    $puedeEliminar = true;
+    $puedeEliminar = true; // sin validar semana
+} else {
+    // Para roles no admin: validar semana y propiedad
+    $fechaVenta = new DateTime($venta['fecha_venta']);
+    $enSemana   = ($fechaVenta >= $inicioSemana && $fechaVenta <= $finSemana);
+
+    if (in_array($rolUsuario, ['Ejecutivo','Gerente'], true)
+        && (int)$venta['id_usuario'] === $idUsuario
+        && $enSemana) {
+        $puedeEliminar = true;
+    }
 }
 
 if (!$puedeEliminar) {
-    header("Location: historial_ventas.php?msg=" . urlencode("❌ No tienes permiso para eliminar esta venta"));
+    $msg = ($rolUsuario === 'Admin')
+        ? "❌ No tienes permiso para eliminar esta venta"
+        : "❌ Solo puedes eliminar tus ventas de esta semana";
+    header("Location: historial_ventas.php?msg=" . urlencode($msg));
     exit();
 }
 
-/* 4) Operación: devolver equipos y borrar venta + detalle */
+/* 3) Operación: devolver equipos y borrar venta + detalle */
 $conn->begin_transaction();
 
 try {
-    // Devolver productos al inventario (ajusta columnas/tablas si en tu esquema difiere)
+    // Devolver productos al inventario
     $sqlDet = "SELECT id_producto FROM detalle_venta WHERE id_venta=?";
     $st = $conn->prepare($sqlDet);
     $st->bind_param("i", $idVenta);
     $st->execute();
     $res = $st->get_result();
 
-    $upd = $conn->prepare("UPDATE inventario SET estatus='Disponible' WHERE id_producto=?");
-    while ($row = $res->fetch_assoc()) {
-        $idProd = (int)$row['id_producto'];
-        $upd->bind_param("i", $idProd);
-        $upd->execute();
+    if ($res) {
+        $upd = $conn->prepare("UPDATE inventario SET estatus='Disponible' WHERE id_producto=? LIMIT 1");
+        while ($row = $res->fetch_assoc()) {
+            $idProd = (int)$row['id_producto'];
+            if ($idProd > 0) {
+                $upd->bind_param("i", $idProd);
+                $upd->execute();
+            }
+        }
+        $upd->close();
+        $st->close();
     }
-    $upd->close();
-    $st->close();
 
     // Borrar detalle
     $delDet = $conn->prepare("DELETE FROM detalle_venta WHERE id_venta=?");
@@ -103,7 +112,7 @@ try {
 
 } catch (Throwable $e) {
     $conn->rollback();
-    // Log opcional: error_log($e->getMessage());
+    // error_log("Eliminar venta {$idVenta}: ".$e->getMessage());
     header("Location: historial_ventas.php?msg=" . urlencode("❌ Ocurrió un error al eliminar la venta"));
     exit();
 }
