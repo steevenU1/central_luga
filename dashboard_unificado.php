@@ -47,7 +47,10 @@ function pctDelta($curr, $prev)
   if ($prev == 0) return null;
   return (($curr - $prev) / $prev) * 100.0;
 }
-function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
+function h($s)
+{
+  return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8');
+}
 
 /** Normaliza cualquier valor de zona a "Zona N" */
 function normalizarZona($raw)
@@ -60,8 +63,9 @@ function normalizarZona($raw)
   return null;
 }
 
-/** Nombre de sucursal “corto” para móvil: quita prefijo Luga */
-function sucursalCorta($nombre) {
+/** Quita prefijo "Luga" en nombres de sucursal */
+function sucursalCorta($nombre)
+{
   $n = preg_replace('/^\s*Luga\s+/i', '', (string)$nombre);
   return trim($n);
 }
@@ -78,7 +82,8 @@ try {
     $rs2 = $conn->query("SHOW COLUMNS FROM productos LIKE 'tipo_producto'");
     if ($rs2 && $rs2->num_rows > 0) $colTipoProd = 'tipo_producto';
   }
-} catch(Exception $e){ /* fallback a tipo_producto */ }
+} catch (Exception $e) { /* fallback a tipo_producto */
+}
 
 /* ==========================================================
    Agregado por venta (unidades por VENTA, no por detalle)
@@ -110,13 +115,13 @@ $subVentasAgg = "
     FROM detalle_venta dv
     LEFT JOIN productos p ON p.id = dv.id_producto
     GROUP BY dv.id_venta
-  ) d ON d.id_venta = v.id
+  ) d ON d.id_venta = v.id  -- ✅ fix: aquí iba el error
   WHERE DATE(CONVERT_TZ(v.fecha_venta,'+00:00','-06:00')) BETWEEN ? AND ?
   GROUP BY v.id
 ";
 
 /* ==========================================================
-   SIMs (tabla separada ventas_sims) – Mapas por usuario y por sucursal
+   SIMs (tabla separada ventas_sims)
 ========================================================== */
 $mapSimsByUser = [];
 $mapSimsBySuc  = [];
@@ -221,7 +226,6 @@ while ($row = $resEjecutivos->fetch_assoc()) {
   $row['cuota_ejecutivo'] = (int)($row['cuota_ejecutivo'] ?? 0);
   $row['cumplimiento']    = $row['cuota_ejecutivo'] > 0 ? ($row['unidades'] / $row['cuota_ejecutivo'] * 100) : 0;
 
-  // Agrega SIMs desde mapa por usuario
   $simU = $mapSimsByUser[(int)$row['id']] ?? ['pre' => 0, 'pos' => 0];
   $row['sim_prepago']     = (int)$simU['pre'];
   $row['sim_pospago']     = (int)$simU['pos'];
@@ -268,7 +272,7 @@ foreach ($rankingEjecutivos as &$r) {
 unset($r);
 
 /* ==============================
-   Sucursales (monto vs cuota $) — ahora con SIMs
+   Sucursales (monto vs cuota $) — con SIMs
 ================================= */
 $sqlSucursales = "
   SELECT
@@ -305,7 +309,6 @@ while ($row = $resSucursales->fetch_assoc()) {
   $row['cuota_semanal'] = (float)($row['cuota_semanal'] ?? 0);
   $row['cumplimiento']  = $row['cuota_semanal'] > 0 ? ($row['total_ventas'] / $row['cuota_semanal'] * 100) : 0;
 
-  // SIMs por sucursal
   $simS = $mapSimsBySuc[(int)$row['id_sucursal']] ?? ['pre' => 0, 'pos' => 0];
   $row['sim_prepago']   = (int)$simS['pre'];
   $row['sim_pospago']   = (int)$simS['pos'];
@@ -385,7 +388,7 @@ unset($s);
 $seriesSucursales = [];
 foreach ($sucursales as $row) {
   $seriesSucursales[] = [
-    'label'    => $row['sucursal'],
+    'label'    => sucursalCorta($row['sucursal']), // sin prefijo Luga
     'unidades' => (int)$row['unidades'],
     'ventas'   => round((float)$row['total_ventas'], 2),
   ];
@@ -419,9 +422,21 @@ foreach ($gruposZona as &$g) {
 }
 unset($g);
 uksort($gruposZona, function ($za, $zb) use ($gruposZona) {
+  // Convierte 'Zona N' -> N, 'Sin zona' -> muy grande (para que vaya al final)
+  $rank = function($z) {
+    if (preg_match('/zona\s*(\d+)/i', $z, $m)) return (int)$m[1];  // Zona 1, 2, 3...
+    if (stripos($z, 'sin zona') !== false) return PHP_INT_MAX - 1; // último
+    return PHP_INT_MAX; // cualquier otro texto raro, casi al final
+  };
+  $ra = $rank($za);
+  $rb = $rank($zb);
+
+  // Orden principal: número de zona ascendente
+  if ($ra !== $rb) return $ra <=> $rb;
+
+  // Desempate (si fueran la misma “zona” textual): por ventas DESC como antes
   return $gruposZona[$zb]['tot']['ventas'] <=> $gruposZona[$za]['tot']['ventas'];
 });
-
 /* ==============================
    % OBJETIVO HOY (marcador verde discreto)
 ================================= */
@@ -447,69 +462,182 @@ if ($hoyStr < $inicioSemana) {
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css">
   <style>
     /* recortes de texto */
-    .clip { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .clip-name { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .clip-branch { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .clip {
+      max-width: 160px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
 
-    /* num + columnas compactas */
-    .num { font-variant-numeric: tabular-nums; letter-spacing: -.2px; }
-    .col-fit { width: 1%; white-space: nowrap; }
+    .clip-name {
+      max-width: 220px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
 
-    .trend { font-size: .875rem; white-space: nowrap; }
-    .trend .delta { font-weight: 600; }
+    .clip-branch {
+      max-width: 200px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
 
-    .table td:first-child, .table th:first-child { width: auto; }
+    .num {
+      font-variant-numeric: tabular-nums;
+      letter-spacing: -.2px;
+    }
 
-    #topbar { font-size: 16px; }
+    .col-fit {
+      width: 1%;
+      white-space: nowrap;
+    }
+
+    .trend {
+      font-size: .875rem;
+      white-space: nowrap;
+    }
+
+    .trend .delta {
+      font-weight: 600;
+    }
+
+    .table td:first-child,
+    .table th:first-child {
+      width: auto;
+    }
+
+    #topbar {
+      font-size: 16px;
+    }
+
+    /* Switch mini */
+    .form-switch.form-switch-sm .form-check-input {
+      height: 1rem;
+      width: 2rem;
+      transform: scale(.95);
+    }
+
+    .form-switch.form-switch-sm .form-check-label {
+      font-size: .8rem;
+      margin-left: .25rem;
+    }
+
+    /* Ocultar/mostrar deltas aplicando clase a la card */
+    .hide-delta .trend {
+      display: none !important;
+    }
 
     @media (max-width:576px) {
-      body { font-size: 14px; }
-      .container { padding-left: 8px; padding-right: 8px; }
-      .card .card-header { padding: .5rem .65rem; font-size: .95rem; }
-      .card .card-body { padding: .65rem; }
-      .table { font-size: 12px; table-layout: auto; }
-      .table thead th { font-size: 11px; }
-      .table td, .table th { padding: .35rem .45rem; }
-      .trend { font-size: .72rem; }
-      .clip { max-width: 130px; }
-      .clip-name { max-width: 240px; }
-      .clip-branch { max-width: 160px; }
+      body {
+        font-size: 14px;
+      }
+
+      .container {
+        padding-left: 8px;
+        padding-right: 8px;
+      }
+
+      .card .card-header {
+        padding: .5rem .65rem;
+        font-size: .95rem;
+      }
+
+      .card .card-body {
+        padding: .65rem;
+      }
+
+      .table {
+        font-size: 12px;
+        table-layout: auto;
+      }
+
+      .table thead th {
+        font-size: 11px;
+      }
+
+      .table td,
+      .table th {
+        padding: .35rem .45rem;
+      }
+
+      .trend {
+        font-size: .72rem;
+      }
+
+      .clip {
+        max-width: 130px;
+      }
+
+      .clip-name {
+        max-width: 240px;
+      }
+
+      .clip-branch {
+        max-width: 160px;
+      }
     }
 
     @media (max-width:360px) {
-      .table { font-size: 11px; }
-      .table td, .table th { padding: .30rem .40rem; }
-      .clip { max-width: 110px; }
-      .clip-name { max-width: 200px; }
-      .clip-branch { max-width: 140px; }
-      .table .progress{ width:100%; }
+      .table {
+        font-size: 11px;
+      }
+
+      .table td,
+      .table th {
+        padding: .30rem .40rem;
+      }
+
+      .clip {
+        max-width: 110px;
+      }
+
+      .clip-name {
+        max-width: 200px;
+      }
+
+      .clip-branch {
+        max-width: 140px;
+      }
+
+      .table .progress {
+        width: 100%;
+      }
     }
 
     /* mini ajuste del botón de descarga */
-    .card-header .btn.btn-sm { padding: .15rem .4rem; line-height: 1; }
+    .card-header .btn.btn-sm {
+      padding: .15rem .4rem;
+      line-height: 1;
+    }
 
     /* ===== Marcador verde discreto en la barra ===== */
-    .progress { position: relative; }
+    .progress {
+      position: relative;
+    }
+
     .progress-target {
       position: absolute;
       left: var(--target, 0%);
       transform: translateX(-50%);
-      top: -2px;              /* que quede apenas arriba de la barra */
+      top: -2px;
       height: 18px;
       width: 0;
       pointer-events: none;
     }
+
     .progress-target .tick {
       position: absolute;
       bottom: 0;
       left: -1px;
       width: 2px;
       height: 16px;
-      background: #16a34a;    /* verde */
+      background: #16a34a;
       opacity: .85;
       border-radius: 1px;
-      box-shadow: 0 0 0 1px rgba(0,0,0,.06);
+      box-shadow: 0 0 0 1px rgba(0, 0, 0, .06);
     }
+
     .progress-target .dot {
       position: absolute;
       top: -6px;
@@ -517,9 +645,9 @@ if ($hoyStr < $inicioSemana) {
       width: 8px;
       height: 8px;
       border-radius: 50%;
-      background: #16a34a;      /* verde */
-      border: 2px solid #fff;   /* borde blanco para contraste */
-      box-shadow: 0 0 0 1px rgba(0,0,0,.12);
+      background: #16a34a;
+      border: 2px solid #fff;
+      box-shadow: 0 0 0 1px rgba(0, 0, 0, .12);
       opacity: .95;
     }
   </style>
@@ -529,7 +657,7 @@ if ($hoyStr < $inicioSemana) {
   <?php include 'navbar.php'; ?>
 
   <div class="container mt-4">
-    <h2>📊 Dashboard Semanal Luga</h2>
+    <h2>📊 Dashboard Semanal</h2>
 
     <!-- Selector de semana -->
     <form method="GET" class="mb-3">
@@ -570,9 +698,8 @@ if ($hoyStr < $inicioSemana) {
               <div class="progress" style="height:20px">
                 <div class="progress-bar <?= $barra ?>" style="width:<?= min(100, $cumpl) ?>%"><?= number_format(min(100, $cumpl), 1) ?>%</div>
                 <!-- marcador objetivo -->
-                <div class="progress-target" style="--target: <?= number_format($pctObjetivoSem, 2) ?>%" title="Meta hoy: <?= number_format($pctObjetivoSem,1) ?>%">
-                  <span class="tick"></span>
-                  <span class="dot"></span>
+                <div class="progress-target" style="--target: <?= number_format($pctObjetivoSem, 2) ?>%" title="Meta hoy: <?= number_format($pctObjetivoSem, 1) ?>%">
+                  <span class="tick"></span><span class="dot"></span>
                 </div>
               </div>
             </div>
@@ -598,9 +725,8 @@ if ($hoyStr < $inicioSemana) {
             <div class="progress" style="height:20px">
               <div class="progress-bar <?= $barraG ?>" style="width:<?= min(100, $cumplG) ?>%"><?= number_format(min(100, $cumplG), 1) ?>%</div>
               <!-- marcador objetivo -->
-              <div class="progress-target" style="--target: <?= number_format($pctObjetivoSem, 2) ?>%" title="Meta hoy: <?= number_format($pctObjetivoSem,1) ?>%">
-                <span class="tick"></span>
-                <span class="dot"></span>
+              <div class="progress-target" style="--target: <?= number_format($pctObjetivoSem, 2) ?>%" title="Meta hoy: <?= number_format($pctObjetivoSem, 1) ?>%">
+                <span class="tick"></span><span class="dot"></span>
               </div>
             </div>
           </div>
@@ -636,12 +762,18 @@ if ($hoyStr < $inicioSemana) {
     <div class="tab-content">
       <!-- Ejecutivos -->
       <div class="tab-pane fade show active" id="ejecutivos">
-        <div class="card mb-4 shadow" id="card_ejecutivos">
+        <div class="card mb-4 shadow hide-delta" id="card_ejecutivos">
           <div class="card-header bg-dark text-white d-flex align-items-center justify-content-between">
             <span>Ranking de Ejecutivos</span>
-            <button type="button" id="btnSnapEj" class="btn btn-outline-light btn-sm" title="Descargar imagen">
-              <i class="bi bi-download"></i>
-            </button>
+            <div class="d-flex align-items-center gap-2">
+              <div class="form-check form-switch form-switch-sm text-nowrap me-1" title="Mostrar comparativo (Δ)">
+                <input class="form-check-input" type="checkbox" id="swDeltaEj">
+                <label class="form-check-label small" for="swDeltaEj">Δ</label>
+              </div>
+              <button type="button" id="btnSnapEj" class="btn btn-outline-light btn-sm" title="Descargar imagen">
+                <i class="bi bi-download"></i>
+              </button>
+            </div>
           </div>
           <div class="card-body">
             <div class="table-responsive-sm">
@@ -675,7 +807,8 @@ if ($hoyStr < $inicioSemana) {
                       <td class="clip-branch d-none d-sm-table-cell" title="<?= h($r['sucursal']) ?>"><?= h($r['sucursal']) ?></td>
                       <td class="num col-fit">
                         <?= (int)$r['unidades'] ?>
-                        <div class="trend"><span class="<?= $clsU ?>"><?= $icoU ?></span>
+                        <div class="trend">
+                          <span class="<?= $clsU ?>"><?= $icoU ?></span>
                           <span class="delta <?= $clsU ?>"><?= ($dU > 0 ? '+' : '') . $dU ?> u.</span>
                           <?php if ($pctU !== null): ?><span class="text-muted">(<?= ($pctU >= 0 ? '+' : '') . number_format($pctU, 1) ?>%)</span><?php endif; ?>
                         </div>
@@ -702,12 +835,18 @@ if ($hoyStr < $inicioSemana) {
 
       <!-- Sucursales (AGRUPADAS POR ZONA) -->
       <div class="tab-pane fade" id="sucursales">
-        <div class="card mb-4 shadow" id="card_sucursales">
+        <div class="card mb-4 shadow hide-delta" id="card_sucursales">
           <div class="card-header bg-dark text-white d-flex align-items-center justify-content-between">
             <span>Ranking de Sucursales (agrupado por zona)</span>
-            <button type="button" id="btnSnapSuc" class="btn btn-outline-light btn-sm" title="Descargar imagen">
-              <i class="bi bi-download"></i>
-            </button>
+            <div class="d-flex align-items-center gap-2">
+              <div class="form-check form-switch form-switch-sm text-nowrap me-1" title="Mostrar comparativo (Δ)">
+                <input class="form-check-input" type="checkbox" id="swDeltaSuc">
+                <label class="form-check-label small" for="swDeltaSuc">Δ</label>
+              </div>
+              <button type="button" id="btnSnapSuc" class="btn btn-outline-light btn-sm" title="Descargar imagen">
+                <i class="bi bi-download"></i>
+              </button>
+            </div>
           </div>
           <div class="card-body">
             <div class="table-responsive-sm">
@@ -716,19 +855,18 @@ if ($hoyStr < $inicioSemana) {
                   <tr>
                     <th>Sucursal</th>
 
-                    <!-- columnas móviles nuevas -->
+                    <!-- columnas móviles -->
                     <th class="d-table-cell d-md-none col-fit">Uds</th>
                     <th class="d-table-cell d-md-none col-fit">Pre</th>
                     <th class="d-table-cell d-md-none col-fit">Pos</th>
 
-                    <!-- columnas md+ existentes -->
+                    <!-- md+ -->
                     <th class="d-none d-md-table-cell">Zona</th>
                     <th class="d-none d-md-table-cell">Unidades</th>
                     <th class="d-none d-md-table-cell col-fit">SIM Prep.</th>
                     <th class="d-none d-md-table-cell col-fit">SIM Pos.</th>
                     <th class="d-none d-lg-table-cell col-fit">Cuota ($)</th>
 
-                    <!-- Ventas ($) con etiqueta corta en móvil -->
                     <th class="col-fit">
                       <span class="d-none d-md-inline">Total Ventas ($)</span>
                       <span class="d-inline d-md-none">$</span>
@@ -742,25 +880,21 @@ if ($hoyStr < $inicioSemana) {
                   <?php foreach ($gruposZona as $zona => $grp): ?>
                     <!-- Encabezado de grupo (ZONA) -->
                     <tr class="table-secondary d-table-row d-md-none">
-                      <!-- móvil: Sucursal + Uds + Pre + Pos + $ + %  => 6 columnas -->
                       <th colspan="6" class="text-start"><?= h($zona) ?></th>
                     </tr>
                     <tr class="table-secondary d-none d-md-table-row d-lg-none">
-                      <!-- md: 7 columnas visibles -->
                       <th colspan="7" class="text-start"><?= h($zona) ?></th>
                     </tr>
                     <tr class="table-secondary d-none d-lg-table-row">
-                      <!-- lg+: 9 columnas visibles -->
                       <th colspan="9" class="text-start"><?= h($zona) ?></th>
                     </tr>
 
-                    <!-- Filas de sucursales ordenadas por ventas dentro de la zona -->
+                    <!-- Filas de sucursales -->
                     <?php foreach ($grp['rows'] as $s):
                       $cumpl = round($s['cumplimiento'], 1);
                       $estado = $cumpl >= 100 ? "✅" : ($cumpl >= 60 ? "⚠️" : "❌");
                       $fila = $cumpl >= 100 ? "table-success" : ($cumpl >= 60 ? "table-warning" : "table-danger");
 
-                      // Tendencia SOLO para PC (quitada en móvil)
                       $dM   = (float)$s['delta_monto'];
                       [$icoM, $clsM] = arrowIcon($dM);
                       $pctM = $s['pct_delta_monto']; // puede ser null
@@ -776,7 +910,7 @@ if ($hoyStr < $inicioSemana) {
                         <td class="d-table-cell d-md-none num"><?= (int)$s['sim_prepago'] ?></td>
                         <td class="d-table-cell d-md-none num"><?= (int)$s['sim_pospago'] ?></td>
 
-                        <!-- columnas md+ -->
+                        <!-- md+ -->
                         <td class="d-none d-md-table-cell"><?= h(normalizarZona($s['zona'] ?? '') ?? '—') ?></td>
                         <td class="d-none d-md-table-cell num"><?= (int)$s['unidades'] ?></td>
                         <td class="d-none d-md-table-cell num col-fit"><?= (int)$s['sim_prepago'] ?></td>
@@ -789,8 +923,9 @@ if ($hoyStr < $inicioSemana) {
                         <td class="num col-fit">
                           <span class="money-abbr" data-raw="<?= (float)$s['total_ventas'] ?>">$<?= number_format($s['total_ventas'], 2) ?></span>
 
-                          <!-- 🖥️ PC (lg+): mostrar Δ monto + Δ % -->
-                          <div class="trend d-none d-lg-block">
+                          <!-- Δ monto + Δ % (ocultable por switch) -->
+                          <!-- Δ monto + Δ % (ocultable por switch) -->
+                          <div class="trend">
                             <span class="<?= $clsM ?>"><?= $icoM ?></span>
                             <span class="delta <?= $clsM ?>">
                               <?= ($dM > 0 ? '+' : ($dM < 0 ? '' : '')) . '$' . number_format($dM, 2) ?>
@@ -801,8 +936,6 @@ if ($hoyStr < $inicioSemana) {
                               </span>
                             <?php endif; ?>
                           </div>
-
-                          <!-- 📱 Móvil: sin comparativo -->
                         </td>
 
                         <td class="num col-fit"><?= number_format($cumpl, 1) ?>% <?= $estado ?></td>
@@ -854,7 +987,7 @@ if ($hoyStr < $inicioSemana) {
 
                   <?php endforeach; ?>
 
-                  <!-- ====== TOTAL GLOBAL (móvil y escritorio) ====== -->
+                  <!-- ====== TOTAL GLOBAL ====== -->
                   <?php
                   $clsG = $porcentajeGlobal >= 100 ? 'bg-success' : ($porcentajeGlobal >= 60 ? 'bg-warning' : 'bg-danger');
                   ?>
@@ -899,26 +1032,37 @@ if ($hoyStr < $inicioSemana) {
 
   <script>
     /* ===========================
-       Datos completos de sucursales (para el chart)
+       Datos completos de sucursales (chart)
     =========================== */
     const ALL_SUC = <?= json_encode($seriesSucursales, JSON_UNESCAPED_UNICODE | JSON_NUMERIC_CHECK) ?>;
     const TOP_BARS = <?= (int)$TOP_BARS ?>;
 
     function palette(i) {
-      const colors = ['#2563eb','#16a34a','#f59e0b','#ef4444','#8b5cf6','#14b8a6','#f97316','#22c55e','#0ea5e9','#e11d48','#7c3aed','#10b981','#eab308','#dc2626','#06b6d4','#a3e635'];
+      const colors = ['#2563eb', '#16a34a', '#f59e0b', '#ef4444', '#8b5cf6', '#14b8a6', '#f97316', '#22c55e', '#0ea5e9', '#e11d48', '#7c3aed', '#10b981', '#eab308', '#dc2626', '#06b6d4', '#a3e635'];
       return colors[i % colors.length];
     }
 
     function buildTop(metric) {
       const arr = [...ALL_SUC].sort((a, b) => (b[metric] || 0) - (a[metric] || 0));
-      const labels = [], data = [];
+      const labels = [],
+        data = [];
       let otras = 0;
       arr.forEach((r, idx) => {
-        if (idx < TOP_BARS) { labels.push(r.label); data.push(r[metric] || 0); }
-        else { otras += (r[metric] || 0); }
+        if (idx < TOP_BARS) {
+          labels.push(r.label);
+          data.push(r[metric] || 0);
+        } else {
+          otras += (r[metric] || 0);
+        }
       });
-      if (otras > 0) { labels.push('Otras'); data.push(otras); }
-      return { labels, data };
+      if (otras > 0) {
+        labels.push('Otras');
+        data.push(otras);
+      }
+      return {
+        labels,
+        data
+      };
     }
 
     let currentMetric = 'unidades';
@@ -931,47 +1075,77 @@ if ($hoyStr < $inicioSemana) {
       const isMoney = (currentMetric === 'ventas');
       const data = {
         labels: series.labels,
-        datasets: [{ label: isMoney ? 'Ventas ($)' : 'Unidades (semana)', data: series.data, backgroundColor: bg, borderWidth: 0 }]
+        datasets: [{
+          label: isMoney ? 'Ventas ($)' : 'Unidades (semana)',
+          data: series.data,
+          backgroundColor: bg,
+          borderWidth: 0
+        }]
       };
       const options = {
         responsive: true,
         maintainAspectRatio: false,
         plugins: {
-          legend: { display: false },
+          legend: {
+            display: false
+          },
           tooltip: {
             callbacks: {
-              label: (ctx) => isMoney
-                ? ' $' + Number(ctx.parsed.y).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-                : ' ' + ctx.parsed.y.toLocaleString('es-MX') + ' u.'
+              label: (ctx) => isMoney ?
+                ' $' + Number(ctx.parsed.y).toLocaleString('es-MX', {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2
+                }) :
+                ' ' + ctx.parsed.y.toLocaleString('es-MX') + ' u.'
             }
           }
         },
         scales: {
           x: {
-            title: { display: true, text: 'Sucursales' },
+            title: {
+              display: true,
+              text: 'Sucursales'
+            },
             ticks: {
-              autoSkip: false, maxRotation: 45, minRotation: 0,
+              autoSkip: false,
+              maxRotation: 45,
+              minRotation: 0,
               callback: (v, i) => {
                 const l = series.labels[i] || '';
                 return l.length > 14 ? l.slice(0, 12) + '…' : l;
               }
             },
-            grid: { display: false }
+            grid: {
+              display: false
+            }
           },
           y: {
             beginAtZero: true,
-            title: { display: true, text: isMoney ? 'Ventas ($)' : 'Unidades' }
+            title: {
+              display: true,
+              text: isMoney ? 'Ventas ($)' : 'Unidades'
+            }
           }
         },
-        elements: { bar: { borderRadius: 4, barThickness: 'flex', maxBarThickness: 42 } }
+        elements: {
+          bar: {
+            borderRadius: 4,
+            barThickness: 'flex',
+            maxBarThickness: 42
+          }
+        }
       };
       if (chart) chart.destroy();
-      chart = new Chart(ctx, { type: 'bar', data, options });
+      chart = new Chart(ctx, {
+        type: 'bar',
+        data,
+        options
+      });
     }
 
     renderChart();
     const btnU = document.getElementById('btnUnidades'),
-          btnV = document.getElementById('btnVentas');
+      btnV = document.getElementById('btnVentas');
     btnU.addEventListener('click', () => {
       currentMetric = 'unidades';
       btnU.className = 'btn btn-primary';
@@ -989,7 +1163,10 @@ if ($hoyStr < $inicioSemana) {
        Abreviar montos (tablas)
     =========================== */
     (function() {
-      const nf = new Intl.NumberFormat('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      const nf = new Intl.NumberFormat('es-MX', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+      });
 
       function abbr(n) {
         const abs = Math.abs(n);
@@ -1018,7 +1195,10 @@ if ($hoyStr < $inicioSemana) {
       function prepOverflow(el, setVisible) {
         const affected = [];
         el.querySelectorAll('.table-responsive, .table-responsive-sm, .table-responsive-md, .table-responsive-lg').forEach(div => {
-          affected.push({node: div, prev: div.style.overflow});
+          affected.push({
+            node: div,
+            prev: div.style.overflow
+          });
           if (setVisible) div.style.overflow = 'visible';
         });
         return affected;
@@ -1054,7 +1234,10 @@ if ($hoyStr < $inicioSemana) {
         el.scrollTop = prev.scrollTop;
         el.scrollLeft = prev.scrollLeft;
         el.style.boxShadow = prev.boxShadow;
-        overflowFixes.forEach(({node, prev}) => node.style.overflow = prev);
+        overflowFixes.forEach(({
+          node,
+          prev
+        }) => node.style.overflow = prev);
 
         // descargar
         const link = document.createElement('a');
@@ -1074,6 +1257,31 @@ if ($hoyStr < $inicioSemana) {
       if (btnSu) btnSu.addEventListener('click', () =>
         snapCard('card_sucursales', `ranking_sucursales_${rango}.png`)
       );
+    })();
+
+    /* ===========================
+       Switch de DELTAS (por card)
+       - default: OFF (oculto)
+    =========================== */
+    (function() {
+      const swEj = document.getElementById('swDeltaEj');
+      const cardEj = document.getElementById('card_ejecutivos');
+      if (swEj && cardEj) {
+        swEj.checked = false; // default OFF
+        cardEj.classList.add('hide-delta'); // oculto al inicio
+        swEj.addEventListener('change', () => {
+          cardEj.classList.toggle('hide-delta', !swEj.checked);
+        });
+      }
+      const swSu = document.getElementById('swDeltaSuc');
+      const cardSu = document.getElementById('card_sucursales');
+      if (swSu && cardSu) {
+        swSu.checked = false; // default OFF
+        cardSu.classList.add('hide-delta'); // oculto al inicio
+        swSu.addEventListener('change', () => {
+          cardSu.classList.toggle('hide-delta', !swSu.checked);
+        });
+      }
     })();
   </script>
 </body>
