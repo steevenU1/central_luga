@@ -6,6 +6,20 @@ require_once __DIR__ . '/db.php';
 if (file_exists(__DIR__ . '/navbar.php')) require_once __DIR__ . '/navbar.php';
 
 /* =======================
+   Helpers
+======================= */
+/** Quita prefijo "LUGA" al inicio del nombre, tolerando espacios y separadores comunes */
+if (!function_exists('nombreCortoSucursal')) {
+  function nombreCortoSucursal(string $nom): string {
+    $n = trim($nom);
+    // LUGA + opcional separador (espacio, guion, dos puntos, etc.)
+    $n = preg_replace('/^\s*LUGA[\s\-\:_]*/i', '', $n);
+    return $n === '' ? $nom : $n;
+  }
+}
+function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
+
+/* =======================
    Filtros (GET)
 ======================= */
 $fSucursal  = isset($_GET['sucursal'])  ? (int)$_GET['sucursal'] : 0;   // 0 = Todas
@@ -25,7 +39,7 @@ $rs = $conn->query("
   ORDER BY nombre
 ");
 while($r = $rs->fetch_assoc()){
-  $catSuc[(int)$r['id']] = $r['nombre'];
+  $catSuc[(int)$r['id']] = nombreCortoSucursal($r['nombre']); // << quita prefijo LUGA
 }
 
 /* Marcas/Modelos/Capacidades existentes con filtros base */
@@ -101,7 +115,7 @@ while($r = $res->fetch_assoc()){
   $rows[$key]['sucs'][$sid] = ($rows[$key]['sucs'][$sid] ?? 0) + $qty;
   $rows[$key]['total']     += $qty;
 
-  $sucSet[$sid] = $r['sucursal'];
+  $sucSet[$sid] = nombreCortoSucursal($r['sucursal']); // << quita prefijo LUGA
 }
 
 /* Sucursales para columnas (solo si se pide verSuc=1) */
@@ -115,11 +129,15 @@ if ($verSuc) {
   asort($useSuc, SORT_NATURAL | SORT_FLAG_CASE);
 }
 
-/* Orden filas por marca->modelo->capacidad */
-uksort($rows, function($a,$b){
-  [$ma,$mo,$ca]   = explode('|',$a,3);
-  [$mb,$mob,$cb]  = explode('|',$b,3);
-  return strnatcasecmp($ma,$mb) ?: strnatcasecmp($mo,$mob) ?: strnatcasecmp($ca,$cb);
+/* ===== ORDEN FILAS POR TOTAL DESC (y luego marca→modelo→capacidad) ===== */
+uasort($rows, function($A,$B){
+  $byTotal = $B['total'] <=> $A['total']; // desc
+  if ($byTotal !== 0) return $byTotal;
+  $c = strnatcasecmp($A['marca'],$B['marca']);
+  if ($c !== 0) return $c;
+  $c = strnatcasecmp($A['modelo'],$B['modelo']);
+  if ($c !== 0) return $c;
+  return strnatcasecmp($A['capacidad'],$B['capacidad']);
 });
 
 /* Totales por columna y gran total */
@@ -138,8 +156,6 @@ foreach ($rows as $row) {
 }
 
 $colspan = 3 + ($verSuc ? max(1, count($useSuc)) : 0) + 1;
-
-function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 ?>
 <!doctype html>
 <html lang="es">
@@ -343,7 +359,7 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
               <?php if ($verSuc): ?>
                 <?php if (empty($useSuc)): ?>
                   <td class="num">0</td>
-                <?php else: foreach($useSuc as $sid=>$sNom): 
+                <?php else: foreach($useSuc as $sid=>$sNom):
                         $q = $row['sucs'][$sid] ?? 0; ?>
                   <td class="num"><?= $q ?: '0' ?></td>
                 <?php endforeach; endif; ?>
