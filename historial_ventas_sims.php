@@ -8,7 +8,7 @@ if (!isset($_SESSION['id_usuario'])) {
 include 'db.php';
 
 /* ========================
-   FUNCIONES AUXILIARES
+   HELPERS
 ======================== */
 function hasColumn(mysqli $conn, string $table, string $column): bool {
     $tableEsc  = $conn->real_escape_string($table);
@@ -28,8 +28,8 @@ function hasColumn(mysqli $conn, string $table, string $column): bool {
 function obtenerSemanaPorIndice($offset = 0) {
     // Semana martes-lunes
     $hoy = new DateTime();
-    $diaSemana = $hoy->format('N'); // 1=lunes ... 7=domingo
-    $dif = $diaSemana - 2;          // martes=2
+    $diaSemana = (int)$hoy->format('N'); // 1=lunes ... 7=domingo
+    $dif = $diaSemana - 2;               // martes=2
     if ($dif < 0) $dif += 7;
 
     $inicio = new DateTime();
@@ -46,8 +46,28 @@ function obtenerSemanaPorIndice($offset = 0) {
 }
 function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 
+function mesOptionsHtml($mesSel){
+    $meses = [1=>'Enero',2=>'Febrero',3=>'Marzo',4=>'Abril',5=>'Mayo',6=>'Junio',7=>'Julio',8=>'Agosto',9=>'Septiembre',10=>'Octubre',11=>'Noviembre',12=>'Diciembre'];
+    $html = '';
+    foreach($meses as $k=>$v){
+        $sel = ($k == $mesSel) ? 'selected' : '';
+        $html .= "<option value=\"$k\" $sel>$v</option>";
+    }
+    return $html;
+}
+function anioOptionsHtml($anioSel, $rango = 6){
+    $min = $anioSel - $rango;
+    $max = $anioSel + $rango;
+    $html = '';
+    for($a=$max;$a>=$min;$a--){
+        $sel = ($a == $anioSel) ? 'selected' : '';
+        $html .= "<option value=\"$a\" $sel>$a</option>";
+    }
+    return $html;
+}
+
 /* ========================
-   FILTROS
+   FILTROS BASE (SEMANA)
 ======================== */
 $semanaSeleccionada = isset($_GET['semana']) ? (int)$_GET['semana'] : 0;
 list($inicioSemanaObj, $finSemanaObj) = obtenerSemanaPorIndice($semanaSeleccionada);
@@ -57,45 +77,50 @@ $finSemana    = $finSemanaObj->format('Y-m-d');
 $id_sucursal = (int)($_SESSION['id_sucursal'] ?? 0);
 $rol         = $_SESSION['rol'] ?? 'Ejecutivo';
 
+date_default_timezone_set('America/Mexico_City');
+$mesDefault  = isset($_GET['mes'])  ? (int)$_GET['mes']  : (int)date('n');
+$anioDefault = isset($_GET['anio']) ? (int)$_GET['anio'] : (int)date('Y');
+
 /* =========================================================
-   Usuarios para filtro:
+   Filtro de USUARIOS para el <select>:
    - SIEMPRE activos de la sucursal
    - INACTIVOS solo si tuvieron ventas en la semana seleccionada
    Compat: activo / estatus / fecha_baja
 ========================================================= */
-$activosExpr = '';
+$activeExprs = [];
 if (hasColumn($conn, 'usuarios', 'activo')) {
-    $activosExpr = "u.activo = 1";
-} elseif (hasColumn($conn, 'usuarios', 'estatus')) {
-    $activosExpr = "LOWER(u.estatus) IN ('activo','activa','alta')";
-} elseif (hasColumn($conn, 'usuarios', 'fecha_baja')) {
-    $activosExpr = "(u.fecha_baja IS NULL OR u.fecha_baja='0000-00-00')";
+    $activeExprs[] = 'u.activo = 1';
 }
-
-$existsVentasSemana = "EXISTS (
-    SELECT 1
-    FROM ventas_sims vs
-    WHERE vs.id_usuario = u.id
-      AND DATE(vs.fecha_venta) BETWEEN ? AND ?
-)";
-
-$esInactivoCase = $activosExpr
-    ? "CASE WHEN {$activosExpr} THEN 0 ELSE 1 END"
-    : "CASE WHEN {$existsVentasSemana} THEN 1 ELSE 0 END";
+if (hasColumn($conn, 'usuarios', 'estatus')) {
+    $activeExprs[] = "LOWER(u.estatus) IN ('activo','activa','alta')";
+}
+if (hasColumn($conn, 'usuarios', 'fecha_baja')) {
+    $activeExprs[] = "(u.fecha_baja IS NULL OR u.fecha_baja='0000-00-00')";
+}
+$activeExprSql = !empty($activeExprs) ? '(' . implode(' OR ', $activeExprs) . ')' : '1=1';
 
 $sqlUsuarios = "
-    SELECT u.id, u.nombre,
-           {$esInactivoCase} AS es_inactivo
+    SELECT 
+        u.id, 
+        u.nombre,
+        CASE 
+          WHEN {$activeExprSql} THEN 0 
+          ELSE 1 
+        END AS es_inactivo
     FROM usuarios u
+    /* cuenta ventas en la semana para decidir si mostrar inactivos con ventas */
+    LEFT JOIN (
+        SELECT id_usuario, COUNT(*) AS cnt
+        FROM ventas_sims
+        WHERE DATE(fecha_venta) BETWEEN ? AND ?
+        GROUP BY id_usuario
+    ) vsw ON vsw.id_usuario = u.id
     WHERE u.id_sucursal = ?
-      AND (
-            " . ($activosExpr ? "{$activosExpr} OR " : "") . "
-            {$existsVentasSemana}
-          )
+      AND ( {$activeExprSql} OR vsw.cnt > 0 )
     ORDER BY es_inactivo ASC, u.nombre ASC
 ";
 $stmtUsuarios = $conn->prepare($sqlUsuarios);
-$stmtUsuarios->bind_param("iss", $id_sucursal, $inicioSemana, $finSemana);
+$stmtUsuarios->bind_param("ssi", $inicioSemana, $finSemana, $id_sucursal);
 $stmtUsuarios->execute();
 $resUsuarios = $stmtUsuarios->get_result();
 $usuariosActivos = [];
@@ -106,7 +131,7 @@ while ($row = $resUsuarios->fetch_assoc()) {
 $stmtUsuarios->close();
 
 /* ========================
-   WHERE base
+   WHERE base ventas
 ======================== */
 $where  = " WHERE DATE(vs.fecha_venta) BETWEEN ? AND ?";
 $params = [$inicioSemana, $finSemana];
@@ -225,7 +250,6 @@ foreach ($ventas as $v) {
     .chip{ display:inline-flex; align-items:center; gap:.4rem; padding:.25rem .6rem; border-radius:999px; font-weight:600; font-size:.85rem; border:1px solid transparent; }
     .chip-info{ background:#e8f0fe; color:#1a56db; border-color:#cbd8ff; }
     .chip-success{ background:#e7f8ef; color:#0f7a3d; border-color:#b7f1cf; }
-    .chip-warn{ background:#fff6e6; color:#9a6200; border-color:#ffe1a8; }
     .chip-purple{ background:#f3e8ff; color:#6d28d9; border-color:#e9d5ff; }
     .filters .form-control, .filters .form-select{ height:42px; }
     .btn-soft{ border:1px solid rgba(0,0,0,.08); background:#fff; }
@@ -372,18 +396,43 @@ foreach ($ventas as $v) {
       </div>
     </div>
 
-    <div class="mt-3 d-flex justify-content-end gap-2">
+    <div class="mt-3 d-flex justify-content-end gap-2 flex-wrap">
+      <!-- Controles de export mensual (no afectan la vista semanal) -->
+      <div class="d-flex align-items-center gap-2 me-auto">
+        <label class="small-muted mb-0">Mes/Año para export mensual:</label>
+        <select name="mes" class="form-select form-select-sm" style="width:auto;">
+          <?= mesOptionsHtml($mesDefault) ?>
+        </select>
+        <select name="anio" class="form-select form-select-sm" style="width:auto;">
+          <?= anioOptionsHtml($anioDefault, 6) ?>
+        </select>
+      </div>
+
       <button class="btn btn-primary"><i class="bi bi-funnel"></i> Filtrar</button>
       <a href="historial_ventas_sims.php" class="btn btn-secondary">Limpiar</a>
+
+      <!-- Exportar SEMANAL -->
       <button
         type="submit"
         class="btn btn-success"
         formaction="exportar_excel_sims.php"
         formmethod="GET"
         formtarget="_blank"
-        title="Exporta con los filtros actuales"
+        title="Exporta SEMANAL con los filtros actuales"
       >
-        <i class="bi bi-file-earmark-excel"></i> Exportar a Excel
+        <i class="bi bi-file-earmark-excel"></i> Exportar Semanal
+      </button>
+
+      <!-- Exportar MENSUAL -->
+      <button
+        type="submit"
+        class="btn btn-outline-success"
+        formaction="exportar_excel_sims_mensual.php"
+        formmethod="GET"
+        formtarget="_blank"
+        title="Exporta MENSUAL (usa Mes/Año + filtros actuales)"
+      >
+        <i class="bi bi-file-earmark-spreadsheet"></i> Exportar Mensual
       </button>
     </div>
   </form>
@@ -487,6 +536,7 @@ foreach ($ventas as $v) {
   </div>
 </div>
 
+<!-- Bootstrap JS activado para el modal -->
 <!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script> -->
 <script>
 // Modal: setear id_venta
