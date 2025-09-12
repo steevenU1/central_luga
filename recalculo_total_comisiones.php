@@ -8,6 +8,11 @@ if (!isset($_SESSION['id_usuario']) || !in_array($_SESSION['rol'], ['Admin', 'RH
 include 'db.php';
 
 /* ========================
+   Constantes (blindaje)
+======================== */
+const GERENTE_COMISION_REGULAR_FIJA = 25.0;
+
+/* ========================
    FUNCIONES AUXILIARES
 ======================== */
 function obtenerSemanaPorIndice($offset = 0)
@@ -289,7 +294,7 @@ while ($u = $resUsuarios->fetch_assoc()) {
 
             // Comisión especial:
             // - Gerente: se respeta lo capturado
-            // - Ejecutivo: se pone 0 si no cumple su cuota personal
+            // - Ejecutivo: 0 si no cumple su cuota personal
             $comEsp = $esGerente ? $espOriginal : ($cumpleCuotaEjecutivo ? $espOriginal : 0.0);
             if ($comEsp !== $espOriginal) {
                 $stmtUpdEsp = $conn->prepare("UPDATE detalle_venta SET comision_especial=? WHERE id=?");
@@ -299,20 +304,22 @@ while ($u = $resUsuarios->fetch_assoc()) {
             }
 
             // Comisión REGULAR:
-            if ($esCombo) {
-                // Combo SIEMPRE 75
-                $comReg = 75.0;
-            } else if ($esGerente) {
-                // Gerente: 75 → 150 si TIENDA cumple cuota
-                $comReg = $cumpleTiendaGerente ? 150.0 : 75.0;
+            if ($esGerente) {
+                // 🔒 Blindado: gerente venta directa SIEMPRE $25 por renglón (principal y combo)
+                $comReg = GERENTE_COMISION_REGULAR_FIJA;
             } else {
-                // Ejecutivo: por tramo / MiFi 50-100 según su cuota personal
-                $comReg = comisionEjecutivoEquipo(
-                    (float)$det['precio_unitario'],
-                    $det['tipo_producto'],
-                    $cumpleCuotaEjecutivo,
-                    $esqEje
-                );
+                // Ejecutivo
+                if ($esCombo) {
+                    // Combo del ejecutivo SIEMPRE 75
+                    $comReg = 75.0;
+                } else {
+                    $comReg = comisionEjecutivoEquipo(
+                        (float)$det['precio_unitario'],
+                        $det['tipo_producto'],
+                        $cumpleCuotaEjecutivo,
+                        $esqEje
+                    );
+                }
             }
 
             $comTot = $comReg + $comEsp;

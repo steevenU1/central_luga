@@ -11,6 +11,11 @@ if (!isset($_SESSION['id_usuario'])) {
 require_once __DIR__ . '/db.php';
 
 /* ========================
+   Config / Constantes
+======================== */
+const GERENTE_COMISION_REGULAR_CAPTURA = 25.0;
+
+/* ========================
    Helpers
 ======================== */
 
@@ -74,7 +79,7 @@ function esMiFiModem(array $row): bool {
 /**
  * Comisión regular en CAPTURA (no aplica cuota aquí)
  * Reglas LUGA:
- * - Gerente vendiendo: SIEMPRE 75 por renglón (principal y combo)
+ * - Gerente vendiendo: SIEMPRE 25 por renglón (principal y combo)
  * - Ejecutivo Financiamiento+Combo:
  *     principal → por tramo precio_lista (salvo MiFi/Módem)
  *     combo     → 75 fijo
@@ -88,9 +93,9 @@ function calcularComisionRegularCaptura(
   float  $precioLista,
   bool   $esMiFi = false
 ): float {
-  // Gerente vendiendo: 75 por renglón en captura (principal y combo)
+  // Gerente vendiendo: 25 por renglón en captura (principal y combo)
   if ($rolVendedor === 'Gerente') {
-    return 75.0;
+    return GERENTE_COMISION_REGULAR_CAPTURA;
   }
 
   // Ejecutivo: Financiamiento + Combo
@@ -110,7 +115,7 @@ function obtenerComisionEspecial(int $id_producto, mysqli $conn): float {
   $hoy = date('Y-m-d');
 
   $stmt = $conn->prepare("
-    SELECT marca, modelo, capacidad, $GLOBALS[colTipoProd] AS tipo_raw,
+    SELECT marca, modelo, capacidad, ".$GLOBALS['colTipoProd']." AS tipo_raw,
            nombre_comercial, subtipo, descripcion
     FROM productos WHERE id=?
   ");
@@ -191,10 +196,16 @@ function venderEquipo(
   if (!$row) { throw new RuntimeException("Equipo $id_inventario no disponible."); }
 
   $precioL = (float)$row['precio_lista'];
-  $esMiFi  = esMiFiModem($row);  // <<< detección robusta
+  $esMiFi  = esMiFiModem($row);  // detección robusta
 
   // === lógica de captura (SIN cuota) ===
   $comReg = calcularComisionRegularCaptura($rolVendedor, $tipoVenta, $esCombo, $precioL, $esMiFi);
+
+  // Fallback defensivo: si es Gerente, fuerzo $25 aunque algo cambiara arriba
+  if ($rolVendedor === 'Gerente' && (float)$comReg !== GERENTE_COMISION_REGULAR_CAPTURA) {
+    $comReg = GERENTE_COMISION_REGULAR_CAPTURA;
+  }
+
   $comEsp = obtenerComisionEspecial((int)$row['id_producto'], $conn);
   $comTot = (float)$comReg + (float)$comEsp;
 
