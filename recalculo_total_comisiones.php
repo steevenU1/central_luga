@@ -27,7 +27,7 @@ function obtenerSemanaPorIndice($offset = 0)
     return [$inicio, $fin];
 }
 
-/* Detección de columna de tipo de producto (tipo vs tipo_producto) */
+/* Detección de columna (tipo vs tipo_producto; es_combo en detalle) */
 function hasColumn(mysqli $conn, string $table, string $column): bool {
     $t = $conn->real_escape_string($table);
     $c = $conn->real_escape_string($column);
@@ -35,7 +35,8 @@ function hasColumn(mysqli $conn, string $table, string $column): bool {
     if ($rs = $conn->query($sql)) { $ok = $rs->num_rows > 0; $rs->close(); return $ok; }
     return false;
 }
-$colTipoProd = hasColumn($conn, 'productos', 'tipo') ? 'tipo' : 'tipo_producto';
+$colTipoProd    = hasColumn($conn, 'productos', 'tipo') ? 'tipo' : 'tipo_producto';
+$tieneEsComboDV = hasColumn($conn, 'detalle_venta', 'es_combo');
 
 $semanaSeleccionada = isset($_GET['semana']) ? (int)$_GET['semana'] : 0;
 list($inicioSemanaObj, $finSemanaObj) = obtenerSemanaPorIndice($semanaSeleccionada);
@@ -123,12 +124,25 @@ function comisionPospagoGerente(mysqli $conn, float $planMonto, string $modalida
     return (float)($con ? $row['comision_con_equipo'] : $row['comision_sin_equipo']);
 }
 
+/* === POSPAGO EJECUTIVO === */
+function comisionPospagoEjecutivo(mysqli $conn, float $planMonto, string $modalidad): float
+{
+    $sql = "SELECT comision_con_equipo, comision_sin_equipo
+            FROM esquemas_comisiones_pospago
+            WHERE tipo='Ejecutivo' AND plan_monto=?
+            ORDER BY fecha_inicio DESC LIMIT 1";
+    $stmt = $conn->prepare($sql);
+    $stmt->bind_param("d", $planMonto);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    if (!$row) return 0.0;
+    $con = (stripos($modalidad, 'con') !== false); // 'Con equipo' vs 'Sin equipo'
+    return (float)($con ? $row['comision_con_equipo'] : $row['comision_sin_equipo']);
+}
+
 /* ============================================================
-   SUBCONSULTA BASE: Unidades/Monto POR VENTA en la semana
-   *** Alineada con dashboards ***
-   - Combos => 2 unidades
-   - Si la venta tiene al menos UN producto que NO es módem/MiFi => 1 unidad y monto = v.precio_venta
-   - Si la venta es SOLO módem/MiFi => 0 unidades y monto = 0
+   SUBCONSULTA BASE (alineada con dashboards)
 ============================================================ */
 $subVentasAggSemana = "
   SELECT
@@ -210,7 +224,38 @@ while ($u = $resUsuarios->fetch_assoc()) {
 
     $cumpleCuotaEjecutivo = $unidades >= $cuota;
 
-    /* ===== 2) Recalcular EJECUTIVO: EQUIPOS ===== */
+    /* ===== 1-bis) Cumplimiento de TIENDA si el usuario es GERENTE ===== */
+    $esGerente = ($rol === 'Gerente');
+    $cumpleTiendaGerente = false;
+    if ($esGerente) {
+        // Cuota en pesos de la sucursal
+        $stmtQ = $conn->prepare("
+          SELECT cuota_monto
+          FROM cuotas_sucursales
+          WHERE id_sucursal=? AND fecha_inicio <= ?
+          ORDER BY fecha_inicio DESC
+          LIMIT 1
+        ");
+        $stmtQ->bind_param("is", $id_sucursal, $inicioSemana);
+        $stmtQ->execute();
+        $cuotaMonto = (float)($stmtQ->get_result()->fetch_assoc()['cuota_monto'] ?? 0);
+        $stmtQ->close();
+
+        // Monto semanal sucursal (excluye ventas solo módem/MiFi)
+        $stmtMS = $conn->prepare("
+          SELECT IFNULL(SUM(va.monto),0) AS monto
+          FROM ( $subVentasAggSemana ) va
+          WHERE va.id_sucursal=?
+        ");
+        $stmtMS->bind_param("ssi", $inicioSemana, $finSemana, $id_sucursal);
+        $stmtMS->execute();
+        $montoSuc = (float)($stmtMS->get_result()->fetch_assoc()['monto'] ?? 0);
+        $stmtMS->close();
+
+        $cumpleTiendaGerente = $cuotaMonto > 0 ? ($montoSuc >= $cuotaMonto) : false;
+    }
+
+    /* ===== 2) Recalcular EQUIPOS (rol-aware) ===== */
     $sqlVentas = "SELECT id FROM ventas WHERE id_usuario=? AND fecha_venta BETWEEN ? AND ?";
     $stmtV = $conn->prepare($sqlVentas);
     $stmtV->bind_param("iss", $id_usuario, $inicioSemana, $finSemana);
@@ -222,8 +267,13 @@ while ($u = $resUsuarios->fetch_assoc()) {
         $totalVenta = 0.0;
         $totalVentaEspecial = 0.0;
 
+        // Traemos es_combo si existe; si no, 0 AS es_combo
         $sqlDV = "
-            SELECT dv.id, dv.precio_unitario, dv.comision_especial, p.$colTipoProd AS tipo_producto
+            SELECT dv.id,
+                   dv.precio_unitario,
+                   dv.comision_especial,
+                   p.$colTipoProd AS tipo_producto" .
+                   ($tieneEsComboDV ? ", dv.es_combo" : ", 0 AS es_combo") . "
             FROM detalle_venta dv
             INNER JOIN productos p ON dv.id_producto=p.id
             WHERE dv.id_venta=?
@@ -235,9 +285,12 @@ while ($u = $resUsuarios->fetch_assoc()) {
 
         while ($det = $detalles->fetch_assoc()) {
             $espOriginal = (float)$det['comision_especial'];
-            // 🔸 Si NO cumple cuota, no se paga comision especial
-            $comEsp = $cumpleCuotaEjecutivo ? $espOriginal : 0.0;
+            $esCombo     = (int)($det['es_combo'] ?? 0) === 1;
 
+            // Comisión especial:
+            // - Gerente: se respeta lo capturado
+            // - Ejecutivo: se pone 0 si no cumple su cuota personal
+            $comEsp = $esGerente ? $espOriginal : ($cumpleCuotaEjecutivo ? $espOriginal : 0.0);
             if ($comEsp !== $espOriginal) {
                 $stmtUpdEsp = $conn->prepare("UPDATE detalle_venta SET comision_especial=? WHERE id=?");
                 $stmtUpdEsp->bind_param("di", $comEsp, $det['id']);
@@ -245,7 +298,23 @@ while ($u = $resUsuarios->fetch_assoc()) {
                 $stmtUpdEsp->close();
             }
 
-            $comReg = comisionEjecutivoEquipo((float)$det['precio_unitario'], $det['tipo_producto'], $cumpleCuotaEjecutivo, $esqEje);
+            // Comisión REGULAR:
+            if ($esCombo) {
+                // Combo SIEMPRE 75
+                $comReg = 75.0;
+            } else if ($esGerente) {
+                // Gerente: 75 → 150 si TIENDA cumple cuota
+                $comReg = $cumpleTiendaGerente ? 150.0 : 75.0;
+            } else {
+                // Ejecutivo: por tramo / MiFi 50-100 según su cuota personal
+                $comReg = comisionEjecutivoEquipo(
+                    (float)$det['precio_unitario'],
+                    $det['tipo_producto'],
+                    $cumpleCuotaEjecutivo,
+                    $esqEje
+                );
+            }
+
             $comTot = $comReg + $comEsp;
 
             $stmtUpdDV = $conn->prepare("UPDATE detalle_venta SET comision_regular=?, comision=? WHERE id=?");
@@ -265,7 +334,7 @@ while ($u = $resUsuarios->fetch_assoc()) {
     }
     $stmtV->close();
 
-    /* ===== 3) Recalcular EJECUTIVO: PREPAGO (POSPAGO intacto) ===== */
+    /* ===== 3) Recalcular EJECUTIVO: PREPAGO ===== */
     $sqlPrepago = "
         SELECT vs.id, vs.tipo_venta, vs.tipo_sim
         FROM ventas_sims vs
@@ -288,36 +357,29 @@ while ($u = $resUsuarios->fetch_assoc()) {
     }
     $stmtPrep->close();
 
+    /* ===== 3-bis) Recalcular EJECUTIVO: POSPAGO ===== */
+    $sqlPosE = "
+        SELECT id, precio_total, modalidad
+        FROM ventas_sims
+        WHERE id_usuario=? AND fecha_venta BETWEEN ? AND ?
+          AND tipo_venta='Pospago'
+    ";
+    $stmtPE = $conn->prepare($sqlPosE);
+    $stmtPE->bind_param("iss", $id_usuario, $inicioSemana, $finSemana);
+    $stmtPE->execute();
+    $resPE = $stmtPE->get_result();
+    while ($r = $resPE->fetch_assoc()) {
+        $comE = comisionPospagoEjecutivo($conn, (float)$r['precio_total'], $r['modalidad']);
+        $stmt = $conn->prepare("UPDATE ventas_sims SET comision_ejecutivo=? WHERE id=?");
+        $stmt->bind_param("di", $comE, $r['id']);
+        $stmt->execute();
+        $stmt->close();
+    }
+    $stmtPE->close();
+
     /* ===== 4) Recalcular GERENTE: por SUCURSAL ===== */
-    if ($rol === 'Gerente') {
-        /* 4.1 Cumplimiento de TIENDA (monto semanal sucursal) 
-           → Alineado al dashboard: suma de MONTO de subconsulta (excluye ventas solo módem/MiFi) */
-        $sqlCuotaPesos = "
-          SELECT cuota_monto
-          FROM cuotas_sucursales
-          WHERE id_sucursal=? AND fecha_inicio <= ?
-          ORDER BY fecha_inicio DESC
-          LIMIT 1
-        ";
-        $stmtQ = $conn->prepare($sqlCuotaPesos);
-        $stmtQ->bind_param("is", $id_sucursal, $inicioSemana);
-        $stmtQ->execute();
-        $cuotaMonto = (float)($stmtQ->get_result()->fetch_assoc()['cuota_monto'] ?? 0);
-        $stmtQ->close();
-
-        $stmtMS = $conn->prepare("
-          SELECT IFNULL(SUM(va.monto),0) AS monto
-          FROM ( $subVentasAggSemana ) va
-          WHERE va.id_sucursal=?
-        ");
-        $stmtMS->bind_param("ssi", $inicioSemana, $finSemana, $id_sucursal);
-        $stmtMS->execute();
-        $montoSuc = (float)($stmtMS->get_result()->fetch_assoc()['monto'] ?? 0);
-        $stmtMS->close();
-
-        $cumpleTienda = $cuotaMonto > 0 ? ($montoSuc >= $cuotaMonto) : false;
-
-        /* 4.2 Reset semana (idempotente) */
+    if ($esGerente) {
+        // 4.2 Reset semana
         $stmt = $conn->prepare("UPDATE ventas SET comision_gerente=0 WHERE id_sucursal=? AND fecha_venta BETWEEN ? AND ?");
         $stmt->bind_param("iss", $id_sucursal, $inicioSemana, $finSemana);
         $stmt->execute();
@@ -328,7 +390,7 @@ while ($u = $resUsuarios->fetch_assoc()) {
         $stmt->execute();
         $stmt->close();
 
-        /* 4.3 Venta DIRECTA del gerente (POR VENTA) */
+        // 4.3 Venta DIRECTA gerente (por venta)
         $sqlVD = "
             SELECT va.id AS id_venta, va.unidades
             FROM ( $subVentasAggSemana ) va
@@ -339,7 +401,7 @@ while ($u = $resUsuarios->fetch_assoc()) {
         $stmtVD->execute();
         $resVD = $stmtVD->get_result();
 
-        $pagoVD = gerenteVentaDirectaMonto($cumpleTienda, $esqGer);
+        $pagoVD = gerenteVentaDirectaMonto($cumpleTiendaGerente, $esqGer);
         while ($r = $resVD->fetch_assoc()) {
             $monto = $pagoVD * (int)$r['unidades'];
             $stmt = $conn->prepare("UPDATE ventas SET comision_gerente = comision_gerente + ? WHERE id=?");
@@ -349,7 +411,7 @@ while ($u = $resUsuarios->fetch_assoc()) {
         }
         $stmtVD->close();
 
-        /* 4.4 Ventas de SUCURSAL (ESCALONADOS) — POR VENTA agregada */
+        // 4.4 Escalonados sucursal
         $sqlEq = "
             SELECT va.id AS id_venta, va.unidades, va.fecha
             FROM ( $subVentasAggSemana ) va
@@ -361,7 +423,7 @@ while ($u = $resUsuarios->fetch_assoc()) {
         $stmtEq->execute();
         $resEq = $stmtEq->get_result();
 
-        $porVenta = []; // venta_id => monto a sumar
+        $porVenta = [];
         $idx = 0;
         while ($row = $resEq->fetch_assoc()) {
             $n = (int)$row['unidades'];
@@ -369,7 +431,7 @@ while ($u = $resUsuarios->fetch_assoc()) {
             $pago = 0.0;
             for ($i = 0; $i < $n; $i++) {
                 $idx++;
-                $pago += gerenteEscalonMonto($idx, $cumpleTienda, $esqGer);
+                $pago += gerenteEscalonMonto($idx, $cumpleTiendaGerente, $esqGer);
             }
             $porVenta[(int)$row['id_venta']] = ($porVenta[(int)$row['id_venta']] ?? 0) + $pago;
         }
@@ -382,7 +444,7 @@ while ($u = $resUsuarios->fetch_assoc()) {
             $stmt->close();
         }
 
-        /* 4.5 Modems/MiFi (toda la sucursal) — por línea */
+        // 4.5 Modems/MiFi — por línea
         $sqlMod = "
             SELECT v.id AS id_venta, COUNT(dv.id) AS unidades
             FROM detalle_venta dv
@@ -396,7 +458,7 @@ while ($u = $resUsuarios->fetch_assoc()) {
         $stmtMod->bind_param("iss", $id_sucursal, $inicioSemana, $finSemana);
         $stmtMod->execute();
         $resMod = $stmtMod->get_result();
-        $pagoMod = gerenteModemMonto($cumpleTienda, $esqGer);
+        $pagoMod = gerenteModemMonto($cumpleTiendaGerente, $esqGer);
         while ($r = $resMod->fetch_assoc()) {
             $monto = $pagoMod * (int)$r['unidades'];
             $stmt = $conn->prepare("UPDATE ventas SET comision_gerente = comision_gerente + ? WHERE id=?");
@@ -406,7 +468,7 @@ while ($u = $resUsuarios->fetch_assoc()) {
         }
         $stmtMod->close();
 
-        /* 4.6 SIMS PREPAGO (Nueva/Porta) — por venta */
+        // 4.6 SIMS PREPAGO
         $sqlSimsG = "
             SELECT id
             FROM ventas_sims
@@ -417,7 +479,7 @@ while ($u = $resUsuarios->fetch_assoc()) {
         $stmtSG->bind_param("iss", $id_sucursal, $inicioSemana, $finSemana);
         $stmtSG->execute();
         $resSG = $stmtSG->get_result();
-        $pagoSim = gerenteSimMonto($cumpleTienda, $esqGer);
+        $pagoSim = gerenteSimMonto($cumpleTiendaGerente, $esqGer);
         while ($r = $resSG->fetch_assoc()) {
             $stmt = $conn->prepare("UPDATE ventas_sims SET comision_gerente=? WHERE id=?");
             $stmt->bind_param("di", $pagoSim, $r['id']);
@@ -426,7 +488,7 @@ while ($u = $resUsuarios->fetch_assoc()) {
         }
         $stmtSG->close();
 
-        /* 4.7 POSPAGO (planes) — por venta, esquema de gerente */
+        // 4.7 POSPAGO
         $sqlPosG = "
             SELECT id, precio_total, modalidad
             FROM ventas_sims
