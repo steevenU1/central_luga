@@ -177,6 +177,7 @@ if (!empty($_GET['buscar'])) {
 /* ========================
    CONSULTA HISTORIAL
    (LEFT JOIN para incluir eSIM)
+   🔧 Cambios: traemos i.operador como operador_inv
 ======================== */
 $sqlVentas = "
     SELECT
@@ -191,15 +192,16 @@ $sqlVentas = "
         vs.id_usuario,
         vs.nombre_cliente,          -- cliente (nullable)
         vs.es_esim,                 -- eSIM?
-        vs.tipo_sim,                -- Operador
+        vs.tipo_sim,                -- Operador guardado en la venta
         u.nombre AS usuario,
         s.nombre AS sucursal,
-        i.iccid
+        i.iccid,
+        i.operador AS operador_inv  -- 👈 operador del inventario (preferente)
     FROM ventas_sims vs
     INNER JOIN usuarios   u ON vs.id_usuario  = u.id
     INNER JOIN sucursales s ON vs.id_sucursal = s.id
-    LEFT JOIN detalle_venta_sims d ON vs.id   = d.id_venta      -- LEFT JOIN (eSIM no tiene detalle)
-    LEFT JOIN inventario_sims    i ON d.id_sim = i.id           -- LEFT JOIN (ICCID puede ser NULL)
+    LEFT JOIN detalle_venta_sims d ON vs.id   = d.id_venta
+    LEFT JOIN inventario_sims    i ON d.id_sim = i.id
     $where
     ORDER BY vs.fecha_venta DESC
 ";
@@ -474,7 +476,10 @@ foreach ($ventas as $v) {
                 $puedeEliminar = (($_SESSION['rol'] ?? '') === 'Admin');
                 $isEsim   = (int)($v['es_esim'] ?? 0) === 1;
                 $tipoIcon = $isEsim ? 'bi-sim' : 'bi-sim-fill';
-                $operador = trim((string)($v['tipo_sim'] ?? ''));
+                // ✅ Preferimos operador del inventario; si no hay, usamos el guardado en la venta
+                $operadorInv = trim((string)($v['operador_inv'] ?? ''));
+                $operadorVs  = trim((string)($v['tipo_sim'] ?? ''));
+                $operador    = $operadorInv !== '' ? $operadorInv : $operadorVs;
               ?>
               <tr>
                 <td><span class="badge text-bg-secondary">#<?= (int)$v['id'] ?></span></td>

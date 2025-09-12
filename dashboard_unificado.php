@@ -57,7 +57,7 @@ function normalizarZona($raw)
 {
   $t = trim((string)$raw);
   if ($t === '') return null;
-  $t = preg_replace('/^(?:\s*Zona\s+)+/i', 'Zona ', $t); // evita "Zona Zona 1"
+  $t = preg_replace('/^(?:\s*Zona\s+)+/i', 'Zona ', $t);
   if (preg_match('/(\d+)/', $t, $m)) return 'Zona ' . (int)$m[1];
   if (preg_match('/^Zona\s+\S+/i', $t)) return preg_replace('/\s+/', ' ', $t);
   return null;
@@ -87,9 +87,6 @@ try {
 
 /* ==========================================================
    Agregado por venta (unidades por VENTA, no por detalle)
-   - Para 'Financiamiento+Combo' = 2 unidades.
-   - Módem/MiFi NO suman unidades NI monto (venta completa se excluye si sólo hay módem/MiFi).
-   - Monto = TOTAL CABECERA (v.precio_venta) sólo si hay al menos un detalle que NO sea módem/MiFi.
 ========================================================== */
 $subVentasAgg = "
   SELECT
@@ -115,7 +112,7 @@ $subVentasAgg = "
     FROM detalle_venta dv
     LEFT JOIN productos p ON p.id = dv.id_producto
     GROUP BY dv.id_venta
-  ) d ON d.id_venta = v.id  -- ✅ fix: aquí iba el error
+  ) d ON d.id_venta = v.id
   WHERE DATE(CONVERT_TZ(v.fecha_venta,'+00:00','-06:00')) BETWEEN ? AND ?
   GROUP BY v.id
 ";
@@ -189,7 +186,7 @@ while ($r = $resSS->fetch_assoc()) {
 $stSS->close();
 
 /* ==============================
-   Ejecutivos (cuota por sucursal/semana)
+   Ejecutivos
 ================================= */
 $sqlEjecutivos = "
   SELECT 
@@ -272,7 +269,7 @@ foreach ($rankingEjecutivos as &$r) {
 unset($r);
 
 /* ==============================
-   Sucursales (monto vs cuota $) — con SIMs
+   Sucursales (con SIMs)
 ================================= */
 $sqlSucursales = "
   SELECT
@@ -324,7 +321,7 @@ while ($row = $resSucursales->fetch_assoc()) {
 $porcentajeGlobal = $totalCuotaGlobal > 0 ? ($totalVentasGlobal / $totalCuotaGlobal) * 100 : 0;
 
 /* ==============================
-   Agrupación por Zonas (NORMALIZADA) — cards
+   Agrupación por Zonas — cards
 ================================= */
 $zonasAgg = [];
 foreach ($sucursales as $s) {
@@ -340,12 +337,11 @@ foreach ($zonasAgg as $k => &$info) {
 }
 unset($info);
 
-/* Cards en ORDEN FIJO */
 $z1 = $zonasAgg['Zona 1'] ?? ['unidades' => 0, 'ventas' => 0.0, 'cuota' => 0.0, 'cumplimiento' => 0.0];
 $z2 = $zonasAgg['Zona 2'] ?? ['unidades' => 0, 'ventas' => 0.0, 'cuota' => 0.0, 'cumplimiento' => 0.0];
 
 /* ==============================
-   Semana anterior (sucursales, por monto)
+   Semana anterior (sucursales)
 ================================= */
 $sqlSucursalesPrev = "
   SELECT
@@ -383,12 +379,12 @@ foreach ($sucursales as &$s) {
 unset($s);
 
 /* ==============================
-   GRÁFICO semanal por sucursal (switch Unidades/Ventas)
+   Gráfica
 ================================= */
 $seriesSucursales = [];
 foreach ($sucursales as $row) {
   $seriesSucursales[] = [
-    'label'    => sucursalCorta($row['sucursal']), // sin prefijo Luga
+    'label'    => sucursalCorta($row['sucursal']),
     'unidades' => (int)$row['unidades'],
     'ventas'   => round((float)$row['total_ventas'], 2),
   ];
@@ -396,9 +392,9 @@ foreach ($sucursales as $row) {
 $TOP_BARS = 15;
 
 /* ==============================
-   AGRUPAR SUCURSALES POR ZONA (para la TABLA)
+   Agrupar Sucursales por Zona (tabla)
 ================================= */
-$gruposZona = []; // 'Zona N' => ['rows'=>[], 'tot'=>...]
+$gruposZona = [];
 foreach ($sucursales as $s) {
   $zonaNorm = normalizarZona($s['zona'] ?? '') ?? 'Sin zona';
   if (!isset($gruposZona[$zonaNorm])) {
@@ -422,23 +418,19 @@ foreach ($gruposZona as &$g) {
 }
 unset($g);
 uksort($gruposZona, function ($za, $zb) use ($gruposZona) {
-  // Convierte 'Zona N' -> N, 'Sin zona' -> muy grande (para que vaya al final)
-  $rank = function($z) {
-    if (preg_match('/zona\s*(\d+)/i', $z, $m)) return (int)$m[1];  // Zona 1, 2, 3...
-    if (stripos($z, 'sin zona') !== false) return PHP_INT_MAX - 1; // último
-    return PHP_INT_MAX; // cualquier otro texto raro, casi al final
+  $rank = function ($z) {
+    if (preg_match('/zona\s*(\d+)/i', $z, $m)) return (int)$m[1];
+    if (stripos($z, 'sin zona') !== false) return PHP_INT_MAX - 1;
+    return PHP_INT_MAX;
   };
   $ra = $rank($za);
   $rb = $rank($zb);
-
-  // Orden principal: número de zona ascendente
   if ($ra !== $rb) return $ra <=> $rb;
-
-  // Desempate (si fueran la misma “zona” textual): por ventas DESC como antes
   return $gruposZona[$zb]['tot']['ventas'] <=> $gruposZona[$za]['tot']['ventas'];
 });
+
 /* ==============================
-   % OBJETIVO HOY (marcador verde discreto)
+   % objetivo hoy
 ================================= */
 $hoyMX = new DateTime('now', new DateTimeZone('America/Mexico_City'));
 $hoyStr = $hoyMX->format('Y-m-d');
@@ -461,195 +453,48 @@ if ($hoyStr < $inicioSemana) {
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css">
   <style>
-    /* recortes de texto */
     .clip {
       max-width: 160px;
       overflow: hidden;
       text-overflow: ellipsis;
-      white-space: nowrap;
+      white-space: nowrap
     }
-
-    .clip-name {
-      max-width: 220px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    .clip-branch {
-      max-width: 200px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    .num {
-      font-variant-numeric: tabular-nums;
-      letter-spacing: -.2px;
-    }
-
-    .col-fit {
-      width: 1%;
-      white-space: nowrap;
-    }
-
-    .trend {
-      font-size: .875rem;
-      white-space: nowrap;
-    }
-
-    .trend .delta {
-      font-weight: 600;
-    }
-
-    .table td:first-child,
-    .table th:first-child {
-      width: auto;
-    }
-
-    #topbar {
-      font-size: 16px;
-    }
-
-    /* Switch mini */
-    .form-switch.form-switch-sm .form-check-input {
-      height: 1rem;
-      width: 2rem;
-      transform: scale(.95);
-    }
-
-    .form-switch.form-switch-sm .form-check-label {
-      font-size: .8rem;
-      margin-left: .25rem;
-    }
-
-    /* Ocultar/mostrar deltas aplicando clase a la card */
-    .hide-delta .trend {
-      display: none !important;
-    }
-
+    .clip-name { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+    .clip-branch { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+    .num { font-variant-numeric: tabular-nums; letter-spacing: -.2px }
+    .col-fit { width: 1%; white-space: nowrap }
+    .trend { font-size: .875rem; white-space: nowrap }
+    .trend .delta { font-weight: 600 }
+    #topbar { font-size: 16px }
+    .form-switch.form-switch-sm .form-check-input { height: 1rem; width: 2rem; transform: scale(.95) }
+    .form-switch.form-switch-sm .form-check-label { font-size: .8rem; margin-left: .25rem }
+    .hide-delta .trend { display: none !important }
     @media (max-width:576px) {
-      body {
-        font-size: 14px;
-      }
-
-      .container {
-        padding-left: 8px;
-        padding-right: 8px;
-      }
-
-      .card .card-header {
-        padding: .5rem .65rem;
-        font-size: .95rem;
-      }
-
-      .card .card-body {
-        padding: .65rem;
-      }
-
-      .table {
-        font-size: 12px;
-        table-layout: auto;
-      }
-
-      .table thead th {
-        font-size: 11px;
-      }
-
-      .table td,
-      .table th {
-        padding: .35rem .45rem;
-      }
-
-      .trend {
-        font-size: .72rem;
-      }
-
-      .clip {
-        max-width: 130px;
-      }
-
-      .clip-name {
-        max-width: 240px;
-      }
-
-      .clip-branch {
-        max-width: 160px;
-      }
+      body { font-size: 14px }
+      .container { padding-left: 8px; padding-right: 8px }
+      .card .card-header { padding: .5rem .65rem; font-size: .95rem }
+      .card .card-body { padding: .65rem }
+      .table { font-size: 12px; table-layout: auto }
+      .table thead th { font-size: 11px }
+      .table td, .table th { padding: .35rem .45rem }
+      .trend { font-size: .72rem }
+      .clip { max-width: 130px }
+      .clip-name { max-width: 240px }
+      .clip-branch { max-width: 160px }
     }
-
     @media (max-width:360px) {
-      .table {
-        font-size: 11px;
-      }
-
-      .table td,
-      .table th {
-        padding: .30rem .40rem;
-      }
-
-      .clip {
-        max-width: 110px;
-      }
-
-      .clip-name {
-        max-width: 200px;
-      }
-
-      .clip-branch {
-        max-width: 140px;
-      }
-
-      .table .progress {
-        width: 100%;
-      }
+      .table { font-size: 11px }
+      .table td, .table th { padding: .30rem .40rem }
+      .clip { max-width: 110px }
+      .clip-name { max-width: 200px }
+      .clip-branch { max-width: 140px }
+      .table .progress { width: 100% }
     }
-
-    /* mini ajuste del botón de descarga */
-    .card-header .btn.btn-sm {
-      padding: .15rem .4rem;
-      line-height: 1;
-    }
-
-    /* ===== Marcador verde discreto en la barra ===== */
-    .progress {
-      position: relative;
-    }
-
-    .progress-target {
-      position: absolute;
-      left: var(--target, 0%);
-      transform: translateX(-50%);
-      top: -2px;
-      height: 18px;
-      width: 0;
-      pointer-events: none;
-    }
-
-    .progress-target .tick {
-      position: absolute;
-      bottom: 0;
-      left: -1px;
-      width: 2px;
-      height: 16px;
-      background: #16a34a;
-      opacity: .85;
-      border-radius: 1px;
-      box-shadow: 0 0 0 1px rgba(0, 0, 0, .06);
-    }
-
-    .progress-target .dot {
-      position: absolute;
-      top: -6px;
-      left: -4px;
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: #16a34a;
-      border: 2px solid #fff;
-      box-shadow: 0 0 0 1px rgba(0, 0, 0, .12);
-      opacity: .95;
-    }
+    .card-header .btn.btn-sm { padding: .15rem .4rem; line-height: 1 }
+    .progress { position: relative }
+    .progress-target { position: absolute; left: var(--target, 0%); transform: translateX(-50%); top: -2px; height: 18px; width: 0; pointer-events: none }
+    .progress-target .tick { position: absolute; bottom: 0; left: -1px; width: 2px; height: 16px; background: #16a34a; opacity: .85; border-radius: 1px; box-shadow: 0 0 0 1px rgba(0, 0, 0, .06) }
+    .progress-target .dot { position: absolute; top: -6px; left: -4px; width: 8px; height: 8px; border-radius: 50%; background: #16a34a; border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0, 0, 0, .12); opacity: .95 }
   </style>
 </head>
 
@@ -673,7 +518,7 @@ if ($hoyStr < $inicioSemana) {
       <span class="ms-2 text-muted small">Comparando con: <?= $inicioPrevObj->format('d/m/Y') ?> → <?= $finPrevObj->format('d/m/Y') ?></span>
     </form>
 
-    <!-- Tarjetas por zonas (orden fijo) + global -->
+    <!-- Tarjetas por zonas + global -->
     <div class="row mb-4">
       <?php
       $cards = [
@@ -697,7 +542,6 @@ if ($hoyStr < $inicioSemana) {
               </p>
               <div class="progress" style="height:20px">
                 <div class="progress-bar <?= $barra ?>" style="width:<?= min(100, $cumpl) ?>%"><?= number_format(min(100, $cumpl), 1) ?>%</div>
-                <!-- marcador objetivo -->
                 <div class="progress-target" style="--target: <?= number_format($pctObjetivoSem, 2) ?>%" title="Meta hoy: <?= number_format($pctObjetivoSem, 1) ?>%">
                   <span class="tick"></span><span class="dot"></span>
                 </div>
@@ -707,7 +551,6 @@ if ($hoyStr < $inicioSemana) {
         </div>
       <?php endforeach; ?>
 
-      <!-- Global (derecha) -->
       <?php
       $cumplG = (float)$porcentajeGlobal;
       $barraG = $cumplG >= 100 ? 'bg-success' : ($cumplG >= 60 ? 'bg-warning' : 'bg-danger');
@@ -724,7 +567,6 @@ if ($hoyStr < $inicioSemana) {
             </p>
             <div class="progress" style="height:20px">
               <div class="progress-bar <?= $barraG ?>" style="width:<?= min(100, $cumplG) ?>%"><?= number_format(min(100, $cumplG), 1) ?>%</div>
-              <!-- marcador objetivo -->
               <div class="progress-target" style="--target: <?= number_format($pctObjetivoSem, 2) ?>%" title="Meta hoy: <?= number_format($pctObjetivoSem, 1) ?>%">
                 <span class="tick"></span><span class="dot"></span>
               </div>
@@ -734,7 +576,7 @@ if ($hoyStr < $inicioSemana) {
       </div>
     </div>
 
-    <!-- Gráfica semanal: UNA BARRA POR SUCURSAL (switch Unidades / Ventas) -->
+    <!-- Gráfica -->
     <div class="card shadow mb-4">
       <div class="card-header bg-dark text-white d-flex align-items-center justify-content-between">
         <span>Resumen semanal por sucursal</span>
@@ -783,10 +625,17 @@ if ($hoyStr < $inicioSemana) {
                     <th>Ejecutivo</th>
                     <th class="d-none d-sm-table-cell">Sucursal</th>
                     <th class="col-fit">Unidades</th>
-                    <th class="d-none d-md-table-cell col-fit">SIM Prep.</th>
-                    <th class="d-none d-md-table-cell col-fit">SIM Pos.</th>
                     <th class="d-none d-sm-table-cell col-fit">Total Ventas ($)</th>
                     <th class="col-fit">% Cumpl.</th>
+
+                    <!-- SIMs visibles en móvil -->
+                    <th class="d-table-cell d-md-none col-fit">SIM Prep.</th>
+                    <th class="d-table-cell d-md-none col-fit">SIM Pos.</th>
+
+                    <!-- SIMs escritorio -->
+                    <th class="d-none d-md-table-cell col-fit">SIM Prep.</th>
+                    <th class="d-none d-md-table-cell col-fit">SIM Pos.</th>
+
                     <th class="d-none d-sm-table-cell">Progreso</th>
                   </tr>
                 </thead>
@@ -813,12 +662,23 @@ if ($hoyStr < $inicioSemana) {
                           <?php if ($pctU !== null): ?><span class="text-muted">(<?= ($pctU >= 0 ? '+' : '') . number_format($pctU, 1) ?>%)</span><?php endif; ?>
                         </div>
                       </td>
-                      <td class="d-none d-md-table-cell num col-fit"><?= (int)$r['sim_prepago'] ?></td>
-                      <td class="d-none d-md-table-cell num col-fit"><?= (int)$r['sim_pospago'] ?></td>
                       <td class="d-none d-sm-table-cell num col-fit">
                         <span class="money-abbr" data-raw="<?= (float)$r['total_ventas'] ?>">$<?= number_format($r['total_ventas'], 2) ?></span>
                       </td>
-                      <td class="num col-fit"><?= number_format($cumpl, 1) ?>% <?= $estado ?></td>
+                      <td class="num col-fit">
+                        <?= number_format($cumpl, 1) ?>%
+                        <!-- icono solo en escritorio -->
+                        <span class="d-none d-md-inline"><?= $estado ?></span>
+                      </td>
+
+                      <!-- móvil -->
+                      <td class="d-table-cell d-md-none num col-fit"><?= (int)$r['sim_prepago'] ?></td>
+                      <td class="d-table-cell d-md-none num col-fit"><?= (int)$r['sim_pospago'] ?></td>
+
+                      <!-- escritorio -->
+                      <td class="d-none d-md-table-cell num col-fit"><?= (int)$r['sim_prepago'] ?></td>
+                      <td class="d-none d-md-table-cell num col-fit"><?= (int)$r['sim_pospago'] ?></td>
+
                       <td class="d-none d-sm-table-cell">
                         <div class="progress" style="height:20px">
                           <div class="progress-bar <?= $progPct >= 100 ? 'bg-success' : ($progPct >= 60 ? 'bg-warning' : 'bg-danger') ?>" style="width:<?= $progPct ?>%"><?= number_format($progPct, 1) ?>%</div>
@@ -855,23 +715,21 @@ if ($hoyStr < $inicioSemana) {
                   <tr>
                     <th>Sucursal</th>
 
-                    <!-- columnas móviles -->
+                    <!-- móvil (orden: Uds, $, %, Pre, Pos) -->
                     <th class="d-table-cell d-md-none col-fit">Uds</th>
+                    <th class="d-table-cell d-md-none col-fit">$</th>
+                    <th class="d-table-cell d-md-none col-fit">% Cumpl.</th>
                     <th class="d-table-cell d-md-none col-fit">Pre</th>
                     <th class="d-table-cell d-md-none col-fit">Pos</th>
 
                     <!-- md+ -->
                     <th class="d-none d-md-table-cell">Zona</th>
                     <th class="d-none d-md-table-cell">Unidades</th>
+                    <th class="d-none d-md-table-cell col-fit">Total Ventas ($)</th>
+                    <th class="d-none d-md-table-cell col-fit">% Cumpl.</th>
                     <th class="d-none d-md-table-cell col-fit">SIM Prep.</th>
                     <th class="d-none d-md-table-cell col-fit">SIM Pos.</th>
                     <th class="d-none d-lg-table-cell col-fit">Cuota ($)</th>
-
-                    <th class="col-fit">
-                      <span class="d-none d-md-inline">Total Ventas ($)</span>
-                      <span class="d-inline d-md-none">$</span>
-                    </th>
-                    <th class="col-fit">% Cumpl.</th>
                     <th class="d-none d-lg-table-cell">Progreso</th>
                   </tr>
                 </thead>
@@ -880,13 +738,13 @@ if ($hoyStr < $inicioSemana) {
                   <?php foreach ($gruposZona as $zona => $grp): ?>
                     <!-- Encabezado de grupo (ZONA) -->
                     <tr class="table-secondary d-table-row d-md-none">
-                      <th colspan="6" class="text-start"><?= h($zona) ?></th>
-                    </tr>
-                    <tr class="table-secondary d-none d-md-table-row d-lg-none">
                       <th colspan="7" class="text-start"><?= h($zona) ?></th>
                     </tr>
+                    <tr class="table-secondary d-none d-md-table-row d-lg-none">
+                      <th colspan="8" class="text-start"><?= h($zona) ?></th>
+                    </tr>
                     <tr class="table-secondary d-none d-lg-table-row">
-                      <th colspan="9" class="text-start"><?= h($zona) ?></th>
+                      <th colspan="10" class="text-start"><?= h($zona) ?></th>
                     </tr>
 
                     <!-- Filas de sucursales -->
@@ -897,7 +755,7 @@ if ($hoyStr < $inicioSemana) {
 
                       $dM   = (float)$s['delta_monto'];
                       [$icoM, $clsM] = arrowIcon($dM);
-                      $pctM = $s['pct_delta_monto']; // puede ser null
+                      $pctM = $s['pct_delta_monto'];
                     ?>
                       <tr class="<?= $fila ?>">
                         <td class="clip-branch" title="<?= h($s['sucursal']) ?>">
@@ -905,26 +763,22 @@ if ($hoyStr < $inicioSemana) {
                           <span class="d-inline d-md-none"><?= h(sucursalCorta($s['sucursal'])) ?></span>
                         </td>
 
-                        <!-- columnas móviles -->
+                        <!-- móvil: Uds, $, %, Pre, Pos -->
                         <td class="d-table-cell d-md-none num"><?= (int)$s['unidades'] ?></td>
+                        <td class="d-table-cell d-md-none num">
+                          <span class="money-abbr" data-raw="<?= (float)$s['total_ventas'] ?>">$<?= number_format($s['total_ventas'], 2) ?></span>
+                        </td>
+                        <!-- 👇 ÍCONO REMOVIDO EN MÓVIL -->
+                        <td class="d-table-cell d-md-none num"><?= number_format($cumpl, 1) ?>%</td>
                         <td class="d-table-cell d-md-none num"><?= (int)$s['sim_prepago'] ?></td>
                         <td class="d-table-cell d-md-none num"><?= (int)$s['sim_pospago'] ?></td>
 
-                        <!-- md+ -->
+                        <!-- md+: Zona, Uds, Total, %Cumpl (con icono), SIMs, (Cuota), Progreso -->
                         <td class="d-none d-md-table-cell"><?= h(normalizarZona($s['zona'] ?? '') ?? '—') ?></td>
                         <td class="d-none d-md-table-cell num"><?= (int)$s['unidades'] ?></td>
-                        <td class="d-none d-md-table-cell num col-fit"><?= (int)$s['sim_prepago'] ?></td>
-                        <td class="d-none d-md-table-cell num col-fit"><?= (int)$s['sim_pospago'] ?></td>
-                        <td class="d-none d-lg-table-cell num col-fit">
-                          <span class="money-abbr" data-raw="<?= (float)$s['cuota_semanal'] ?>">$<?= number_format($s['cuota_semanal'], 2) ?></span>
-                        </td>
 
-                        <!-- Ventas -->
-                        <td class="num col-fit">
+                        <td class="d-none d-md-table-cell num col-fit">
                           <span class="money-abbr" data-raw="<?= (float)$s['total_ventas'] ?>">$<?= number_format($s['total_ventas'], 2) ?></span>
-
-                          <!-- Δ monto + Δ % (ocultable por switch) -->
-                          <!-- Δ monto + Δ % (ocultable por switch) -->
                           <div class="trend">
                             <span class="<?= $clsM ?>"><?= $icoM ?></span>
                             <span class="delta <?= $clsM ?>">
@@ -938,7 +792,13 @@ if ($hoyStr < $inicioSemana) {
                           </div>
                         </td>
 
-                        <td class="num col-fit"><?= number_format($cumpl, 1) ?>% <?= $estado ?></td>
+                        <td class="d-none d-md-table-cell num col-fit"><?= number_format($cumpl, 1) ?>% <?= $estado ?></td>
+                        <td class="d-none d-md-table-cell num col-fit"><?= (int)$s['sim_prepago'] ?></td>
+                        <td class="d-none d-md-table-cell num col-fit"><?= (int)$s['sim_pospago'] ?></td>
+
+                        <td class="d-none d-lg-table-cell num col-fit">
+                          <span class="money-abbr" data-raw="<?= (float)$s['cuota_semanal'] ?>">$<?= number_format($s['cuota_semanal'], 2) ?></span>
+                        </td>
 
                         <td class="d-none d-lg-table-cell">
                           <div class="progress" style="height:20px">
@@ -959,25 +819,25 @@ if ($hoyStr < $inicioSemana) {
                     $tzPos = (int)$grp['tot']['sim_pos'];
                     $cls = $tzP >= 100 ? 'bg-success' : ($tzP >= 60 ? 'bg-warning' : 'bg-danger');
                     ?>
-                    <!-- móvil -->
+                    <!-- móvil total zona -->
                     <tr class="table-light fw-semibold d-table-row d-md-none">
                       <td class="text-end">Total <?= h($zona) ?>:</td>
                       <td class="num"><?= $tzU ?></td>
-                      <td class="num"><?= $tzPre ?></td>
-                      <td class="num"><?= $tzPos ?></td>
                       <td class="num"><span class="money-abbr" data-raw="<?= $tzV ?>">$<?= number_format($tzV, 2) ?></span></td>
                       <td class="num"><?= number_format($tzP, 1) ?>%</td>
+                      <td class="num"><?= $tzPre ?></td>
+                      <td class="num"><?= $tzPos ?></td>
                     </tr>
 
-                    <!-- md+ -->
+                    <!-- md+ total zona -->
                     <tr class="table-light fw-semibold d-none d-md-table-row">
                       <td colspan="2" class="text-end">Total <?= h($zona) ?>:</td>
                       <td class="num"><?= $tzU ?></td>
-                      <td class="d-none d-md-table-cell num col-fit"><?= $tzPre ?></td>
-                      <td class="d-none d-md-table-cell num col-fit"><?= $tzPos ?></td>
-                      <td class="d-none d-lg-table-cell num col-fit"><span class="money-abbr" data-raw="<?= $tzC ?>">$<?= number_format($tzC, 2) ?></span></td>
                       <td class="num col-fit"><span class="money-abbr" data-raw="<?= $tzV ?>">$<?= number_format($tzV, 2) ?></span></td>
                       <td class="num col-fit"><?= number_format($tzP, 1) ?>%</td>
+                      <td class="num col-fit"><?= $tzPre ?></td>
+                      <td class="num col-fit"><?= $tzPos ?></td>
+                      <td class="d-none d-lg-table-cell num col-fit"><span class="money-abbr" data-raw="<?= $tzC ?>">$<?= number_format($tzC, 2) ?></span></td>
                       <td class="d-none d-lg-table-cell">
                         <div class="progress" style="height:20px">
                           <div class="progress-bar <?= $cls ?>" style="width:<?= min(100, $tzP) ?>%"><?= number_format(min(100, $tzP), 1) ?>%</div>
@@ -988,27 +848,25 @@ if ($hoyStr < $inicioSemana) {
                   <?php endforeach; ?>
 
                   <!-- ====== TOTAL GLOBAL ====== -->
-                  <?php
-                  $clsG = $porcentajeGlobal >= 100 ? 'bg-success' : ($porcentajeGlobal >= 60 ? 'bg-warning' : 'bg-danger');
-                  ?>
+                  <?php $clsG = $porcentajeGlobal >= 100 ? 'bg-success' : ($porcentajeGlobal >= 60 ? 'bg-warning' : 'bg-danger'); ?>
                   <!-- móvil -->
                   <tr class="table-primary fw-bold d-table-row d-md-none">
                     <td class="text-end">Total global:</td>
                     <td class="num"><?= (int)$totalUnidades ?></td>
-                    <td class="num"><?= (int)$totalSimPre ?></td>
-                    <td class="num"><?= (int)$totalSimPos ?></td>
                     <td class="num"><span class="money-abbr" data-raw="<?= (float)$totalVentasGlobal ?>">$<?= number_format($totalVentasGlobal, 2) ?></span></td>
                     <td class="num"><?= number_format($porcentajeGlobal, 1) ?>%</td>
+                    <td class="num"><?= (int)$totalSimPre ?></td>
+                    <td class="num"><?= (int)$totalSimPos ?></td>
                   </tr>
                   <!-- md+ -->
                   <tr class="table-primary fw-bold d-none d-md-table-row">
                     <td colspan="2" class="text-end">Total global:</td>
                     <td class="num"><?= (int)$totalUnidades ?></td>
-                    <td class="d-none d-md-table-cell num col-fit"><?= (int)$totalSimPre ?></td>
-                    <td class="d-none d-md-table-cell num col-fit"><?= (int)$totalSimPos ?></td>
-                    <td class="d-none d-lg-table-cell num col-fit"><span class="money-abbr" data-raw="<?= (float)$totalCuotaGlobal ?>">$<?= number_format($totalCuotaGlobal, 2) ?></span></td>
                     <td class="num col-fit"><span class="money-abbr" data-raw="<?= (float)$totalVentasGlobal ?>">$<?= number_format($totalVentasGlobal, 2) ?></span></td>
                     <td class="num col-fit"><?= number_format($porcentajeGlobal, 1) ?>%</td>
+                    <td class="num col-fit"><?= (int)$totalSimPre ?></td>
+                    <td class="num col-fit"><?= (int)$totalSimPos ?></td>
+                    <td class="d-none d-lg-table-cell num col-fit"><span class="money-abbr" data-raw="<?= (float)$totalCuotaGlobal ?>">$<?= number_format($totalCuotaGlobal, 2) ?></span></td>
                     <td class="d-none d-lg-table-cell">
                       <div class="progress" style="height:20px">
                         <div class="progress-bar <?= $clsG ?>" style="width:<?= min(100, $porcentajeGlobal) ?>%"><?= number_format(min(100, $porcentajeGlobal), 1) ?>%</div>
@@ -1091,8 +949,7 @@ if ($hoyStr < $inicioSemana) {
           },
           tooltip: {
             callbacks: {
-              label: (ctx) => isMoney ?
-                ' $' + Number(ctx.parsed.y).toLocaleString('es-MX', {
+              label: (ctx) => isMoney ? ' $' + Number(ctx.parsed.y).toLocaleString('es-MX', {
                   minimumFractionDigits: 2,
                   maximumFractionDigits: 2
                 }) :
@@ -1187,7 +1044,7 @@ if ($hoyStr < $inicioSemana) {
     })();
 
     /* ===========================
-       Descargar imagen de la tarjeta (html2canvas)
+       Descargar imagen (html2canvas)
     =========================== */
     (function() {
       const rango = "<?= $inicioObj->format('Ymd') ?>-<?= $finObj->format('Ymd') ?>";
@@ -1203,12 +1060,9 @@ if ($hoyStr < $inicioSemana) {
         });
         return affected;
       }
-
       async function snapCard(cardId, filename) {
         const el = document.getElementById(cardId);
         if (!el) return;
-
-        // guardar estado y preparar
         const prev = {
           overflow: el.style.overflow,
           scrollTop: el.scrollTop,
@@ -1216,9 +1070,7 @@ if ($hoyStr < $inicioSemana) {
           boxShadow: el.style.boxShadow
         };
         el.style.overflow = 'visible';
-
         const overflowFixes = prepOverflow(el, true);
-
         const scale = Math.min(3, (window.devicePixelRatio || 1) * 1.5);
         const canvas = await html2canvas(el, {
           backgroundColor: '#ffffff',
@@ -1228,8 +1080,6 @@ if ($hoyStr < $inicioSemana) {
           windowWidth: document.documentElement.scrollWidth,
           windowHeight: document.documentElement.scrollHeight
         });
-
-        // restaurar
         el.style.overflow = prev.overflow;
         el.scrollTop = prev.scrollTop;
         el.scrollLeft = prev.scrollLeft;
@@ -1238,8 +1088,6 @@ if ($hoyStr < $inicioSemana) {
           node,
           prev
         }) => node.style.overflow = prev);
-
-        // descargar
         const link = document.createElement('a');
         link.download = filename;
         link.href = canvas.toDataURL('image/png');
@@ -1247,28 +1095,21 @@ if ($hoyStr < $inicioSemana) {
         link.click();
         document.body.removeChild(link);
       }
-
       const btnEj = document.getElementById('btnSnapEj');
-      if (btnEj) btnEj.addEventListener('click', () =>
-        snapCard('card_ejecutivos', `ranking_ejecutivos_${rango}.png`)
-      );
-
+      if (btnEj) btnEj.addEventListener('click', () => snapCard('card_ejecutivos', `ranking_ejecutivos_${rango}.png`));
       const btnSu = document.getElementById('btnSnapSuc');
-      if (btnSu) btnSu.addEventListener('click', () =>
-        snapCard('card_sucursales', `ranking_sucursales_${rango}.png`)
-      );
+      if (btnSu) btnSu.addEventListener('click', () => snapCard('card_sucursales', `ranking_sucursales_${rango}.png`));
     })();
 
     /* ===========================
-       Switch de DELTAS (por card)
-       - default: OFF (oculto)
+       Switch de DELTAS
     =========================== */
     (function() {
       const swEj = document.getElementById('swDeltaEj');
       const cardEj = document.getElementById('card_ejecutivos');
       if (swEj && cardEj) {
-        swEj.checked = false; // default OFF
-        cardEj.classList.add('hide-delta'); // oculto al inicio
+        swEj.checked = false;
+        cardEj.classList.add('hide-delta');
         swEj.addEventListener('change', () => {
           cardEj.classList.toggle('hide-delta', !swEj.checked);
         });
@@ -1276,8 +1117,8 @@ if ($hoyStr < $inicioSemana) {
       const swSu = document.getElementById('swDeltaSuc');
       const cardSu = document.getElementById('card_sucursales');
       if (swSu && cardSu) {
-        swSu.checked = false; // default OFF
-        cardSu.classList.add('hide-delta'); // oculto al inicio
+        swSu.checked = false;
+        cardSu.classList.add('hide-delta');
         swSu.addEventListener('change', () => {
           cardSu.classList.toggle('hide-delta', !swSu.checked);
         });
