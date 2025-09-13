@@ -203,7 +203,15 @@ $puedeCortesYDepositos = in_array($rolUsuario, ['Gerente', 'GerenteSucursal', 'A
 $current = basename(parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH));
 
 $grpDashboard  = ['productividad_dia.php', 'dashboard_unificado.php', 'dashboard_mensual.php'];
-$grpVentas     = ['nueva_venta.php', 'venta_sim_prepago.php', 'venta_sim_pospago.php', 'historial_ventas.php', 'historial_ventas_sims.php'];
+$grpVentas     = [
+  'nueva_venta.php',
+  'venta_sim_prepago.php',
+  'venta_sim_pospago.php',
+  'payjoy_tc_nueva.php',        // ✅ NUEVO
+  'historial_ventas.php',
+  'historial_ventas_sims.php',
+  'historial_payjoy_tc.php'     // ✅ NUEVO
+];
 $grpInventario = ['panel.php', 'inventario_subdistribuidor.php', 'inventario_global.php', 'inventario_resumen.php', 'inventario_eulalia.php', 'inventario_retiros.php', 'inventario_historico.php', 'generar_traspaso_zona.php', 'traspasos_pendientes_zona.php', 'inventario_sims_resumen.php'];
 $grpCompras    = ['compras_nueva.php', 'compras_resumen.php', 'modelos.php', 'proveedores.php', 'compras_ingreso.php'];
 $grpTraspasos  = ['generar_traspaso.php', 'generar_traspaso_sims.php', 'traspasos_sims_pendientes.php', 'traspasos_sims_salientes.php', 'traspasos_pendientes.php', 'traspasos_salientes.php', 'traspaso_nuevo.php'];
@@ -213,12 +221,20 @@ $grpRH         = ['reporte_nomina.php', 'reporte_nomina_gerentes_zona.php', 'adm
 /* ✅ Incluimos tareas.php al grupo Operativos para resaltar activo */
 $grpOperativos = [
   'tareas.php', // NEW
-  'insumos_catalogo.php', 'actualizar_precios_modelo.php',
-  'cuotas_mensuales.php', 'cuotas_mensuales_ejecutivos.php', 'cuotas_sucursales.php',
-  'cargar_cuotas_semanales.php', 'esquemas_comisiones_ejecutivos.php',
-  'esquemas_comisiones_gerentes.php', 'esquemas_comisiones_pospago.php',
-  'comisiones_especiales_equipos.php', 'carga_masiva_productos.php',
-  'carga_masiva_sims.php', 'alta_usuario.php', 'alta_sucursal.php',
+  'insumos_catalogo.php',
+  'actualizar_precios_modelo.php',
+  'cuotas_mensuales.php',
+  'cuotas_mensuales_ejecutivos.php',
+  'cuotas_sucursales.php',
+  'cargar_cuotas_semanales.php',
+  'esquemas_comisiones_ejecutivos.php',
+  'esquemas_comisiones_gerentes.php',
+  'esquemas_comisiones_pospago.php',
+  'comisiones_especiales_equipos.php',
+  'carga_masiva_productos.php',
+  'carga_masiva_sims.php',
+  'alta_usuario.php',
+  'alta_sucursal.php',
   'incidencias_matriz.php'
 ];
 $grpCeleb      = ['cumples_aniversarios.php'];
@@ -330,73 +346,90 @@ function item_active(string $f, string $c): string
   }
 
   /* Dropdown largo: que no se salga de la pantalla */
-.navbar-luga .dropdown-menu{
-  --bs-dropdown-bg: #0f141a;
-  --bs-dropdown-color: #e7eef7;
-  --bs-dropdown-link-color: #e7eef7;
-  --bs-dropdown-link-hover-color: #fff;
-  --bs-dropdown-link-hover-bg: rgba(255,255,255,.06);
-  --bs-dropdown-link-active-bg: rgba(255,255,255,.12);
-  --bs-dropdown-border-color: rgba(255,255,255,.08);
-  --bs-dropdown-header-color: #aab8c7;
-  --bs-dropdown-divider-bg: rgba(255,255,255,.12);
-  border: 1px solid rgba(255,255,255,.08);
-  border-radius: 14px;
-  box-shadow: 0 16px 40px rgba(0,0,0,.35);
-  overflow: auto;                 /* ⬅️ habilita scroll */
-  max-height: calc(100vh - 110px);/* ⬅️ no más alto que la ventana */
-  overscroll-behavior: contain;   /* evita “brincos” al hacer scroll */
-  -webkit-overflow-scrolling: touch; /* scroll suave en iOS */
-  font-size: var(--drop-font);
-  padding-bottom: .25rem;         /* respirito al final */
-}
-
-/* Opcional: headers pegajosos dentro del dropdown para ubicarnos */
-.navbar-luga .dropdown-menu .dropdown-header{
-  position: sticky;
-  top: 0;
-  background: #0f141a;
-  z-index: 2;
-  padding-top: .5rem;
-}
-
-/* Scrollbar sutil (opcional) */
-.navbar-luga .dropdown-menu::-webkit-scrollbar{ width: 8px; }
-.navbar-luga .dropdown-menu::-webkit-scrollbar-thumb{
-  background: rgba(255,255,255,.25);
-  border-radius: 8px;
-}
-.navbar-luga .dropdown-menu::-webkit-scrollbar-track{ background: transparent; }
-
-/* === MODO MÓVIL / < xl  ============================================= */
-/* La navbar es expand-xl; por debajo de xl (1199.98px) está colapsada */
-@media (max-width: 1199.98px) {
-  /* El panel colapsado debe poder hacer scroll para mostrar todo el menú */
-  #navbarMain{
-    max-height: calc(100svh - 64px);   /* 64px aprox. altura de la barra */
-    overflow-y: auto;
+  .navbar-luga .dropdown-menu {
+    --bs-dropdown-bg: #0f141a;
+    --bs-dropdown-color: #e7eef7;
+    --bs-dropdown-link-color: #e7eef7;
+    --bs-dropdown-link-hover-color: #fff;
+    --bs-dropdown-link-hover-bg: rgba(255, 255, 255, .06);
+    --bs-dropdown-link-active-bg: rgba(255, 255, 255, .12);
+    --bs-dropdown-border-color: rgba(255, 255, 255, .08);
+    --bs-dropdown-header-color: #aab8c7;
+    --bs-dropdown-divider-bg: rgba(255, 255, 255, .12);
+    border: 1px solid rgba(255, 255, 255, .08);
+    border-radius: 14px;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, .35);
+    overflow: auto;
+    /* ⬅️ habilita scroll */
+    max-height: calc(100vh - 110px);
+    /* ⬅️ no más alto que la ventana */
     overscroll-behavior: contain;
+    /* evita “brincos” al hacer scroll */
     -webkit-overflow-scrolling: touch;
-    padding-bottom: .5rem;              /* respiro al fondo */
+    /* scroll suave en iOS */
+    font-size: var(--drop-font);
+    padding-bottom: .25rem;
+    /* respirito al final */
   }
 
-  /* El dropdown dentro del panel debe fluir "en bloque", no flotante */
-  .navbar-luga .dropdown-menu{
-    position: static !important;        /* que no se “despegue” */
-    transform: none !important;
-    max-height: none;                   /* el scroll lo maneja #navbarMain */
-    overflow: visible;
-    box-shadow: none;                   /* más natural en panel lateral */
-    border-radius: 12px;
-    border: 1px solid rgba(255,255,255,.12);
-    margin-top: .25rem;
+  /* Opcional: headers pegajosos dentro del dropdown para ubicarnos */
+  .navbar-luga .dropdown-menu .dropdown-header {
+    position: sticky;
+    top: 0;
+    background: #0f141a;
+    z-index: 2;
+    padding-top: .5rem;
   }
 
-  /* Headers del dropdown no necesitan sticky en móvil */
-  .navbar-luga .dropdown-menu .dropdown-header{
-    position: static;
+  /* Scrollbar sutil (opcional) */
+  .navbar-luga .dropdown-menu::-webkit-scrollbar {
+    width: 8px;
   }
-}
+
+  .navbar-luga .dropdown-menu::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, .25);
+    border-radius: 8px;
+  }
+
+  .navbar-luga .dropdown-menu::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  /* === MODO MÓVIL / < xl  ============================================= */
+  /* La navbar es expand-xl; por debajo de xl (1199.98px) está colapsada */
+  @media (max-width: 1199.98px) {
+
+    /* El panel colapsado debe poder hacer scroll para mostrar todo el menú */
+    #navbarMain {
+      max-height: calc(100svh - 64px);
+      /* 64px aprox. altura de la barra */
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      -webkit-overflow-scrolling: touch;
+      padding-bottom: .5rem;
+      /* respiro al fondo */
+    }
+
+    /* El dropdown dentro del panel debe fluir "en bloque", no flotante */
+    .navbar-luga .dropdown-menu {
+      position: static !important;
+      /* que no se “despegue” */
+      transform: none !important;
+      max-height: none;
+      /* el scroll lo maneja #navbarMain */
+      overflow: visible;
+      box-shadow: none;
+      /* más natural en panel lateral */
+      border-radius: 12px;
+      border: 1px solid rgba(255, 255, 255, .12);
+      margin-top: .25rem;
+    }
+
+    /* Headers del dropdown no necesitan sticky en móvil */
+    .navbar-luga .dropdown-menu .dropdown-header {
+      position: static;
+    }
+  }
 
   .navbar-luga .dropdown-item {
     padding: .46em .70em;
@@ -615,14 +648,29 @@ function item_active(string $f, string $c): string
           </a>
           <ul class="dropdown-menu">
             <?php if ($rolUsuario === 'Logistica'): ?>
+              <!-- Solo historiales para Logística -->
+              <li class="dropdown-header">Historiales</li>
               <li><a class="dropdown-item <?= item_active('historial_ventas.php', $current) ?>" href="historial_ventas.php">Historial de ventas</a></li>
               <li><a class="dropdown-item <?= item_active('historial_ventas_sims.php', $current) ?>" href="historial_ventas_sims.php">Historial ventas SIM</a></li>
+              <li><a class="dropdown-item <?= item_active('historial_payjoy_tc.php', $current) ?>" href="historial_payjoy_tc.php">Historial PayJoy TC</a></li>
+
             <?php else: ?>
+              <!-- Ventas nuevas -->
+              <li class="dropdown-header">Ventas nuevas</li>
               <li><a class="dropdown-item <?= item_active('nueva_venta.php', $current) ?>" href="nueva_venta.php">Venta equipos</a></li>
               <li><a class="dropdown-item <?= item_active('venta_sim_prepago.php', $current) ?>" href="venta_sim_prepago.php">Venta SIM prepago</a></li>
               <li><a class="dropdown-item <?= item_active('venta_sim_pospago.php', $current) ?>" href="venta_sim_pospago.php">Venta SIM pospago</a></li>
+              <li><a class="dropdown-item <?= item_active('payjoy_tc_nueva.php', $current) ?>" href="payjoy_tc_nueva.php">PayJoy TC – Nueva</a></li>
+
+              <li>
+                <hr class="dropdown-divider">
+              </li>
+
+              <!-- Historiales -->
+              <li class="dropdown-header">Historiales</li>
               <li><a class="dropdown-item <?= item_active('historial_ventas.php', $current) ?>" href="historial_ventas.php">Historial de ventas</a></li>
               <li><a class="dropdown-item <?= item_active('historial_ventas_sims.php', $current) ?>" href="historial_ventas_sims.php">Historial ventas SIM</a></li>
+              <li><a class="dropdown-item <?= item_active('historial_payjoy_tc.php', $current) ?>" href="historial_payjoy_tc.php">Historial PayJoy TC</a></li>
             <?php endif; ?>
           </ul>
         </li>
@@ -838,7 +886,9 @@ function item_active(string $f, string $c): string
               <!-- 🔝 Bitacora Sistema (solo Admin) -->
               <?php if ($rolUsuario === 'Admin'): ?>
                 <li><a class="dropdown-item <?= item_active('tareas.php', $current) ?>" href="tareas.php">Bitacora Sistema</a></li>
-                <li><hr class="dropdown-divider"></li>
+                <li>
+                  <hr class="dropdown-divider">
+                </li>
               <?php endif; ?>
 
               <li class="dropdown-header">Insumos & Precios</li>
@@ -1036,9 +1086,12 @@ function item_active(string $f, string $c): string
     (function() {
       var el = document.getElementById('toast-foto');
       if (el) {
-        var t = new bootstrap.Toast(el, { autohide: false });
+        var t = new bootstrap.Toast(el, {
+          autohide: false
+        });
         t.show();
       }
+
       function posponer24h() {
         var d = new Date();
         d.setTime(d.getTime() + 24 * 60 * 60 * 1000);
