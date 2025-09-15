@@ -17,6 +17,7 @@ $nombre_post      = $_POST['nombre']      ?? '';
 $usuario_post     = $_POST['usuario']     ?? '';
 $id_sucursal_post = $_POST['id_sucursal'] ?? '';
 $rol_post         = $_POST['rol']         ?? '';
+$sueldo_post      = $_POST['sueldo']      ?? '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $nombre      = trim($_POST['nombre'] ?? '');
@@ -24,10 +25,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $password    = trim($_POST['password'] ?? '');
     $id_sucursal = (int)($_POST['id_sucursal'] ?? 0);
     $rol         = $_POST['rol'] ?? '';
+    $sueldo      = (float)($_POST['sueldo'] ?? 0);
 
     // Validaciones básicas
-    if ($nombre === '' || $usuario === '' || $password === '' || $id_sucursal <= 0 || $rol === '') {
-        $errores[] = "Todos los campos son obligatorios.";
+    if ($nombre === '' || $usuario === '' || $password === '' || $id_sucursal <= 0 || $rol === '' || $sueldo <= 0) {
+        $errores[] = "Todos los campos son obligatorios y el sueldo debe ser mayor a 0.";
     }
 
     // Reglas simples de formato de usuario (opcional)
@@ -54,18 +56,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             // Forzar cambio de contraseña en el primer inicio de sesión
             $must_change_password = 1;
 
-            // Insert con must_change_password=1
+            // Insert con sueldo
             $stmt = $conn->prepare("
-                INSERT INTO usuarios (nombre, usuario, password, id_sucursal, rol, must_change_password)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO usuarios (nombre, usuario, password, id_sucursal, rol, sueldo, must_change_password)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             ");
-            // tipos: nombre(s), usuario(s), password(s), id_sucursal(i), rol(s), must_change_password(i)
-            $stmt->bind_param("sssisi", $nombre, $usuario, $passwordHash, $id_sucursal, $rol, $must_change_password);
+            // tipos: sssisis → nombre(s), usuario(s), password(s), id_sucursal(i), rol(s), sueldo(d), must_change_password(i)
+            $stmt->bind_param("sssissi", $nombre, $usuario, $passwordHash, $id_sucursal, $rol, $sueldo, $must_change_password);
 
             if ($stmt->execute()) {
                 $mensaje = "<div class='alert alert-success'>✅ Usuario <b>" . htmlspecialchars($usuario) . "</b> registrado correctamente. Se le pedirá cambiar la contraseña al ingresar.</div>";
                 // Limpiar campos del form tras éxito
-                $nombre_post = $usuario_post = $id_sucursal_post = $rol_post = '';
+                $nombre_post = $usuario_post = $id_sucursal_post = $rol_post = $sueldo_post = '';
             } else {
                 $errores[] = "Error al registrar el usuario: " . htmlspecialchars($stmt->error);
             }
@@ -119,7 +121,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <select name="id_sucursal" class="form-select" required>
                 <option value="">-- Selecciona sucursal --</option>
                 <?php
-                // Re-consultar sucursales por si el puntero se consumió
                 $sucursales->data_seek(0);
                 while ($s = $sucursales->fetch_assoc()): ?>
                     <option value="<?= $s['id'] ?>" <?= ($id_sucursal_post == $s['id']) ? 'selected' : '' ?>>
@@ -146,6 +147,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     <option value="<?= $value ?>" <?= ($rol_post === $value) ? 'selected' : '' ?>><?= $label ?></option>
                 <?php endforeach; ?>
             </select>
+        </div>
+
+        <div class="mb-3">
+            <label class="form-label">Sueldo (MXN)</label>
+            <input type="number" step="0.01" min="0" name="sueldo" class="form-control" required
+                   value="<?= htmlspecialchars($sueldo_post) ?>">
         </div>
 
         <button type="submit" class="btn btn-primary">Registrar Usuario</button>
