@@ -26,6 +26,7 @@ $filtroEstatus    = $_GET['estatus']     ?? '';
 $filtroAntiguedad = $_GET['antiguedad']  ?? '';
 $filtroPrecioMin  = $_GET['precio_min']  ?? '';
 $filtroPrecioMax  = $_GET['precio_max']  ?? '';
+$filtroModelo     = $_GET['modelo']      ?? ''; // <<< NUEVO FILTRO
 
 $sql = "
   SELECT i.id AS id_inventario,
@@ -59,6 +60,11 @@ if ($filtroSucursal !== '') {
 if ($filtroImei !== '') {
   $sql .= " AND (p.imei1 LIKE ? OR p.imei2 LIKE ?)";
   $like = "%$filtroImei%"; $params[] = $like; $params[] = $like; $types .= "ss";
+}
+// --- NUEVO: Filtro por modelo (LIKE, coincidencia parcial) ---
+if ($filtroModelo !== '') {
+  $sql .= " AND p.modelo LIKE ?";
+  $params[] = "%$filtroModelo%"; $types .= "s";
 }
 if ($filtroEstatus !== '') {
   $sql .= " AND i.estatus = ?"; $params[] = $filtroEstatus; $types .= "s";
@@ -208,10 +214,18 @@ $promProfit     = $total ? round($sumProfit / $total, 2) : 0.0;
               <?php endwhile; ?>
             </select>
           </div>
+
           <div class="col-12 col-md-3">
             <label class="form-label">IMEI</label>
             <input type="text" name="imei" class="form-control" placeholder="Buscar IMEI..." value="<?= h($filtroImei) ?>">
           </div>
+
+          <!-- NUEVO CAMPO: MODELO -->
+          <div class="col-12 col-md-3">
+            <label class="form-label">Modelo</label>
+            <input type="text" name="modelo" class="form-control" placeholder="Buscar modelo..." value="<?= h($filtroModelo) ?>">
+          </div>
+
           <div class="col-6 col-md-2">
             <label class="form-label">Estatus</label>
             <select name="estatus" class="form-select">
@@ -220,6 +234,7 @@ $promProfit     = $total ? round($sumProfit / $total, 2) : 0.0;
               <option value="En tránsito" <?= $filtroEstatus=='En tránsito'?'selected':'' ?>>En tránsito</option>
             </select>
           </div>
+
           <div class="col-6 col-md-2">
             <label class="form-label">Antigüedad</label>
             <select name="antiguedad" class="form-select">
@@ -229,6 +244,7 @@ $promProfit     = $total ? round($sumProfit / $total, 2) : 0.0;
               <option value=">90"   <?= $filtroAntiguedad=='>90'?'selected':'' ?>>> 90 días</option>
             </select>
           </div>
+
           <div class="col-6 col-md-1">
             <label class="form-label">Precio min</label>
             <input type="number" step="0.01" name="precio_min" class="form-control" value="<?= h($filtroPrecioMin) ?>">
@@ -237,6 +253,7 @@ $promProfit     = $total ? round($sumProfit / $total, 2) : 0.0;
             <label class="form-label">Precio max</label>
             <input type="number" step="0.01" name="precio_max" class="form-control" value="<?= h($filtroPrecioMax) ?>">
           </div>
+
           <div class="col-12 col-md-12 text-end">
             <button class="btn btn-primary rounded-pill"><i class="bi bi-filter me-1"></i>Aplicar</button>
             <a href="inventario_global.php" class="btn btn-light rounded-pill border"><i class="bi bi-eraser me-1"></i>Limpiar</a>
@@ -355,7 +372,7 @@ $promProfit     = $total ? round($sumProfit / $total, 2) : 0.0;
 <script src="https://cdn.datatables.net/1.13.8/js/jquery.dataTables.min.js"></script>
 <script src="https://cdn.datatables.net/1.13.8/js/dataTables.bootstrap5.min.js"></script>
 <script src="https://cdn.datatables.net/fixedheader/3.4.0/js/dataTables.fixedHeader.min.js"></script>
-<script src="https://cdn.datatables.net/responsive/2.5.1/js/dataTables.responsive.min.js"></script>
+<script src="https://cdn.datatables.net/responsive/2.5.1/js/responsive.min.js"></script>
 <script src="https://cdn.datatables.net/responsive/2.5.1/js/responsive.bootstrap5.min.js"></script>
 <script src="https://cdn.datatables.net/buttons/2.4.2/js/dataTables.buttons.min.js"></script>
 <script src="https://cdn.datatables.net/buttons/2.4.2/js/buttons.bootstrap5.min.js"></script>
@@ -378,7 +395,7 @@ $promProfit     = $total ? round($sumProfit / $total, 2) : 0.0;
     });
   }
 
-  // DataTable (orden por fecha ingreso desc; indices actualizados por nueva columna RAM)
+  // DataTable (orden por fecha ingreso desc; índices actualizados por nueva columna RAM)
   $(function() {
     $('#tablaInventario').DataTable({
       pageLength: 25,

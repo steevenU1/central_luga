@@ -1,6 +1,9 @@
 <?php
 session_start();
-if (!isset($_SESSION['id_usuario'])) { header("Location: index.php"); exit(); }
+if (!isset($_SESSION['id_usuario'])) {
+  header("Location: index.php");
+  exit();
+}
 require_once __DIR__ . '/db.php';
 date_default_timezone_set('America/Mexico_City');
 
@@ -15,36 +18,51 @@ $miUsuario = strtolower($me['usuario'] ?? '');
 $miRol     = $me['rol'] ?? '';
 $canEdit   = ($miUsuario === 'efernandez');
 $canView   = ($canEdit || $miRol === 'Admin');
-if (!$canView) { header("Location: index.php"); exit(); }
+if (!$canView) {
+  header("Location: index.php");
+  exit();
+}
 
 /* ========= Helpers ========= */
-function dtlocal_to_mysql(?string $s): ?string {
+function dtlocal_to_mysql(?string $s): ?string
+{
   if (!$s) return null;
   $s = str_replace('T', ' ', $s);
   return $s . (strlen($s) === 16 ? ':00' : '');
 }
-function esc($s) { return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
+function esc($s)
+{
+  return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8');
+}
 
 /* Normalización de estatus (para ENUM sin tilde en Produccion) */
-function sin_acentos(string $s): string {
-  $t = iconv('UTF-8','ASCII//TRANSLIT',$s);
+function sin_acentos(string $s): string
+{
+  $t = iconv('UTF-8', 'ASCII//TRANSLIT', $s);
   return $t !== false ? $t : $s;
 }
-function canon_estatus(?string $s): string {
+function canon_estatus(?string $s): string
+{
   $s = trim((string)$s);
   if ($s === '') return 'Pendiente';
   $s2 = strtolower(sin_acentos($s)); // produccion, en curso, etc.
   // Valores canónicos (los que acepta el ENUM de la BD)
-  $allow = ['pendiente','en curso','en qa','produccion','completado','cancelado'];
+  $allow = ['pendiente', 'en curso', 'en qa', 'produccion', 'completado', 'cancelado'];
   if (!in_array($s2, $allow, true)) return 'Pendiente';
   // Regresa capitalización exacta del ENUM
   switch ($s2) {
-    case 'pendiente':  return 'Pendiente';
-    case 'en curso':   return 'En curso';
-    case 'en qa':      return 'En QA';
-    case 'produccion': return 'Produccion'; // <- canónico sin tilde
-    case 'completado': return 'Completado';
-    case 'cancelado':  return 'Cancelado';
+    case 'pendiente':
+      return 'Pendiente';
+    case 'en curso':
+      return 'En curso';
+    case 'en qa':
+      return 'En QA';
+    case 'produccion':
+      return 'Produccion'; // <- canónico sin tilde
+    case 'completado':
+      return 'Completado';
+    case 'cancelado':
+      return 'Cancelado';
   }
   return 'Pendiente';
 }
@@ -68,7 +86,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canEdit && ($_POST['action'] ?? ''
     $stmt->execute();
     $stmt->close();
   }
-  header("Location: tareas.php"); exit();
+  header("Location: tareas.php");
+  exit();
 }
 
 /* ========= Actualizar (estatus / estimada) ========= */
@@ -82,13 +101,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canEdit && ($_POST['action'] ?? ''
     $stmt->execute();
     $stmt->close();
   }
-  header("Location: tareas.php"); exit();
+  header("Location: tareas.php");
+  exit();
 }
 
 /* ========= Datos para UI ========= */
 $totales = [];
 $res = $conn->query("SELECT estatus, COUNT(*) c FROM tarea_log GROUP BY estatus");
-while ($r = $res->fetch_assoc()) { $totales[$r['estatus']] = (int)$r['c']; }
+while ($r = $res->fetch_assoc()) {
+  $totales[$r['estatus']] = (int)$r['c'];
+}
 
 /* === Conjunto de estatus “activos” === */
 $ACTIVOS = "('Pendiente','En curso','En QA','Produccion','Producción')";
@@ -130,12 +152,13 @@ $badgeEstatus = [
   'Completado'  => 'success',
   'Cancelado'   => 'dark'
 ];
-$badgePrio = ['Baja'=>'secondary','Media'=>'primary','Alta'=>'danger','Urgente'=>'dark'];
+$badgePrio = ['Baja' => 'secondary', 'Media' => 'primary', 'Alta' => 'danger', 'Urgente' => 'dark'];
 
 $active = 'tareas';
 ?>
 <!doctype html>
 <html lang="es">
+
 <head>
   <meta charset="utf-8">
   <title>Bitácora / Tareas</title>
@@ -143,19 +166,55 @@ $active = 'tareas';
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
   <style>
-    :root{ --nav-offset-sm:64px; --nav-offset-lg:72px; }
-    body{ margin:0; }
-    .bg-hero{ background: linear-gradient(135deg,#111827 0%,#1f2937 55%,#0ea5e9 110%); color:#fff; }
-    .truncate-2{ display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
-    .card-kpi{ border:none; box-shadow:0 2px 10px rgba(0,0,0,.06); }
-    .sticky-actions{ position: sticky; right: 0; background: var(--bs-body-bg); z-index: 1; }
-    @media (max-width: 576px){
-      .table thead th { font-size: .8rem; }
-      .table td { font-size: .875rem; }
-      .btn-icon-only{ padding: .25rem .5rem; }
+    :root {
+      --nav-offset-sm: 64px;
+      --nav-offset-lg: 72px;
+    }
+
+    body {
+      margin: 0;
+    }
+
+    .bg-hero {
+      background: linear-gradient(135deg, #111827 0%, #1f2937 55%, #0ea5e9 110%);
+      color: #fff;
+    }
+
+    .truncate-2 {
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    .card-kpi {
+      border: none;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, .06);
+    }
+
+    .sticky-actions {
+      position: sticky;
+      right: 0;
+      background: var(--bs-body-bg);
+      z-index: 1;
+    }
+
+    @media (max-width: 576px) {
+      .table thead th {
+        font-size: .8rem;
+      }
+
+      .table td {
+        font-size: .875rem;
+      }
+
+      .btn-icon-only {
+        padding: .25rem .5rem;
+      }
     }
   </style>
 </head>
+
 <body class="bg-light">
   <?php require_once __DIR__ . '/navbar.php'; ?>
 
@@ -179,22 +238,23 @@ $active = 'tareas';
     <!-- KPIs -->
     <div class="row g-3 mb-4">
       <?php
-        $keys = ['Pendiente','En curso','En QA','Produccion','Completado'];
-        $icons= ['Pendiente'=>'hourglass-split','En curso'=>'rocket','En QA'=>'bug','Produccion'=>'box-seam','Completado'=>'check2-circle'];
-        foreach ($keys as $k):
-          $c = $totales[$k] ?? 0; $ico = $icons[$k];
+      $keys = ['Pendiente', 'En curso', 'En QA', 'Produccion', 'Completado'];
+      $icons = ['Pendiente' => 'hourglass-split', 'En curso' => 'rocket', 'En QA' => 'bug', 'Produccion' => 'box-seam', 'Completado' => 'check2-circle'];
+      foreach ($keys as $k):
+        $c = $totales[$k] ?? 0;
+        $ico = $icons[$k];
       ?>
-      <div class="col-6 col-md">
-        <div class="card card-kpi h-100">
-          <div class="card-body">
-            <div class="d-flex align-items-center justify-content-between">
-              <div class="text-muted small"><?php echo esc($k); ?></div>
-              <i class="bi bi-<?php echo $ico; ?>"></i>
+        <div class="col-6 col-md">
+          <div class="card card-kpi h-100">
+            <div class="card-body">
+              <div class="d-flex align-items-center justify-content-between">
+                <div class="text-muted small"><?php echo esc($k); ?></div>
+                <i class="bi bi-<?php echo $ico; ?>"></i>
+              </div>
+              <div class="h3 mb-0"><?php echo $c; ?></div>
             </div>
-            <div class="h3 mb-0"><?php echo $c; ?></div>
           </div>
         </div>
-      </div>
       <?php endforeach; ?>
       <div class="col-12 col-md">
         <div class="card card-kpi h-100">
@@ -202,13 +262,13 @@ $active = 'tareas';
             <div class="text-muted small">Próximas 48h</div>
             <div class="h3 mb-0">
               <?php
-                $res48 = $conn->query("
+              $res48 = $conn->query("
                   SELECT COUNT(*) c
                   FROM tarea_log
                   WHERE fecha_estimada BETWEEN NOW() AND DATE_ADD(NOW(), INTERVAL 2 DAY)
                     AND TRIM(estatus) IN $ACTIVOS
                 ");
-                echo (int)($res48->fetch_assoc()['c'] ?? 0);
+              echo (int)($res48->fetch_assoc()['c'] ?? 0);
               ?>
             </div>
           </div>
@@ -227,30 +287,32 @@ $active = 'tareas';
           <div class="list-group list-group-flush">
             <?php if (!$hoyRows): ?>
               <div class="list-group-item text-muted">Sin tareas activas.</div>
-            <?php else: foreach ($hoyRows as $t): ?>
-              <?php $e = trim($t['estatus']); $p = trim($t['prioridad']); ?>
-              <div class="list-group-item">
-                <div class="d-flex justify-content-between flex-wrap gap-2">
-                  <div class="fw-semibold"><?php echo esc($t['titulo']); ?></div>
-                  <span class="badge text-bg-<?php echo $badgeEstatus[$e] ?? 'secondary'; ?>">
-                    <?php echo esc($e === 'Produccion' ? 'Producción' : $e); ?>
-                  </span>
+              <?php else: foreach ($hoyRows as $t): ?>
+                <?php $e = trim($t['estatus']);
+                $p = trim($t['prioridad']); ?>
+                <div class="list-group-item">
+                  <div class="d-flex justify-content-between flex-wrap gap-2">
+                    <div class="fw-semibold"><?php echo esc($t['titulo']); ?></div>
+                    <span class="badge text-bg-<?php echo $badgeEstatus[$e] ?? 'secondary'; ?>">
+                      <?php echo esc($e === 'Produccion' ? 'Producción' : $e); ?>
+                    </span>
+                  </div>
+                  <div class="small text-muted truncate-2 mt-1"><?php echo nl2br(esc($t['descripcion'])); ?></div>
+                  <div class="small mt-1 d-flex flex-wrap gap-2 align-items-center">
+                    <span class="badge rounded-pill text-bg-<?php echo $badgePrio[$p] ?? 'secondary'; ?>">
+                      <?php echo esc($p); ?>
+                    </span>
+                    <?php if (!empty($t['fecha_estimada'])): ?>
+                      <span class="text-muted"><i class="bi bi-clock"></i> <?php echo esc($t['fecha_estimada']); ?></span>
+                    <?php elseif (!empty($t['fecha_trabajo'])): ?>
+                      <span class="text-muted"><i class="bi bi-calendar-check"></i> <?php echo esc($t['fecha_trabajo']); ?></span>
+                    <?php else: ?>
+                      <span class="text-muted"><i class="bi bi-clock-history"></i> <?php echo esc($t['actualizado_en']); ?></span>
+                    <?php endif; ?>
+                  </div>
                 </div>
-                <div class="small text-muted truncate-2 mt-1"><?php echo nl2br(esc($t['descripcion'])); ?></div>
-                <div class="small mt-1 d-flex flex-wrap gap-2 align-items-center">
-                  <span class="badge rounded-pill text-bg-<?php echo $badgePrio[$p] ?? 'secondary'; ?>">
-                    <?php echo esc($p); ?>
-                  </span>
-                  <?php if (!empty($t['fecha_estimada'])): ?>
-                    <span class="text-muted"><i class="bi bi-clock"></i> <?php echo esc($t['fecha_estimada']); ?></span>
-                  <?php elseif (!empty($t['fecha_trabajo'])): ?>
-                    <span class="text-muted"><i class="bi bi-calendar-check"></i> <?php echo esc($t['fecha_trabajo']); ?></span>
-                  <?php else: ?>
-                    <span class="text-muted"><i class="bi bi-clock-history"></i> <?php echo esc($t['actualizado_en']); ?></span>
-                  <?php endif; ?>
-                </div>
-              </div>
-            <?php endforeach; endif; ?>
+            <?php endforeach;
+            endif; ?>
           </div>
         </div>
       </div>
@@ -261,21 +323,22 @@ $active = 'tareas';
           <div class="list-group list-group-flush">
             <?php if (!$nextRows): ?>
               <div class="list-group-item text-muted">Sin fechas estimadas activas.</div>
-            <?php else: foreach ($nextRows as $t): ?>
-              <?php $p = trim($t['prioridad']); ?>
-              <div class="list-group-item d-flex justify-content-between align-items-start">
-                <div class="pe-3">
-                  <div class="fw-semibold"><?php echo esc($t['titulo']); ?></div>
-                  <div class="small text-muted truncate-2"><?php echo nl2br(esc($t['descripcion'])); ?></div>
-                </div>
-                <div class="text-end">
-                  <div class="badge text-bg-<?php echo $badgePrio[$p] ?? 'secondary'; ?>">
-                    <?php echo esc($p); ?>
+              <?php else: foreach ($nextRows as $t): ?>
+                <?php $p = trim($t['prioridad']); ?>
+                <div class="list-group-item d-flex justify-content-between align-items-start">
+                  <div class="pe-3">
+                    <div class="fw-semibold"><?php echo esc($t['titulo']); ?></div>
+                    <div class="small text-muted truncate-2"><?php echo nl2br(esc($t['descripcion'])); ?></div>
                   </div>
-                  <div class="small mt-1"><i class="bi bi-clock"></i> <?php echo esc($t['fecha_estimada']); ?></div>
+                  <div class="text-end">
+                    <div class="badge text-bg-<?php echo $badgePrio[$p] ?? 'secondary'; ?>">
+                      <?php echo esc($p); ?>
+                    </div>
+                    <div class="small mt-1"><i class="bi bi-clock"></i> <?php echo esc($t['fecha_estimada']); ?></div>
+                  </div>
                 </div>
-              </div>
-            <?php endforeach; endif; ?>
+            <?php endforeach;
+            endif; ?>
           </div>
         </div>
       </div>
@@ -325,20 +388,20 @@ $active = 'tareas';
                   <form method="post" class="d-flex gap-2 align-items-center flex-wrap">
                     <input type="hidden" name="action" value="update">
                     <input type="hidden" name="id" value="<?php echo (int)$row['id']; ?>">
-                    <select name="estatus" class="form-select form-select-sm w-auto" <?php echo $canEdit?'':'disabled'; ?>>
+                    <select name="estatus" class="form-select form-select-sm w-auto" <?php echo $canEdit ? '' : 'disabled'; ?>>
                       <!-- value = canónico (ENUM); label = bonito con tilde -->
-                      <option value="Pendiente"  <?php echo ($estatusRow==='Pendiente')?'selected':''; ?>>Pendiente</option>
-                      <option value="En curso"   <?php echo ($estatusRow==='En curso')?'selected':''; ?>>En curso</option>
-                      <option value="En QA"      <?php echo ($estatusRow==='En QA')?'selected':''; ?>>En QA</option>
-                      <option value="Produccion" <?php echo ($estatusRow==='Produccion' || $estatusRow==='Producción')?'selected':''; ?>>Producción</option>
-                      <option value="Completado" <?php echo ($estatusRow==='Completado')?'selected':''; ?>>Completado</option>
-                      <option value="Cancelado"  <?php echo ($estatusRow==='Cancelado')?'selected':''; ?>>Cancelado</option>
+                      <option value="Pendiente" <?php echo ($estatusRow === 'Pendiente') ? 'selected' : ''; ?>>Pendiente</option>
+                      <option value="En curso" <?php echo ($estatusRow === 'En curso') ? 'selected' : ''; ?>>En curso</option>
+                      <option value="En QA" <?php echo ($estatusRow === 'En QA') ? 'selected' : ''; ?>>En QA</option>
+                      <option value="Produccion" <?php echo ($estatusRow === 'Produccion' || $estatusRow === 'Producción') ? 'selected' : ''; ?>>Producción</option>
+                      <option value="Completado" <?php echo ($estatusRow === 'Completado') ? 'selected' : ''; ?>>Completado</option>
+                      <option value="Cancelado" <?php echo ($estatusRow === 'Cancelado') ? 'selected' : ''; ?>>Cancelado</option>
                     </select>
                 </td>
                 <td class="d-none d-sm-table-cell" style="min-width:180px">
                   <?php $val = $row['fecha_estimada'] ? date('Y-m-d\TH:i', strtotime($row['fecha_estimada'])) : ''; ?>
                   <input type="datetime-local" name="fecha_estimada" class="form-control form-control-sm"
-                         value="<?php echo esc($val); ?>" <?php echo $canEdit?'':'disabled'; ?>>
+                    value="<?php echo esc($val); ?>" <?php echo $canEdit ? '' : 'disabled'; ?>>
                 </td>
                 <td class="sticky-actions">
                   <?php if ($canEdit): ?>
@@ -361,14 +424,14 @@ $active = 'tareas';
   </main>
 
   <script>
-    (function () {
+    (function() {
       const nb = document.querySelector('.navbar');
       if (!nb) return;
-      document.body.style.paddingTop = nb.classList.contains('fixed-top')
-        ? nb.getBoundingClientRect().height + 'px'
-        : '0px';
+      document.body.style.paddingTop = nb.classList.contains('fixed-top') ?
+        nb.getBoundingClientRect().height + 'px' :
+        '0px';
     })();
   </script>
 </body>
-</html>
 
+</html>
