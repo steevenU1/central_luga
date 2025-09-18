@@ -8,11 +8,9 @@ if (file_exists(__DIR__ . '/navbar.php')) require_once __DIR__ . '/navbar.php';
 /* =======================
    Helpers
 ======================= */
-/** Quita prefijo "LUGA" al inicio del nombre, tolerando espacios y separadores comunes */
 if (!function_exists('nombreCortoSucursal')) {
   function nombreCortoSucursal(string $nom): string {
     $n = trim($nom);
-    // LUGA + opcional separador (espacio, guion, dos puntos, etc.)
     $n = preg_replace('/^\s*LUGA[\s\-\:_]*/i', '', $n);
     return $n === '' ? $nom : $n;
   }
@@ -22,11 +20,11 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 /* =======================
    Filtros (GET)
 ======================= */
-$fSucursal  = isset($_GET['sucursal'])  ? (int)$_GET['sucursal'] : 0;   // 0 = Todas
+$fSucursal  = isset($_GET['sucursal'])  ? (int)$_GET['sucursal'] : 0;
 $fMarca     = isset($_GET['marca'])     ? trim($_GET['marca'])    : '';
 $fModelo    = isset($_GET['modelo'])    ? trim($_GET['modelo'])   : '';
 $fCapacidad = isset($_GET['capacidad']) ? trim($_GET['capacidad']): '';
-$verSuc     = isset($_GET['ver_suc'])   ? (int)$_GET['ver_suc']   : 0;  // 0 = compacta (sin columnas sucursal)
+$verSuc     = isset($_GET['ver_suc'])   ? (int)$_GET['ver_suc']   : 0;
 
 /* =======================
    Catálogos para filtros
@@ -39,10 +37,10 @@ $rs = $conn->query("
   ORDER BY nombre
 ");
 while($r = $rs->fetch_assoc()){
-  $catSuc[(int)$r['id']] = nombreCortoSucursal($r['nombre']); // << quita prefijo LUGA
+  $catSuc[(int)$r['id']] = nombreCortoSucursal($r['nombre']);
 }
 
-/* Marcas/Modelos/Capacidades existentes con filtros base */
+/* Marcas/Modelos/Capacidades existentes */
 $whereCat   = [];
 $whereCat[] = "i.estatus IN ('Disponible','En tránsito')";
 $whereCat[] = "p.tipo_producto = 'Equipo'";
@@ -96,8 +94,8 @@ $sql = "
 $res = $conn->query($sql);
 
 /* Pivot en PHP */
-$rows   = [];   // ['marca','modelo','capacidad','sucs'=>[sid=>qty],'total']
-$sucSet = [];   // sucursales presentes en el resultado
+$rows   = [];
+$sucSet = [];
 
 while($r = $res->fetch_assoc()){
   $key = $r['marca'].'|'.$r['modelo'].'|'.$r['capacidad'];
@@ -115,7 +113,7 @@ while($r = $res->fetch_assoc()){
   $rows[$key]['sucs'][$sid] = ($rows[$key]['sucs'][$sid] ?? 0) + $qty;
   $rows[$key]['total']     += $qty;
 
-  $sucSet[$sid] = nombreCortoSucursal($r['sucursal']); // << quita prefijo LUGA
+  $sucSet[$sid] = nombreCortoSucursal($r['sucursal']);
 }
 
 /* Sucursales para columnas (solo si se pide verSuc=1) */
@@ -129,18 +127,16 @@ if ($verSuc) {
   asort($useSuc, SORT_NATURAL | SORT_FLAG_CASE);
 }
 
-/* ===== ORDEN FILAS POR TOTAL DESC (y luego marca→modelo→capacidad) ===== */
+/* Orden filas */
 uasort($rows, function($A,$B){
-  $byTotal = $B['total'] <=> $A['total']; // desc
+  $byTotal = $B['total'] <=> $A['total'];
   if ($byTotal !== 0) return $byTotal;
-  $c = strnatcasecmp($A['marca'],$B['marca']);
-  if ($c !== 0) return $c;
-  $c = strnatcasecmp($A['modelo'],$B['modelo']);
-  if ($c !== 0) return $c;
+  $c = strnatcasecmp($A['marca'],$B['marca']); if ($c!==0) return $c;
+  $c = strnatcasecmp($A['modelo'],$B['modelo']); if ($c!==0) return $c;
   return strnatcasecmp($A['capacidad'],$B['capacidad']);
 });
 
-/* Totales por columna y gran total */
+/* Totales */
 $colTotals  = [];
 $grandTotal = 0;
 if ($verSuc) { foreach ($useSuc as $sid => $name) $colTotals[$sid] = 0; }
@@ -184,7 +180,6 @@ $colspan = 3 + ($verSuc ? max(1, count($useSuc)) : 0) + 1;
   .btn.secondary{background:#fff;color:#111;border-color:#cbd5e1}
   .btn.ghost{background:#eef2ff;color:#0b5ed7;border-color:#dbeafe}
 
-  /* contenedor: sin scroll horizontal por defecto */
   .table-scroll{position:relative;max-height:70vh;overflow:auto;border:1px solid #e5e7eb;background:#fff;border-radius:8px}
 
   table{border-collapse:separate;border-spacing:0;width:100%;white-space:nowrap}
@@ -193,7 +188,7 @@ $colspan = 3 + ($verSuc ? max(1, count($useSuc)) : 0) + 1;
   tbody td:first-child, tbody td:nth-child(2), tbody td:nth-child(3){text-align:left}
   .num{font-variant-numeric:tabular-nums}
 
-  /* Columnas fijas */
+  /* Columnas fijas (desktop) */
   .fixed{position:sticky;background:#fff}
   .fixed-1{left:0}
   .fixed-2{left:var(--left-col-2,120px)}
@@ -206,8 +201,16 @@ $colspan = 3 + ($verSuc ? max(1, count($useSuc)) : 0) + 1;
   tbody td.fixed{z-index:var(--z-body-fixed)}
   tfoot th.fixed{z-index:var(--z-body-fixed)}
 
-  /* Encabezados verticales sucursal */
-  .suc-th{ writing-mode:vertical-rl; transform: rotate(180deg); text-align:left; vertical-align:bottom; min-width:28px; padding:6px 4px; }
+  /* ===== Encabezados en vertical (DESKTOP por defecto) ===== */
+  thead th{
+    writing-mode:vertical-rl;
+    transform: rotate(180deg);
+    text-align:left;
+    vertical-align:bottom;
+    min-width:28px;
+    padding:6px 4px;
+  }
+  /* pastillas y filas hover se mantienen */
   tbody tr:hover td, tbody tr:hover .fixed{background:#eef4ff !important}
 
   .total-th, .total-td{background:#fafafa;font-weight:600}
@@ -215,7 +218,6 @@ $colspan = 3 + ($verSuc ? max(1, count($useSuc)) : 0) + 1;
   tfoot .fixed{background:#f6f7fb}
   .muted{color:#64748b;font-size:12px}
 
-  /* Botón-pill para abrir detalle */
   .cell-modelo{
     display:inline-flex; align-items:center; gap:8px;
     padding:4px 10px; border-radius:999px;
@@ -227,7 +229,6 @@ $colspan = 3 + ($verSuc ? max(1, count($useSuc)) : 0) + 1;
   .cell-modelo:hover{ background:#e0e7ff; border-color:#c7d2fe; box-shadow:0 0 0 2px #e0e7ff; }
   .item-row.open .cell-modelo{ background:#dbeafe; border-color:#93c5fd; }
 
-  /* Chevron que gira */
   .cell-modelo .chev{
     width:0; height:0;
     border-top:5px solid transparent;
@@ -237,15 +238,42 @@ $colspan = 3 + ($verSuc ? max(1, count($useSuc)) : 0) + 1;
   }
   .item-row.open .cell-modelo .chev{ transform:rotate(90deg); }
 
-  /* Detalle con fade-in */
   .detail-row td{ background:#fbfbff; border-bottom:1px solid #e5e7eb; }
   .detail-row .detail-box{ padding:10px 12px; animation:fadeIn .15s ease-in; }
   @keyframes fadeIn{ from{opacity:.4} to{opacity:1} }
 
-  /* Spinner mini */
   .spinner{display:inline-block; width:18px; height:18px; border:2px solid #cbd5e1; border-top-color:#2563eb; border-radius:50%; animation:spin 0.8s linear infinite; vertical-align:middle}
   @keyframes spin{to{transform:rotate(360deg)}}
   .mini{font-size:13px}
+
+  /* ===== RESPONSIVE (MÓVIL) ===== */
+  @media (max-width: 768px){
+    .container{padding:0 8px}
+    .table-scroll{max-height:none; overflow:auto}
+    table{white-space:normal}
+    th,td{padding:8px 8px}
+
+    /* sin sticky en móvil */
+    thead th{ position:static !important; top:auto !important; z-index:auto !important; }
+
+    /* En móvil: todos los encabezados horizontales... */
+    thead th{
+      writing-mode:horizontal-tb;
+      transform:none;
+      text-align:left;
+      min-width:auto;
+      padding:8px 6px;
+    }
+    /* ...excepto los de SUCURSAL que van VERTICALES */
+    thead th.suc-th{
+      writing-mode:vertical-rl !important;
+      transform: rotate(180deg) !important;
+      text-align:left !important;
+      vertical-align:bottom !important;
+      min-width:26px !important;
+      padding:6px 4px !important;
+    }
+  }
 </style>
 
 </head>
@@ -367,7 +395,6 @@ $colspan = 3 + ($verSuc ? max(1, count($useSuc)) : 0) + 1;
 
               <td class="total-td num"><?= (int)$row['total'] ?></td>
             </tr>
-            <!-- Fila detalle (se llena por AJAX) -->
             <tr class="detail-row" style="display:none">
               <td colspan="<?=$colspan?>" class="mini">
                 <div class="detail-box">
@@ -407,10 +434,53 @@ $colspan = 3 + ($verSuc ? max(1, count($useSuc)) : 0) + 1;
 </div>
 
 <script>
-/* Calcular offsets para las 3 columnas fijas con sus anchos reales */
-function setStickyOffsets(){
+/* (Se mantiene) — Forzar modo móvil quitando clases sticky y restaurar en desktop */
+function stripFixedForMobile(){
+  const isMobile = window.matchMedia('(max-width: 768px)').matches;
   const tbl = document.getElementById('resumenTbl');
   if (!tbl) return;
+
+  const fixedNodes = tbl.querySelectorAll('.fixed-1, .fixed-2, .fixed-3, td.fixed, th.fixed');
+
+  if (isMobile){
+    fixedNodes.forEach(el=>{
+      if (!el.dataset.origClass){
+        el.dataset.origClass = el.className;
+      }
+      el.classList.remove('fixed','fixed-1','fixed-2','fixed-3');
+      el.style.left = '';
+      el.style.position = '';
+      el.style.zIndex = '';
+    });
+    document.querySelectorAll('thead th').forEach(th=>{
+      th.style.position = 'static';
+      th.style.top = 'auto';
+      th.style.zIndex = 'auto';
+    });
+  } else {
+    document.querySelectorAll('[data-orig-class]').forEach(el=>{
+      el.className = el.dataset.origClass;
+    });
+    fixedNodes.forEach(el=>{
+      if (el.dataset.origClass){ el.className = el.dataset.origClass; }
+      el.style.left = '';
+      el.style.position = '';
+      el.style.zIndex = '';
+    });
+    document.querySelectorAll('thead th').forEach(th=>{
+      th.style.position = '';
+      th.style.top = '';
+      th.style.zIndex = '';
+    });
+    setStickyOffsets();
+  }
+}
+
+/* Recalcular offsets para columnas fijas (desktop) */
+function setStickyOffsets(){
+  const isMobile = window.matchMedia('(max-width: 768px)').matches;
+  const tbl = document.getElementById('resumenTbl');
+  if (!tbl || isMobile) return;
 
   const c1 = tbl.querySelector('thead .fixed-1');
   const c2 = tbl.querySelector('thead .fixed-2');
@@ -426,20 +496,18 @@ function setStickyOffsets(){
   tbl.style.setProperty('--left-col-3', left3 + 'px');
 }
 
-window.addEventListener('load', setStickyOffsets);
-window.addEventListener('resize', setStickyOffsets);
+window.addEventListener('load', () => { stripFixedForMobile(); setStickyOffsets(); });
+window.addEventListener('resize', () => { stripFixedForMobile(); setStickyOffsets(); });
 const wrap = document.getElementById('tblWrap');
-if (wrap) { new ResizeObserver(() => setStickyOffsets()).observe(wrap); }
+if (wrap) { new ResizeObserver(() => { stripFixedForMobile(); setStickyOffsets(); }).observe(wrap); }
 
-/* Toggle detalle por modelo (carga AJAX y cachea en la fila) */
+/* Toggle detalle por modelo */
 document.querySelectorAll('#resumenTbl tbody tr.item-row').forEach(function(row){
   const btn = row.querySelector('.cell-modelo');
-  const detailRow = row.nextElementSibling; // la fila siguiente es la de detalle
+  const detailRow = row.nextElementSibling;
 
   btn.addEventListener('click', async function(e){
     e.preventDefault();
-
-    // Cerrar otras abiertas
     document.querySelectorAll('#resumenTbl tbody tr.detail-row').forEach(dr=>{
       if (dr !== detailRow) dr.style.display = 'none';
     });
