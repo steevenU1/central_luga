@@ -27,35 +27,51 @@ $stmtZona->execute();
 $zona = $stmtZona->get_result()->fetch_assoc()['zona'] ?? '';
 $stmtZona->close();
 
-// 🔹 Saldos por sucursal (excluye anuladas)
+/* =========================================================
+   Saldos por sucursal (versión robusta sin JOINs agregados)
+   - Usa subconsultas correlacionadas por sucursal
+   - Evita “congelado” de cifras por GROUP BY/LEFT JOIN
+========================================================= */
 function obtenerSaldos(mysqli $conn, string $zona){
     $sql = "
         SELECT 
-            s.id AS id_sucursal,
+            s.id   AS id_sucursal,
             s.nombre AS sucursal,
-            IFNULL(c.total_comisiones,0) AS total_comisiones,
-            IFNULL(e.total_entregado,0) AS total_entregado,
-            (IFNULL(c.total_comisiones,0) - IFNULL(e.total_entregado,0)) AS saldo_pendiente
+            COALESCE((
+                SELECT SUM(cb.comision_especial)
+                FROM cobros cb
+                WHERE cb.id_sucursal = s.id
+                  AND cb.comision_especial > 0
+                  /* Si existen flags de cancelación en cobros, destapar: 
+                  AND (cb.anulado = 0 OR cb.anulado IS NULL)
+                  AND (cb.estatus IS NULL OR cb.estatus NOT IN ('Cancelado','Anulado'))
+                  */
+            ),0) AS total_comisiones,
+            COALESCE((
+                SELECT SUM(en.monto_entregado)
+                FROM entregas_comisiones_especiales en
+                WHERE en.id_sucursal = s.id
+                  AND en.anulado = 0
+            ),0) AS total_entregado
         FROM sucursales s
-        LEFT JOIN (
-            SELECT id_sucursal, SUM(comision_especial) AS total_comisiones
-            FROM cobros
-            WHERE comision_especial > 0
-            GROUP BY id_sucursal
-        ) c ON c.id_sucursal = s.id
-        LEFT JOIN (
-            SELECT id_sucursal, SUM(monto_entregado) AS total_entregado
-            FROM entregas_comisiones_especiales
-            WHERE anulado = 0
-            GROUP BY id_sucursal
-        ) e ON e.id_sucursal = s.id
         WHERE s.zona = ?
         ORDER BY s.nombre
     ";
     $stmt = $conn->prepare($sql);
     $stmt->bind_param("s",$zona);
     $stmt->execute();
-    return $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $stmt->close();
+
+    // Calcula saldo en PHP y limpia -0.00
+    foreach ($rows as &$r) {
+        $tc = (float)$r['total_comisiones'];
+        $te = (float)$r['total_entregado'];
+        $sp = $tc - $te;
+        if ($sp < 0 && $sp > -0.01) $sp = 0; // evita -0.00
+        $r['saldo_pendiente'] = $sp;
+    }
+    return $rows;
 }
 
 // 🔹 Historial (muestra todo; marca anuladas)
@@ -143,30 +159,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $observaciones = trim($_POST['observaciones'] ?? '');
 
         if ($idSucursal > 0 && $monto > 0) {
-            // Saldo pendiente actual (excluyendo anuladas)
+            // ✅ Saldo pendiente actual con subconsultas (sin JOINs)
             $sqlSaldo = "
                 SELECT 
-                    IFNULL(c.total_comisiones,0) - IFNULL(e.total_entregado,0) AS saldo_pendiente
-                FROM (
-                    SELECT id_sucursal, SUM(comision_especial) AS total_comisiones
-                    FROM cobros
-                    WHERE comision_especial > 0
-                    GROUP BY id_sucursal
-                ) c
-                LEFT JOIN (
-                    SELECT id_sucursal, SUM(monto_entregado) AS total_entregado
-                    FROM entregas_comisiones_especiales
-                    WHERE anulado = 0
-                    GROUP BY id_sucursal
-                ) e ON e.id_sucursal = c.id_sucursal
-                WHERE c.id_sucursal = ?
-                LIMIT 1
+                  COALESCE((
+                    SELECT SUM(cb.comision_especial)
+                    FROM cobros cb
+                    WHERE cb.id_sucursal = ?
+                      AND cb.comision_especial > 0
+                      /* Si existen flags de cancelación en cobros, destapar:
+                      AND (cb.anulado = 0 OR cb.anulado IS NULL)
+                      AND (cb.estatus IS NULL OR cb.estatus NOT IN ('Cancelado','Anulado'))
+                      */
+                  ),0)
+                  -
+                  COALESCE((
+                    SELECT SUM(en.monto_entregado)
+                    FROM entregas_comisiones_especiales en
+                    WHERE en.id_sucursal = ?
+                      AND en.anulado = 0
+                  ),0) AS saldo_pendiente
             ";
             $stmt = $conn->prepare($sqlSaldo);
-            $stmt->bind_param("i",$idSucursal);
+            $stmt->bind_param("ii",$idSucursal,$idSucursal);
             $stmt->execute();
             $rowSaldo = $stmt->get_result()->fetch_assoc();
-            $saldo = $rowSaldo['saldo_pendiente'] ?? 0;
+            $saldo = (float)($rowSaldo['saldo_pendiente'] ?? 0.0);
 
             if ($monto > $saldo + 0.00001) {
                 $msg = "<div class='alert alert-danger shadow-sm'>❌ El monto excede el saldo pendiente: ".mx($saldo)."</div>";
@@ -378,11 +396,13 @@ body { background:#f6f8fb; }
                     <label class="form-label">Sucursal</label>
                     <select name="id_sucursal" id="selectSucursal" class="form-select" required>
                         <option value="">-- Selecciona Sucursal --</option>
-                        <?php foreach($saldos as $s): if((float)$s['saldo_pendiente']>0): ?>
+                        <?php foreach($saldos as $s): 
+                            $sp = max(0,(float)$s['saldo_pendiente']); // 👈 blindaje
+                            if($sp>0): ?>
                             <option 
                                 value="<?= (int)$s['id_sucursal'] ?>"
-                                data-saldo="<?= number_format((float)$s['saldo_pendiente'],2,'.','') ?>">
-                                <?= h($s['sucursal']) ?> — Pendiente <?= mx($s['saldo_pendiente']) ?>
+                                data-saldo="<?= number_format($sp,2,'.','') ?>">
+                                <?= h($s['sucursal']) ?> — Pendiente <?= mx($sp) ?>
                             </option>
                         <?php endif; endforeach; ?>
                     </select>
@@ -536,7 +556,7 @@ body { background:#f6f8fb; }
 </div>
 
 <!-- Bootstrap JS (necesario para modales) -->
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script> -->
 
 <script>
 // Filtros
