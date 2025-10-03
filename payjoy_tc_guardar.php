@@ -28,7 +28,7 @@ if (!$flagOpen) {
 $nombreCliente = trim($_POST['nombre_cliente'] ?? '');
 $tag           = trim($_POST['tag'] ?? '');
 $comentarios   = trim($_POST['comentarios'] ?? '');
-$comision      = 100.00; // fija
+$comision      = 50.00; // fija
 
 if ($nombreCliente === '' || $tag === '') {
   header("Location: payjoy_tc_nueva.php?err=" . urlencode("Faltan datos obligatorios"));
