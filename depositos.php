@@ -8,14 +8,38 @@ if (!isset($_SESSION['id_usuario']) || $_SESSION['rol'] != 'Admin') {
 include 'db.php';
 include 'navbar.php';
 
+/* =======================
+   Auto-migración segura
+   ======================= */
+function hasColumn(mysqli $conn, string $table, string $column): bool {
+    $t = $conn->real_escape_string($table);
+    $c = $conn->real_escape_string($column);
+    $sql = "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME = '{$t}'
+              AND COLUMN_NAME = '{$c}'
+            LIMIT 1";
+    $res = $conn->query($sql);
+    return $res && $res->num_rows > 0;
+}
+if (!hasColumn($conn, 'depositos_sucursal', 'comentario_admin')) {
+    @$conn->query("ALTER TABLE depositos_sucursal
+                   ADD COLUMN comentario_admin TEXT NULL AFTER referencia");
+}
+
 $msg = '';
 
-// 1) Validar un depósito (SIN CAMBIOS DE LÓGICA)
+/* =======================
+   1) Acciones POST
+   ======================= */
+$esAjax = !empty($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest';
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['id_deposito'], $_POST['accion'])) {
     $idDeposito = intval($_POST['id_deposito']);
-    $accion = $_POST['accion'];
+    $accion     = $_POST['accion'];
 
     if ($accion === 'Validar') {
+        // Validar depósito (lógica original)
         $stmt = $conn->prepare("
             UPDATE depositos_sucursal
             SET estado='Validado', id_admin_valida=?, actualizado_en=NOW()
@@ -50,10 +74,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['id_deposito'], $_POST
         }
 
         $msg = "<div class='alert alert-success mb-3'>✅ Depósito validado correctamente.</div>";
+
+    } elseif ($accion === 'GuardarComentario') {
+        // Guardar/actualizar comentario del admin
+        $comentario = trim($_POST['comentario_admin'] ?? '');
+        $stmt = $conn->prepare("
+            UPDATE depositos_sucursal
+            SET comentario_admin = ?, actualizado_en = NOW()
+            WHERE id = ?
+        ");
+        $stmt->bind_param("si", $comentario, $idDeposito);
+        $stmt->execute();
+
+        if ($esAjax) {
+            header('Content-Type: application/json; charset=UTF-8');
+            echo json_encode(['ok' => true]);
+            exit;
+        } else {
+            $msg = "<div class='alert alert-primary mb-3'>📝 Comentario guardado.</div>";
+        }
     }
 }
 
-// 2) Depósitos pendientes (agrupados por corte)
+/* =======================
+   2) Depósitos pendientes
+   ======================= */
 $sqlPendientes = "
     SELECT ds.id AS id_deposito,
            s.nombre AS sucursal,
@@ -64,7 +109,8 @@ $sqlPendientes = "
            ds.banco,
            ds.referencia,
            ds.estado,
-           ds.comprobante_archivo
+           ds.comprobante_archivo,
+           ds.comentario_admin
     FROM depositos_sucursal ds
     INNER JOIN cortes_caja cc ON cc.id = ds.id_corte
     INNER JOIN sucursales s ON s.id = ds.id_sucursal
@@ -73,7 +119,9 @@ $sqlPendientes = "
 ";
 $pendientes = $conn->query($sqlPendientes)->fetch_all(MYSQLI_ASSOC);
 
-// 3) Filtros para Historial
+/* =======================
+   3) Filtros para Historial
+   ======================= */
 $sucursales = $conn->query("SELECT id, nombre FROM sucursales ORDER BY nombre")->fetch_all(MYSQLI_ASSOC);
 
 $sucursal_id = isset($_GET['sucursal_id']) ? (int)$_GET['sucursal_id'] : 0;
@@ -81,7 +129,7 @@ $desde       = trim($_GET['desde'] ?? '');
 $hasta       = trim($_GET['hasta'] ?? '');
 $semana      = trim($_GET['semana'] ?? ''); // YYYY-Www
 
-// Semana → lunes a domingo
+// Semana ISO → lunes a domingo
 if ($semana && preg_match('/^(\d{4})-W(\d{2})$/', $semana, $m)) {
     $yr = (int)$m[1]; $wk = (int)$m[2];
     $dt = new DateTime();
@@ -91,7 +139,9 @@ if ($semana && preg_match('/^(\d{4})-W(\d{2})$/', $semana, $m)) {
     $hasta = $dt->format('Y-m-d');
 }
 
-// 3b) Historial con filtros
+/* =======================
+   3b) Historial con filtros
+   ======================= */
 $sqlHistorial = "
     SELECT ds.id AS id_deposito,
            s.nombre AS sucursal,
@@ -102,7 +152,8 @@ $sqlHistorial = "
            ds.banco,
            ds.referencia,
            ds.estado,
-           ds.comprobante_archivo
+           ds.comprobante_archivo,
+           ds.comentario_admin
     FROM depositos_sucursal ds
     INNER JOIN cortes_caja cc ON cc.id = ds.id_corte
     INNER JOIN sucursales s ON s.id = ds.id_sucursal
@@ -120,7 +171,9 @@ $stmtH->execute();
 $historial = $stmtH->get_result()->fetch_all(MYSQLI_ASSOC);
 $stmtH->close();
 
-// 4) Saldos por sucursal
+/* =======================
+   4) Saldos por sucursal
+   ======================= */
 $sqlSaldos = "
     SELECT 
         s.id,
@@ -139,7 +192,9 @@ $sqlSaldos = "
 ";
 $saldos = $conn->query($sqlSaldos)->fetch_all(MYSQLI_ASSOC);
 
-// 5) Cortes de caja (con filtros)
+/* =======================
+   5) Cortes de caja
+   ======================= */
 $c_sucursal_id = isset($_GET['c_sucursal_id']) ? (int)$_GET['c_sucursal_id'] : 0;
 $c_desde       = trim($_GET['c_desde'] ?? '');
 $c_hasta       = trim($_GET['c_hasta'] ?? '');
@@ -161,18 +216,38 @@ $sqlCortes = "
   INNER JOIN sucursales s ON s.id = cc.id_sucursal
   WHERE 1=1
 ";
-$typesC=''; $paramsC=[];
-if ($c_sucursal_id > 0) { $sqlCortes .= " AND cc.id_sucursal = ? "; $typesC.='i'; $paramsC[]=$c_sucursal_id; }
-if ($c_desde !== '')     { $sqlCortes .= " AND cc.fecha_operacion >= ? "; $typesC.='s'; $paramsC[]=$c_desde; }
-if ($c_hasta !== '')     { $sqlCortes .= " AND cc.fecha_operacion <= ? "; $typesC.='s'; $paramsC[]=$c_hasta; }
+
+$typesC = '';
+$paramsC = [];
+
+if ($c_sucursal_id > 0) { 
+    $sqlCortes .= " AND cc.id_sucursal = ? "; 
+    $typesC .= 'i'; 
+    $paramsC[] = $c_sucursal_id; 
+}
+if ($c_desde !== '') { 
+    $sqlCortes .= " AND cc.fecha_operacion >= ? "; 
+    $typesC .= 's'; 
+    $paramsC[] = $c_desde; 
+}
+if ($c_hasta !== '') { 
+    $sqlCortes .= " AND cc.fecha_operacion <= ? "; 
+    $typesC .= 's'; 
+    $paramsC[] = $c_hasta; 
+}
+
+// 🔹 aquí estaba el error: antes decía `$sqlCortes += ...`
 $sqlCortes .= " ORDER BY cc.fecha_operacion DESC, cc.id DESC";
+
 $stmtC = $conn->prepare($sqlCortes);
 if ($typesC) { $stmtC->bind_param($typesC, ...$paramsC); }
 $stmtC->execute();
 $cortes = $stmtC->get_result()->fetch_all(MYSQLI_ASSOC);
 $stmtC->close();
 
-// Métricas UI
+/* =======================
+   Métricas UI
+   ======================= */
 $pendCount = count($pendientes);
 $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_depositado']; }
 ?>
@@ -206,11 +281,15 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
     .help-text{color:var(--muted); font-size:.9rem;}
     .table thead th{ position:sticky; top:0; background:#0f172a; color:#fff; z-index:1;}
     .table-hover tbody tr:hover{ background: rgba(13,110,253,.06); }
-    .table-xs td, .table-xs th{ padding:.45rem .6rem; font-size:.92rem; }
+    .table-xs td, .table-xs th{ padding:.45rem .6rem; font-size:.92rem; vertical-align: middle; }
     .nav-tabs .nav-link{border:0; border-bottom:2px solid transparent;}
     .nav-tabs .nav-link.active{border-bottom-color:var(--brand); font-weight:700;}
     .sticky-actions{ position:sticky; bottom:0; background:#fff; padding:.5rem; border-top:1px solid #e5e7eb;}
     code{background:#f1f5f9; padding:.1rem .35rem; border-radius:.35rem;}
+    .comment-cell textarea{ min-width: 240px; min-height: 38px; }
+    @media (max-width: 992px){
+      .comment-cell textarea{ min-width: 160px; }
+    }
   </style>
 </head>
 <body>
@@ -266,7 +345,7 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
     </div>
   </div>
 
-  <!-- EXPORTAR POR DÍA (MOVIDO AQUÍ, DEBAJO DE CARDS) -->
+  <!-- EXPORTAR POR DÍA -->
   <div class="card card-elev mb-4">
     <div class="card-header d-flex justify-content-between align-items-center">
       <div class="section-title mb-0"><i class="bi bi-download"></i> Exportar transacciones por día</div>
@@ -336,6 +415,7 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
                     <th>Banco</th>
                     <th>Referencia</th>
                     <th>Comprobante</th>
+                    <th>Comentario admin</th>
                     <th class="text-center">Acciones</th>
                   </tr>
                 </thead>
@@ -345,7 +425,7 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
                 foreach ($pendientes as $p): 
                   if ($lastCorte !== $p['id_corte']): ?>
                     <tr class="table-secondary">
-                      <td colspan="9" class="fw-semibold">
+                      <td colspan="10" class="fw-semibold">
                         <i class="bi bi-journal-check me-1"></i>Corte #<?= (int)$p['id_corte'] ?> · 
                         <span class="text-primary"><?= htmlspecialchars($p['sucursal']) ?></span>
                         <span class="ms-2 text-muted">Fecha: <?= htmlspecialchars($p['fecha_corte']) ?></span>
@@ -370,6 +450,19 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
                         </button>
                       <?php else: ?><span class="text-muted">—</span><?php endif; ?>
                     </td>
+
+                    <!-- Comentario admin (editable con AJAX) -->
+                    <td class="comment-cell">
+                      <form method="POST" class="d-flex gap-2 align-items-start js-comment-form">
+                        <input type="hidden" name="id_deposito" value="<?= (int)$p['id_deposito'] ?>">
+                        <textarea name="comentario_admin" class="form-control form-control-sm" placeholder="Ej. Depósito incompleto / aclarar referencia"><?= htmlspecialchars($p['comentario_admin'] ?? '') ?></textarea>
+                        <button name="accion" value="GuardarComentario" class="btn btn-outline-primary btn-sm">
+                          <i class="bi bi-floppy"></i>
+                        </button>
+                      </form>
+                    </td>
+
+                    <!-- Acciones -->
                     <td class="text-center">
                       <form method="POST" class="d-inline" onsubmit="return confirmarValidacion(<?= (int)$p['id_deposito'] ?>, '<?= htmlspecialchars($p['sucursal'],ENT_QUOTES) ?>', '<?= number_format($p['monto_depositado'],2) ?>');">
                         <input type="hidden" name="id_deposito" value="<?= (int)$p['id_deposito'] ?>">
@@ -440,11 +533,12 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
                   <th>Referencia</th>
                   <th>Comprobante</th>
                   <th>Estado</th>
+                  <th>Comentario admin</th>
                 </tr>
               </thead>
               <tbody>
                 <?php if (!$historial): ?>
-                  <tr><td colspan="10" class="text-muted">Sin resultados con los filtros actuales.</td></tr>
+                  <tr><td colspan="11" class="text-muted">Sin resultados con los filtros actuales.</td></tr>
                 <?php endif; ?>
                 <?php foreach ($historial as $h): ?>
                   <tr class="<?= $h['estado']=='Validado'?'table-success':'' ?>">
@@ -467,6 +561,9 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
                     </td>
                     <td>
                       <span class="badge <?= $h['estado']=='Validado'?'bg-success':'bg-warning text-dark' ?>"><?= htmlspecialchars($h['estado']) ?></span>
+                    </td>
+                    <td style="max-width:360px;">
+                      <div class="text-break"><?= nl2br(htmlspecialchars($h['comentario_admin'] ?? '')) ?></div>
                     </td>
                   </tr>
                 <?php endforeach; ?>
@@ -651,7 +748,7 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
 
 </div>
 
-<!-- Modal visor -->
+<!-- Modal visor (comprobante) -->
 <div class="modal fade" id="visorModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-xl modal-dialog-centered">
     <div class="modal-content">
@@ -665,6 +762,18 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
       <div class="modal-footer">
         <a id="btnAbrirNueva" href="#" target="_blank" class="btn btn-outline-secondary">Abrir en nueva pestaña</a>
         <button type="button" class="btn btn-primary" data-bs-dismiss="modal">Listo</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Modal rápido de éxito de comentario -->
+<div class="modal fade" id="comentarioOkModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-sm modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-body text-center py-4">
+        <i class="bi bi-check2-circle fs-1 text-success d-block mb-2"></i>
+        <div class="fw-semibold">Comentario guardado</div>
       </div>
     </div>
   </div>
@@ -710,6 +819,44 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
     return confirm(`¿Validar el depósito #${id} de ${sucursal} por $${monto}?`);
   }
   window.confirmarValidacion = confirmarValidacion;
+
+  // === Guardar comentario por AJAX con modal rápido ===
+  const okModalEl = document.getElementById('comentarioOkModal');
+  const okModal = okModalEl ? new bootstrap.Modal(okModalEl, {backdrop: 'static', keyboard: false}) : null;
+
+  document.querySelectorAll('.js-comment-form').forEach(form => {
+    form.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const fd = new FormData(form);
+      if (!fd.get('accion')) fd.append('accion', 'GuardarComentario');
+
+      try {
+        const resp = await fetch(location.href, {
+          method: 'POST',
+          headers: {'X-Requested-With': 'XMLHttpRequest'},
+          body: fd
+        });
+        let ok = false;
+        try {
+          const data = await resp.json();
+          ok = !!data.ok;
+        } catch (e) {
+          ok = resp.ok; // fallback
+        }
+        if (ok) {
+          if (okModal) {
+            okModal.show();
+            setTimeout(() => okModal.hide(), 1200);
+          }
+        } else {
+          alert('No se pudo guardar el comentario. Intenta de nuevo.');
+        }
+      } catch (err) {
+        console.error(err);
+        alert('Error de red al guardar comentario.');
+      }
+    }, {passive:false});
+  });
 </script>
 </body>
 </html>

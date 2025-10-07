@@ -219,10 +219,11 @@ if ($f_fin    !== '') { $conds[] = 'ds.fecha_deposito <= ?'; $types .= 's'; $par
 if ($f_banco  !== '') { $conds[] = 'ds.banco = ?';             $types .= 's'; $params[] = $f_banco; }
 if ($f_estado !== '') { $conds[] = 'ds.estado = ?';            $types .= 's'; $params[] = $f_estado; }
 if ($f_q      !== '') {
-  $conds[] = '(ds.referencia LIKE ? OR ds.banco LIKE ? OR ds.observaciones LIKE ?)';
-  $types  .= 'sss';
+  // 🔎 ahora también busca en comentario_admin
+  $conds[] = '(ds.referencia LIKE ? OR ds.banco LIKE ? OR ds.observaciones LIKE ? OR ds.comentario_admin LIKE ?)';
+  $types  .= 'ssss';
   $like = '%'.$f_q.'%';
-  array_push($params, $like, $like, $like);
+  array_push($params, $like, $like, $like, $like);
 }
 $where = implode(' AND ', $conds);
 
@@ -271,7 +272,7 @@ $stmtPend->execute();
 $cortesPendientes = $stmtPend->get_result()->fetch_all(MYSQLI_ASSOC);
 $stmtPend->close();
 
-// Historial paginado
+// Historial paginado (trae comentario_admin dentro de ds.*)
 $sqlCount = "SELECT COUNT(*) AS n
              FROM depositos_sucursal ds
              INNER JOIN cortes_caja cc ON cc.id = ds.id_corte
@@ -305,6 +306,21 @@ foreach ($cortesPendientes as $c) {
 }
 $numCortes = count($cortesPendientes);
 $total_pages = max(1, (int)ceil($total_rows / $per_page));
+
+// === Conteo de depósitos con comentario del Admin (no validados) ===
+$sqlCmt = "
+  SELECT COUNT(*) AS n
+  FROM depositos_sucursal ds
+  WHERE ds.id_sucursal = ?
+    AND TRIM(COALESCE(ds.comentario_admin,'')) <> ''
+    AND ds.estado <> 'Validado'
+";
+$stmtCmt = $conn->prepare($sqlCmt);
+$stmtCmt->bind_param('i', $idSucursal);
+$stmtCmt->execute();
+$numConComentario = (int)$stmtCmt->get_result()->fetch_assoc()['n'];
+$stmtCmt->close();
+
 ?>
 <!DOCTYPE html>
 <html lang="es" data-bs-theme="light">
@@ -331,12 +347,15 @@ $total_pages = max(1, (int)ceil($total_rows / $per_page));
     .chip-warn{background:#fff6e6;color:#9a6200;border:1px solid #ffe1a8}
     .chip-pending{background:#eef2ff;color:#3f51b5;border:1px solid #dfe3ff}
 
+    /* 🔴 indicador de comentario admin */
+    .chip-alert{background:#ffe8e8;color:#b42318;border:1px solid #ffcdcd}
+    .comment-icon{color:#b42318}
+
     .form-mini .form-control,.form-mini .form-select{height:38px}
     .form-mini .form-control[type=file]{height:auto}
 
     .sticky-head thead th{position:sticky;top:0;z-index:1;background:#fff}
 
-    /* ===== Filtros Modernos ===== */
     .filters-wrap{border:1px solid rgba(0,0,0,.06);background:#fff;border-radius:16px;padding:14px;box-shadow:0 8px 24px rgba(2,6,23,.06)}
     .filters-modern .form-floating>.form-control, .filters-modern .form-floating>.form-select{border-radius:12px;border-color:#e5e7eb}
     .filters-modern .form-floating>label{color:#64748b}
@@ -367,6 +386,19 @@ $total_pages = max(1, (int)ceil($total_rows / $per_page));
   </div>
 
   <?= $msg ?>
+
+  <?php if (!empty($numConComentario) && $numConComentario > 0): ?>
+  <div class="alert alert-danger shadow-sm d-flex align-items-center justify-content-between" role="alert" id="bannerComentarios" style="border-left:6px solid #dc3545;">
+    <div class="d-flex align-items-center gap-2">
+      <i class="bi bi-exclamation-octagon-fill fs-4"></i>
+      <div>
+        <strong>Tienes <?= (int)$numConComentario ?></strong> depósito<?= $numConComentario>1?'s':'' ?> con comentarios del Administrador.
+        <a href="#historialSection" id="linkVerComentarios" class="alert-link">Da clic aquí para revisarlos</a>.
+      </div>
+    </div>
+  </div>
+<?php endif; ?>
+
 
   <!-- Cortes pendientes de depósito -->
   <div class="card-surface p-3 p-md-4 mb-4">
@@ -472,7 +504,7 @@ $total_pages = max(1, (int)ceil($total_rows / $per_page));
   </div>
 
   <!-- Historial con filtros y paginación -->
-  <div class="card-surface p-3 p-md-4">
+  <div class="card-surface p-3 p-md-4" id="historialSection">
     <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
       <h4 class="m-0"><i class="bi bi-clock-history me-2"></i>Historial de Depósitos</h4>
       <div class="d-flex gap-2">
@@ -488,7 +520,7 @@ $total_pages = max(1, (int)ceil($total_rows / $per_page));
         <div class="col-12 col-lg-4">
           <div class="form-floating">
             <input type="text" name="q" id="f_q" value="<?= htmlspecialchars($f_q) ?>" class="form-control" placeholder="Buscar">
-            <label for="f_q"><i class="bi bi-search me-1"></i>Buscar (referencia, banco, motivo)</label>
+            <label for="f_q"><i class="bi bi-search me-1"></i>Buscar (referencia, banco, motivo, comentario)</label>
           </div>
         </div>
 
@@ -526,17 +558,6 @@ $total_pages = max(1, (int)ceil($total_rows / $per_page));
               <?php endforeach; ?>
             </select>
             <label for="f_estado"><i class="bi bi-flag me-1"></i>Estado</label>
-          </div>
-        </div>
-
-        <div class="col-6 col-lg-2">
-          <div class="form-floating">
-            <select name="pp" id="pp" class="form-select">
-              <?php foreach([10,25,50,100] as $pp): $sel=($per_page==$pp)?'selected':''; ?>
-                <option value="<?= $pp ?>" <?= $sel ?>><?= $pp ?>/pág</option>
-              <?php endforeach; ?>
-            </select>
-            <label for="pp"><i class="bi bi-list-ul me-1"></i>Tamaño</label>
           </div>
         </div>
 
@@ -579,12 +600,16 @@ $total_pages = max(1, (int)ceil($total_rows / $per_page));
             <th>Referencia</th>
             <th>Comprobante</th>
             <th>Estado</th>
+            <th>Comentario</th> <!-- NUEVA COL -->
           </tr>
         </thead>
         <tbody>
           <?php if (!$historial): ?>
-            <tr><td colspan="9" class="text-center text-muted py-4">Sin resultados con los filtros seleccionados.</td></tr>
-          <?php else: foreach ($historial as $h): ?>
+            <tr><td colspan="10" class="text-center text-muted py-4">Sin resultados con los filtros seleccionados.</td></tr>
+          <?php else: foreach ($historial as $h): 
+            $tieneComentario = isset($h['comentario_admin']) && trim($h['comentario_admin']) !== '';
+            $comentarioPlano = $tieneComentario ? $h['comentario_admin'] : '';
+          ?>
             <tr>
               <td><span class="badge text-bg-secondary">#<?= (int)$h['id'] ?></span></td>
               <td><?= (int)$h['id_corte'] ?></td>
@@ -614,6 +639,21 @@ $total_pages = max(1, (int)ceil($total_rows / $per_page));
                   }
                 ?>
               </td>
+              <td>
+                <?php if ($tieneComentario): ?>
+                  <div class="d-flex align-items-center gap-2">
+                    <span class="chip chip-alert"><i class="bi bi-exclamation-octagon-fill"></i> Comentario</span>
+                    <button
+                      class="btn btn-outline-danger btn-sm js-ver-comentario"
+                      data-comentario="<?= htmlspecialchars($comentarioPlano, ENT_QUOTES, 'UTF-8') ?>"
+                      data-iddep="<?= (int)$h['id'] ?>">
+                      <i class="bi bi-chat-left-quote comment-icon me-1"></i> Revisar
+                    </button>
+                  </div>
+                <?php else: ?>
+                  <span class="text-muted small">—</span>
+                <?php endif; ?>
+              </td>
             </tr>
           <?php endforeach; endif; ?>
         </tbody>
@@ -635,8 +675,7 @@ $total_pages = max(1, (int)ceil($total_rows / $per_page));
           $start = max(1, $page-2); $end = min($total_pages, $page+2);
           if ($start>1) echo '<li class="page-item"><a class="page-link" href="'.$base.'&p=1">1</a></li><li class="page-item disabled"><span class="page-link">…</span></li>';
           for($i=$start;$i<=$end;$i++){
-            $active = ($i==$page)?'active':'';
-            echo '<li class="page-item '.$active.'"><a class="page-link" href="'.$base.'&p='.$i.'">'.$i.'</a></li>';
+            $active = ($i==$page)?'active':''; echo '<li class="page-item '.$active.'"><a class="page-link" href="'.$base.'&p='.$i.'">'.$i.'</a></li>';
           }
           if ($end<$total_pages) echo '<li class="page-item disabled"><span class="page-link">…</span></li><li class="page-item"><a class="page-link" href="'.$base.'&p='.$total_pages.'">'.$total_pages.'</a></li>';
         ?>
@@ -726,6 +765,25 @@ $total_pages = max(1, (int)ceil($total_rows / $per_page));
       <div class="modal-footer">
         <button id="btnModalCancelar" type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Volver y corregir</button>
         <button id="btnModalConfirmar" type="button" class="btn btn-success"><i class="bi bi-check2-circle me-1"></i>Confirmar y registrar</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL Comentario Admin -->
+<div class="modal fade" id="modalComentarioAdmin" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header bg-danger-subtle">
+        <h5 class="modal-title"><i class="bi bi-exclamation-octagon-fill me-2"></i>Comentario del Admin</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+      </div>
+      <div class="modal-body">
+        <div class="small text-muted mb-1">Depósito <span id="cmtDepId">#—</span></div>
+        <div id="cmtTexto" class="fs-6" style="white-space:pre-wrap"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-primary" data-bs-dismiss="modal">Listo</button>
       </div>
     </div>
   </div>
@@ -844,7 +902,33 @@ $total_pages = max(1, (int)ceil($total_rows / $per_page));
       modal.hide();
     }
   });
+
+  // === Modal de Comentario del Admin ===
+  const cmtModalEl = document.getElementById('modalComentarioAdmin');
+  const cmtModal   = new bootstrap.Modal(cmtModalEl);
+  const cmtTxt     = document.getElementById('cmtTexto');
+  const cmtDepId   = document.getElementById('cmtDepId');
+
+  document.querySelectorAll('.js-ver-comentario').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const txt = btn.getAttribute('data-comentario') || '';
+      const idd = btn.getAttribute('data-iddep') || '—';
+      cmtTxt.textContent = txt;
+      cmtDepId.textContent = '#'+idd;
+      cmtModal.show();
+    });
+  });
 })();
+
+// Scroll suave hacia el Historial cuando se hace clic en el banner
+  const linkVerComentarios = document.getElementById('linkVerComentarios');
+  if (linkVerComentarios) {
+    linkVerComentarios.addEventListener('click', (e) => {
+      e.preventDefault();
+      const target = document.getElementById('historialSection');
+      if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  }
 </script>
 </body>
 </html>
