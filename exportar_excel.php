@@ -81,6 +81,7 @@ SELECT
   v.comentarios,
 
   p.marca, p.modelo, p.color,
+  p.precio_lista AS precio_lista,                            -- <<<<<< NUEVO: precio_lista
 
   COALESCE(cm1.codigo_producto, cm2.codigo_producto, p.codigo_producto) AS codigo,
   COALESCE(cm1.descripcion,     cm2.descripcion)                         AS descripcion,
@@ -153,7 +154,7 @@ if (!$debug) {
 echo "<html><head><meta charset='UTF-8'></head><body>";
 echo "<table border='1'><thead><tr style='background:#f2f2f2'>
   <th>ID Venta</th><th>Fecha</th><th>TAG</th><th>Cliente</th><th>Teléfono</th><th>Sucursal</th><th>Usuario</th>
-  <th>Tipo Venta</th><th>Precio Venta</th><th>Comisión Total Venta</th>
+  <th>Tipo Venta</th><th>Precio Venta</th><th>Precio Lista</th><th>Comisión Total Venta</th>
   <th>Enganche</th><th>Forma Enganche</th><th>Enganche Efectivo</th><th>Enganche Tarjeta</th>
   <th>Comentarios</th>
   <th>Marca</th><th>Modelo</th><th>Color</th>
@@ -165,8 +166,11 @@ while ($r = $res->fetch_assoc()) {
   $imei = ($r['imei1']!==null && $r['imei1']!=='') ? '="'.e($r['imei1']).'"' : '';
 
   // Mostrar precio_venta solo en la PRIMERA fila de cada venta (rn=1)
-  $precioVenta = ($r['rn'] == 1)
-      ? e($r['precio_venta'])
+  $precioVenta = ($r['rn'] == 1) ? e($r['precio_venta']) : '';
+
+  // precio_lista por equipo (si no hay, queda vacío)
+  $precioLista = ($r['precio_lista'] !== null && $r['precio_lista'] !== '')
+      ? e($r['precio_lista'])
       : '';
 
   echo "<tr>
@@ -179,6 +183,7 @@ while ($r = $res->fetch_assoc()) {
     <td>".e($r['usuario'])."</td>
     <td>".e($r['tipo_venta'])."</td>
     <td>{$precioVenta}</td>
+    <td>{$precioLista}</td>
     <td>".e($r['comision_venta'])."</td>
     <td>".e($r['enganche'])."</td>
     <td>".e($r['forma_pago_enganche'])."</td>
