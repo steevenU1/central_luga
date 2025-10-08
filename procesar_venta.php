@@ -1,7 +1,4 @@
 <?php
-require_once __DIR__ . '/candado_captura.php';
-abortar_si_captura_bloqueada(); // por defecto bloquea POST
-
 session_start();
 if (!isset($_SESSION['id_usuario'])) {
   header("Location: index.php");
@@ -9,6 +6,23 @@ if (!isset($_SESSION['id_usuario'])) {
 }
 
 require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/guard_corte.php';
+
+/* ========================
+   Candado de captura por corte de AYER
+   - Tomamos id_sucursal del POST si viene (multi-sucursal), si no, de sesión.
+   - Si está bloqueado, redirigimos a la pantalla de nueva venta con mensaje.
+======================== */
+$id_sucursal_guard = isset($_POST['id_sucursal'])
+  ? (int)$_POST['id_sucursal']
+  : (int)($_SESSION['id_sucursal'] ?? 0);
+
+list($bloquear, $motivoBloqueo, $ayerBloqueo) = debe_bloquear_captura($conn, $id_sucursal_guard);
+if ($bloquear) {
+  // Para flujos no-AJAX, mantenemos la UX con redirect y aviso
+  header("Location: nueva_venta.php?err=" . urlencode("⛔ Captura bloqueada: $motivoBloqueo Debes generar el corte de $ayerBloqueo."));
+  exit();
+}
 
 /* ========================
    Config / Constantes
@@ -145,8 +159,7 @@ function obtenerComisionEspecial(int $id_producto, mysqli $conn): float {
 /** Verifica inventario disponible en la sucursal seleccionada */
 function validarInventario(mysqli $conn, int $id_inv, int $id_sucursal): bool {
   $stmt = $conn->prepare("
-    SELECT COUNT(*)
-    FROM inventario
+    SELECT COUNT(*) FROM inventario
     WHERE id=? AND estatus='Disponible' AND id_sucursal=?
   ");
   $stmt->bind_param("ii", $id_inv, $id_sucursal);
@@ -201,7 +214,7 @@ function venderEquipo(
   // === lógica de captura (SIN cuota) ===
   $comReg = calcularComisionRegularCaptura($rolVendedor, $tipoVenta, $esCombo, $precioL, $esMiFi);
 
-  // Fallback defensivo: si es Gerente, fuerzo $25 aunque algo cambiara arriba
+  // Fallback defensivo: si es Gerente, fuerzo $25 por renglón
   if ($rolVendedor === 'Gerente' && (float)$comReg !== GERENTE_COMISION_REGULAR_CAPTURA) {
     $comReg = GERENTE_COMISION_REGULAR_CAPTURA;
   }
@@ -217,16 +230,9 @@ function venderEquipo(
       VALUES (?,?,?,?,?,?,?,?)
     ");
     $esComboInt = $esCombo ? 1 : 0;
-    $stmtD->bind_param(
-      "iiisdddd",
-      $id_venta,
-      $row['id_producto'],
-      $esComboInt,
-      $row['imei1'],
-      $precioL,
-      $comTot,
-      $comReg,
-      $comEsp
+    $stmtD->bind_param("iiisdddd",
+      $id_venta, $row['id_producto'], $esComboInt, $row['imei1'],
+      $precioL, $comTot, $comReg, $comEsp
     );
   } else {
     // Sin es_combo (compatibilidad)
@@ -235,15 +241,9 @@ function venderEquipo(
         (id_venta, id_producto, imei1, precio_unitario, comision, comision_regular, comision_especial)
       VALUES (?,?,?,?,?,?,?)
     ");
-    $stmtD->bind_param(
-      "iisdddd",
-      $id_venta,
-      $row['id_producto'],
-      $row['imei1'],
-      $precioL,
-      $comTot,
-      $comReg,
-      $comEsp
+    $stmtD->bind_param("iisdddd",
+      $id_venta, $row['id_producto'], $row['imei1'],
+      $precioL, $comTot, $comReg, $comEsp
     );
   }
 
@@ -343,7 +343,7 @@ try {
   $stmtVenta = $conn->prepare($sqlVenta);
   $comisionInicial = 0.0;
 
-  // tipos: s s s s d i i d d s d d i s s
+  // tipos: ssss d i i d d s d d i s s  (sin espacios ->)
   $stmtVenta->bind_param(
     "ssssdiiddsddiss",
     $tag,

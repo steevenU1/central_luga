@@ -10,6 +10,7 @@ if (!isset($_SESSION['id_usuario'])) {
 }
 
 require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/guard_corte.php'; // ⬅️ Nuevo: helper del candado
 
 $id_usuario           = (int)($_SESSION['id_usuario'] ?? 0);
 $id_sucursal_usuario  = (int)($_SESSION['id_sucursal'] ?? 0);
@@ -22,12 +23,15 @@ $sucursales = $conn->query($sql_suc)->fetch_all(MYSQLI_ASSOC);
 // Mapa id=>nombre para uso en JS
 $mapSuc = [];
 foreach ($sucursales as $s) { $mapSuc[(int)$s['id']] = $s['nombre']; }
+
+// 🔒 Evaluación del candado para la sucursal por defecto (la del usuario)
+list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_captura($conn, $id_sucursal_usuario);
 ?>
 <!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1"> <!-- ✅ importante para móvil -->
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Nueva Venta</title>
   <link rel="icon" type="image/x-icon" href="./img/favicon.ico?v=2">
 
@@ -78,6 +82,8 @@ foreach ($sucursales as $s) { $mapSuc[(int)$s['id']] = $s['nombre']; }
     .badge-soft{background:#eef2ff; color:#1e40af; border:1px solid #dbeafe;}
     .list-compact{margin:0; padding-left:1rem;}
     .list-compact li{margin-bottom:.25rem;}
+    /* Banner candado */
+    .alert-candado{border-left:6px solid #dc3545;}
   </style>
 </head>
 <body class="bg-light">
@@ -91,6 +97,23 @@ foreach ($sucursales as $s) { $mapSuc[(int)$s['id']] = $s['nombre']; }
       <div class="help-text">Selecciona primero el <strong>Tipo de Venta</strong> y confirma en el modal antes de enviar.</div>
     </div>
     <a href="panel.php" class="btn btn-outline-secondary"><i class="bi bi-arrow-left"></i> Volver al Panel</a>
+  </div>
+
+  <!-- 🔒 Banner de candado (estado inicial por la sucursal del usuario) -->
+  <div id="banner_candado" class="alert alert-danger alert-candado d-<?= $bloquearInicial ? 'block' : 'none' ?>">
+    <div class="d-flex align-items-center justify-content-between">
+      <div class="d-flex align-items-center gap-2">
+        <i class="bi bi-lock-fill fs-4"></i>
+        <div>
+          <strong>Captura bloqueada.</strong>
+          <?= htmlspecialchars($motivoBloqueoInicial) ?>
+          <div class="small">Genera el corte de <strong><?= htmlspecialchars($ayerCandado) ?></strong> para continuar.</div>
+        </div>
+      </div>
+      <a href="depositos.php#cortes" class="btn btn-outline-light btn-sm">
+        <i class="bi bi-clipboard-data"></i> Ir a Cortes
+      </a>
+    </div>
   </div>
 
   <div class="mb-3">
@@ -109,7 +132,7 @@ foreach ($sucursales as $s) { $mapSuc[(int)$s['id']] = $s['nombre']; }
 
   <div id="errores" class="alert alert-danger d-none"></div>
 
-  <form method="POST" action="procesar_venta.php" id="form_venta" novalidate>
+  <form method="POST" action="procesar_venta.php" id="form_venta" novalidate data-locked="<?= $bloquearInicial ? '1' : '0' ?>">
     <input type="hidden" name="id_usuario" value="<?= $id_usuario ?>">
 
     <div class="card card-elev mb-4">
@@ -309,7 +332,34 @@ $(document).ready(function() {
   const mapaSucursales = <?= json_encode($mapSuc, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
   const modalConfirm = new bootstrap.Modal(document.getElementById('modalConfirmacion'));
 
-  // Select2 (sin matcher custom; el texto de la opción ya incluye IMEI2)
+  // ==== 🔒 Helpers de candado (UI) ====
+  function setLockedUI(locked, msgHtml){
+    const $banner = $('#banner_candado');
+    const $form = $('#form_venta');
+    const $btn = $('#btn_submit');
+
+    if (locked) {
+      $banner.removeClass('d-none').addClass('d-block');
+      if (msgHtml) $banner.find('div:first').find('div:eq(1)').html(msgHtml);
+      $form.attr('data-locked','1');
+      $form.find('input,select,textarea,button').prop('disabled', true);
+      $btn.prop('disabled', true).text('Bloqueado por corte pendiente');
+    } else {
+      $banner.removeClass('d-block').addClass('d-none');
+      $form.attr('data-locked','0');
+      $form.find('input,select,textarea,button').prop('disabled', false);
+      $btn.prop('disabled', false).html('<i class="bi bi-check2-circle me-2"></i> Registrar Venta');
+    }
+  }
+
+  // Estado inicial según PHP
+  <?php if ($bloquearInicial): ?>
+    setLockedUI(true);
+  <?php else: ?>
+    setLockedUI(false);
+  <?php endif; ?>
+
+  // Select2
   $('.select2-equipo').select2({
     placeholder: "Buscar por modelo, IMEI1 o IMEI2",
     allowClear: true,
@@ -318,13 +368,12 @@ $(document).ready(function() {
 
   $('#tipo_venta').on('change', function() {
     $('#combo').toggle(isFinanciamientoCombo());
-    // NUEVO: si se sale de Combo, limpiamos y desbloqueamos
     if (!isFinanciamientoCombo()) {
       $('#equipo2').val(null).trigger('change');
       $('#equipo1 option, #equipo2 option').prop('disabled', false);
     }
     toggleVenta();
-    refreshEquipoLocks(); // NUEVO
+    refreshEquipoLocks();
   });
 
   $('#forma_pago_enganche').on('change', function() {
@@ -366,32 +415,26 @@ $(document).ready(function() {
   }
   toggleVenta();
 
-  // ===== NUEVO: bloqueo cruzado para que equipo1 != equipo2 =====
+  // ===== Bloqueo cruzado equipo1 != equipo2 =====
   function refreshEquipoLocks() {
     const v1 = $('#equipo1').val();
     const v2 = $('#equipo2').val();
 
-    // Habilitamos todo y luego deshabilitamos la opción elegida en el otro select
     $('#equipo1 option, #equipo2 option').prop('disabled', false);
 
     if (v1) { $('#equipo2 option[value="'+v1+'"]').prop('disabled', true); }
     if (v2) { $('#equipo1 option[value="'+v2+'"]').prop('disabled', true); }
 
-    // Si quedaron iguales por cualquier razón, limpiamos el combo
     if (v1 && v2 && v1 === v2) {
       $('#equipo2').val(null).trigger('change');
     }
   }
 
   $('#equipo1, #equipo2').on('change', refreshEquipoLocks);
-
-  // Filtro extra para Select2: si eligen el mismo, lo revierte al instante
   $('#equipo2').on('select2:select', function(e){
     const v1 = $('#equipo1').val();
     const elegido = e.params.data.id;
-    if (v1 && elegido === v1) {
-      $(this).val(null).trigger('change');
-    }
+    if (v1 && elegido === v1) { $(this).val(null).trigger('change'); }
     refreshEquipoLocks();
   });
   $('#equipo1').on('select2:select', function(){ refreshEquipoLocks(); });
@@ -403,7 +446,7 @@ $(document).ready(function() {
       data: { id_sucursal: sucursalId },
       success: function(response) {
         $('#equipo1, #equipo2').html(response).val('').trigger('change');
-        refreshEquipoLocks(); // NUEVO: aplicar bloqueo tras recargar
+        refreshEquipoLocks();
       },
       error: function(xhr){
         const msg = xhr.responseText || 'Error cargando inventario';
@@ -415,6 +458,7 @@ $(document).ready(function() {
 
   cargarEquipos($('#id_sucursal').val());
 
+  // ===== Cambio de sucursal: aviso + consulta candado en caliente =====
   $('#id_sucursal').on('change', function() {
     const seleccionada = parseInt($(this).val());
     if (seleccionada !== idSucursalUsuario) {
@@ -423,6 +467,25 @@ $(document).ready(function() {
       $('#alerta_sucursal').addClass('d-none');
     }
     cargarEquipos(seleccionada);
+
+    // 🔎 Checar candado por AJAX
+    $.post('ajax_check_corte.php', { id_sucursal: seleccionada }, function(res){
+      // res: {ok: true, bloquear: bool, motivo: "...", ayer: "YYYY-MM-DD"}
+      if (!res || !res.ok) return;
+
+      if (res.bloquear) {
+        const html = `
+          <strong>Captura bloqueada.</strong> ${res.motivo}
+          <div class="small">Genera el corte de <strong>${res.ayer}</strong> para continuar.</div>
+        `;
+        setLockedUI(true, html);
+      } else {
+        setLockedUI(false);
+      }
+    }, 'json').fail(function(){
+      // En caso de error, no bloqueamos por UI (el back-end igualmente valida)
+      console.warn('No se pudo verificar el candado por AJAX. El back-end seguirá validando.');
+    });
   });
 
   // ========= Validación + modal =========
@@ -448,7 +511,7 @@ $(document).ready(function() {
     if (!forma) errores.push('Selecciona la forma de pago.');
     if (!$('#equipo1').val()) errores.push('Selecciona el equipo principal.');
 
-    // NUEVO: reglas para Financiamento+Combo
+    // Reglas Fin+Combo
     if (isFinanciamientoCombo()) {
       const v1 = $('#equipo1').val();
       const v2 = $('#equipo2').val();
@@ -519,6 +582,13 @@ $(document).ready(function() {
   }
 
   $('#form_venta').on('submit', function(e){
+    // Si está bloqueado por UI, evitamos el submit (de todos modos el back bloquea).
+    if ($('#form_venta').attr('data-locked') === '1') {
+      e.preventDefault();
+      $('html, body').animate({ scrollTop: 0 }, 300);
+      return;
+    }
+
     if (permitSubmit) return;
     e.preventDefault();
     const errores = validarFormulario();
@@ -542,10 +612,32 @@ $(document).ready(function() {
     $('#form_venta')[0].submit();
   });
 
+  function cargarEquipos(sucursalId){ /* se redefine más abajo */ }
+
   // Inicial
-  function initEquipos(){ cargarEquipos($('#id_sucursal').val()); }
+  function initEquipos(){
+    // Re-define cargarEquipos aquí para mantener orden
+    cargarEquipos = function(sucursalId){
+      $.ajax({
+        url: 'ajax_productos_por_sucursal.php',
+        method: 'POST',
+        data: { id_sucursal: sucursalId },
+        success: function(response) {
+          $('#equipo1, #equipo2').html(response).val('').trigger('change');
+          refreshEquipoLocks();
+        },
+        error: function(xhr){
+          const msg = xhr.responseText || 'Error cargando inventario';
+          $('#equipo1, #equipo2').html('<option value="">'+msg+'</option>').trigger('change');
+          refreshEquipoLocks();
+        }
+      });
+    };
+
+    cargarEquipos($('#id_sucursal').val());
+    refreshEquipoLocks();
+  }
   initEquipos();
-  refreshEquipoLocks(); // NUEVO
 });
 </script>
 
