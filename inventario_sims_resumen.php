@@ -1,10 +1,10 @@
 <?php
-// inventario_sims_resumen.php — Central 2.0 (completo)
-// - Export CSV sin romper headers (antes de cualquier salida).
-// - Navbar en vista normal (omitido solo al exportar).
-// - Admin: Global (todas) o filtrar por sucursal.
-// - Otros roles: solo su sucursal.
-// - Filtros: operador, tipo_plan, búsqueda por ICCID/DN.
+// inventario_sims_resumen.php — Central 2.0 (FINAL corregido)
+// - Filtro por caja robusto: detecta columna (caja_id | id_caja | caja), usa TRIM, soporta VARCHAR/INT.
+// - Export CSV toma los valores actuales del formulario (no exige "Aplicar") y respeta caja/sucursal/rol.
+// - Si el select de sucursal está disabled (vista "Por sucursal"), se envía por <input hidden> para no vaciar el export.
+// - Admin: Global o por sucursal; otros roles: solo su sucursal.
+// - Filtros: operador, tipo_plan, q (ICCID/DN), caja.
 // - UI: KPIs + cards por sucursal + tabla detalle por sucursal.
 
 session_start();
@@ -17,92 +17,110 @@ $ROL         = $_SESSION['rol'] ?? 'Ejecutivo';
 $ID_USUARIO  = (int)($_SESSION['id_usuario'] ?? 0);
 $ID_SUCURSAL = (int)($_SESSION['id_sucursal'] ?? 0);
 
-// ===== Helpers =====
+/* ===== Helpers ===== */
 function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 function selectOptions(array $opts, $sel){
   $html=''; foreach($opts as $val=>$txt){
-    $html.='<option value="'.h($val).'"'.($val===$sel?' selected':'').'>'.h($txt).'</option>';
+    $selAttr = ((string)$val === (string)$sel) ? ' selected' : '';
+    $html.='<option value="'.h($val).'"'.$selAttr.'>'.h($txt).'</option>';
   } return $html;
 }
 function isAdmin($rol){ return in_array($rol, ['Admin'], true); }
 
-// ===== Parámetros / filtros =====
-$scope        = isAdmin($ROL) ? ($_GET['scope'] ?? 'global') : 'sucursal';  // global | sucursal
-$selSucursal  = isAdmin($ROL) ? (int)($_GET['sucursal'] ?? 0) : $ID_SUCURSAL; // 0 = todas (solo admin global)
-$operador     = $_GET['operador']  ?? 'ALL';  // ALL | Bait | AT&T | ...
-$tipoPlan     = $_GET['tipo_plan'] ?? 'ALL';  // ALL | Prepago | Pospago
-$q            = trim((string)($_GET['q'] ?? '')); // búsqueda ICCID/DN
+/** Detecta la columna real usada para “caja” en inventario_sims. */
+function detectarColCaja(mysqli $conn): string {
+  foreach (['caja_id','id_caja','caja'] as $col) {
+    $colEsc = $conn->real_escape_string($col);
+    $sql = "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME = 'inventario_sims'
+              AND COLUMN_NAME = '$colEsc' LIMIT 1";
+    $q = $conn->query($sql);
+    if ($q && $q->fetch_row()){ return $col; }
+  }
+  return 'caja_id'; // fallback
+}
+/** Condición de “caja no vacía” (ignora NULL, '' y '0'). */
+function condCajaNoVacia(string $expr): string {
+  return "NULLIF(TRIM($expr),'') IS NOT NULL AND TRIM($expr) <> '0'";
+}
+/** Orden sugerida (queda para otros usos) */
+function orderCaja(string $expr): string {
+  return "CAST(TRIM($expr) AS UNSIGNED), TRIM($expr)";
+}
+
+/* ===== Parámetros / filtros ===== */
+$scope        = isAdmin($ROL) ? ($_GET['scope'] ?? 'global') : 'sucursal';
+$selSucursal  = isAdmin($ROL) ? (int)($_GET['sucursal'] ?? 0) : $ID_SUCURSAL; // 0 = todas
+$operador     = $_GET['operador']  ?? 'ALL';
+$tipoPlan     = $_GET['tipo_plan'] ?? 'ALL';
+$q            = trim((string)($_GET['q'] ?? ''));
+
+// caja como string TRIMEADO (soporta VARCHAR o INT con espacios)
+$cajaRaw = $_GET['caja'] ?? '0';
+$caja    = (string)(is_array($cajaRaw) ? '0' : trim((string)$cajaRaw));
+if ($caja === '') $caja = '0';
 
 if (!isAdmin($ROL)) { $scope='sucursal'; $selSucursal=$ID_SUCURSAL; }
 if ($scope!=='global') { $scope='sucursal'; }
 
-// ===== WHERE base (solo disponibles) =====
+$CAJA_COL = detectarColCaja($conn);
+$CAJA_TR  = "TRIM(i.$CAJA_COL)";
+$haySucursalConcreta = ($scope==='sucursal') || ($scope==='global' && $selSucursal>0);
+
+/* ===== WHERE base (solo disponibles) ===== */
 $where = ["i.estatus='Disponible'"];
 $params=[]; $types='';
+
 if ($operador!=='ALL'){ $where[]="i.operador=?"; $params[]=$operador; $types.='s'; }
 if ($tipoPlan!=='ALL'){ $where[]="i.tipo_plan=?"; $params[]=$tipoPlan; $types.='s'; }
-if ($q!==''){ $where[]="(i.iccid LIKE ? OR i.dn LIKE ?)"; $like="%$q%"; $params[]=$like; $params[]=$like; $types.='ss'; }
+if ($q!==''){
+  $where[]="(i.iccid LIKE ? OR i.dn LIKE ?)";
+  $like="%$q%"; $params[]=$like; $params[]=$like; $types.='ss';
+}
 $whereSql = $where ? 'WHERE '.implode(' AND ',$where) : '';
 
-// ===== EXPORT CSV (antes de cualquier salida) =====
-if (isset($_GET['export']) && $_GET['export']==='1') {
-  // SQL según scope/filtros
-  $extraWhere=''; $p=$params; $t=$types;
-  if ($scope==='sucursal') {
-    $extraWhere = ($whereSql ? " AND " : "WHERE ")."i.id_sucursal=?";
-    $p[]=$selSucursal; $t.='i';
-    $sql = "SELECT s.nombre AS sucursal, i.operador, i.tipo_plan, i.iccid, i.dn, i.fecha_ingreso
-            FROM inventario_sims i
-            LEFT JOIN sucursales s ON s.id=i.id_sucursal
-            $whereSql $extraWhere
-            ORDER BY i.operador, i.tipo_plan, i.iccid";
-  } else {
-    if ($selSucursal>0){ $extraWhere = ($whereSql ? " AND " : "WHERE ")."i.id_sucursal=?"; $p[]=$selSucursal; $t.='i'; }
-    $sql = "SELECT s.nombre AS sucursal, i.operador, i.tipo_plan, i.iccid, i.dn, i.fecha_ingreso
-            FROM inventario_sims i
-            LEFT JOIN sucursales s ON s.id=i.id_sucursal
-            $whereSql $extraWhere
-            ORDER BY s.nombre, i.operador, i.tipo_plan, i.iccid";
-  }
-
-  // Limpiar buffers y enviar CSV
-  if (ob_get_level()) { while (ob_get_level()) { ob_end_clean(); } }
-  header('Content-Type: text/csv; charset=UTF-8');
-  header('Content-Disposition: attachment; filename="inventario_sims_disponibles.csv"');
-
-  $stmt=$conn->prepare($sql);
-  if ($p){ $stmt->bind_param($t, ...$p); }
-  $stmt->execute();
-  $res=$stmt->get_result();
-
-  $out=fopen('php://output','w');
-  fputcsv($out, ['Sucursal','Operador','Tipo Plan','ICCID','DN','Fecha Ingreso']);
-  while($r=$res->fetch_assoc()){
-    fputcsv($out, [
-      $r['sucursal'] ?? '',
-      $r['operador'] ?? '',
-      $r['tipo_plan'] ?? '',
-      $r['iccid'] ?? '',
-      $r['dn'] ?? '',
-      $r['fecha_ingreso'] ?? ''
-    ]);
-  }
-  fclose($out);
-  exit;
-}
-
-// ===== Cargar sucursales (selector Admin) =====
+/* ===== Sucursales (Admin) ===== */
 $sucursales=[];
 if (isAdmin($ROL)) {
   $rs = $conn->query("SELECT id, nombre FROM sucursales ORDER BY nombre");
   $sucursales = $rs->fetch_all(MYSQLI_ASSOC);
 }
 
-// ===== KPIs =====
-function kpisGlobal(mysqli $conn, $whereSql, $params, $types, $selSucursal, $scope){
+/* ===== Cajas (si hay sucursal concreta) — FIX DISTINCT+ORDER BY ===== */
+$cajas = [];
+if ($haySucursalConcreta) {
+  $sqlCajas = "
+    SELECT DISTINCT
+      TRIM(i.$CAJA_COL)                   AS caja_val,
+      CAST(TRIM(i.$CAJA_COL) AS UNSIGNED) AS caja_num
+    FROM inventario_sims i
+    WHERE i.estatus='Disponible'
+      AND i.id_sucursal = ?
+      AND ".condCajaNoVacia("i.$CAJA_COL")."
+    ORDER BY caja_num, caja_val
+  ";
+  $st = $conn->prepare($sqlCajas);
+  $st->bind_param('i', $selSucursal);
+  $st->execute();
+  $res = $st->get_result();
+  while($r = $res->fetch_assoc()){
+    $val = (string)$r['caja_val'];
+    $cajas[$val] = $val; // puede ser "1", "01", "A-01", etc.
+  }
+  $st->close();
+}
+
+/* ===== KPIs ===== */
+function kpisGlobal(mysqli $conn, $whereSql, $params, $types, $selSucursal, $scope, $caja, $haySucursalConcreta, $CAJA_TR){
   $extra=''; $p=$params; $t=$types;
   if ($scope==='sucursal' || ($scope==='global' && $selSucursal>0)) {
-    $extra = ($whereSql ? " AND " : "WHERE ")."i.id_sucursal=?"; $p[]=$selSucursal; $t.='i';
+    $extra .= ($whereSql ? " AND " : "WHERE ")."i.id_sucursal=?";
+    $p[]=$selSucursal; $t.='i';
+    if ($haySucursalConcreta && $caja !== '0') {
+      $extra .= " AND $CAJA_TR=?";
+      $p[]=$caja; $t.='s';
+    }
   }
   $sql="SELECT COUNT(*) total,
                SUM(i.operador='Bait') bait,
@@ -112,13 +130,20 @@ function kpisGlobal(mysqli $conn, $whereSql, $params, $types, $selSucursal, $sco
   $row=$st->get_result()->fetch_assoc() ?: [];
   return ['total'=>(int)($row['total']??0), 'bait'=>(int)($row['bait']??0), 'att'=>(int)($row['att']??0)];
 }
-$kpis = kpisGlobal($conn,$whereSql,$params,$types,$selSucursal,$scope);
+$kpis = kpisGlobal($conn,$whereSql,$params,$types,$selSucursal,$scope,$caja,$haySucursalConcreta,$CAJA_TR);
 
-// ===== Cards por sucursal (solo global) =====
+/* ===== Cards por sucursal (solo global) ===== */
 $cards=[];
 if ($scope==='global'){
   $extra=''; $p=$params; $t=$types;
-  if ($selSucursal>0){ $extra = ($whereSql ? " AND " : "WHERE ")."i.id_sucursal=?"; $p[]=$selSucursal; $t.='i'; }
+  if ($selSucursal>0){
+    $extra .= ($whereSql ? " AND " : "WHERE ")."i.id_sucursal=?";
+    $p[]=$selSucursal; $t.='i';
+    if ($haySucursalConcreta && $caja !== '0'){
+      $extra .= " AND $CAJA_TR=?";
+      $p[]=$caja; $t.='s';
+    }
+  }
   $sql="SELECT s.id id_suc, s.nombre,
                COUNT(i.id) disponibles,
                SUM(i.operador='Bait') bait,
@@ -133,7 +158,7 @@ if ($scope==='global'){
   $res=$st->get_result(); while($row=$res->fetch_assoc()){ $cards[]=$row; }
 }
 
-// ===== Detalle de una sucursal =====
+/* ===== Detalle de una sucursal ===== */
 $detalle=[]; $sucursalNombre='';
 if ($scope==='sucursal'){
   $st=$conn->prepare("SELECT nombre FROM sucursales WHERE id=? LIMIT 1");
@@ -141,16 +166,77 @@ if ($scope==='sucursal'){
   $sucursalNombre = (string)($st->get_result()->fetch_column() ?: '');
 
   $extra = ($whereSql ? " AND " : "WHERE ")."i.id_sucursal=?";
-  $sql="SELECT i.id, i.iccid, i.dn, i.operador, i.tipo_plan, i.fecha_ingreso, i.caja_id
+  $p=array_merge($params,[$selSucursal]); $t=$types.'i';
+  if ($caja !== '0'){
+    $extra .= " AND $CAJA_TR=?";
+    $p[]=$caja; $t.='s';
+  }
+  $sql="SELECT i.id, i.iccid, i.dn, i.operador, i.tipo_plan, i.fecha_ingreso,
+               TRIM(i.$CAJA_COL) AS caja_val
         FROM inventario_sims i
         $whereSql $extra
         ORDER BY i.operador, i.tipo_plan, i.iccid";
-  $p=array_merge($params,[$selSucursal]); $t=$types.'i';
   $st=$conn->prepare($sql); $st->bind_param($t, ...$p); $st->execute();
   $res=$st->get_result(); while($row=$res->fetch_assoc()){ $detalle[]=$row; }
 }
 
-// ===== Vista normal (con navbar) =====
+/* ===== EXPORT CSV (antes de cualquier salida visible) ===== */
+if (isset($_GET['export']) && $_GET['export']==='1') {
+  $extraWhere=''; $p=$params; $t=$types;
+
+  if ($scope==='sucursal') {
+    $extraWhere .= ($whereSql ? " AND " : "WHERE ")."i.id_sucursal=?";
+    $p[]=$selSucursal; $t.='i';
+    if ($caja !== '0'){ $extraWhere .= " AND $CAJA_TR=?"; $p[]=$caja; $t.='s'; }
+
+    $sql = "SELECT s.nombre AS sucursal, i.operador, i.tipo_plan, i.iccid, i.dn,
+                   TRIM(i.$CAJA_COL) AS caja_val, i.fecha_ingreso
+            FROM inventario_sims i
+            LEFT JOIN sucursales s ON s.id=i.id_sucursal
+            $whereSql $extraWhere
+            ORDER BY i.operador, i.tipo_plan, i.iccid";
+  } else {
+    if ($selSucursal>0){
+      $extraWhere .= ($whereSql ? " AND " : "WHERE ")."i.id_sucursal=?";
+      $p[]=$selSucursal; $t.='i';
+      if ($caja !== '0'){ $extraWhere .= " AND $CAJA_TR=?"; $p[]=$caja; $t.='s'; }
+    }
+    $sql = "SELECT s.nombre AS sucursal, i.operador, i.tipo_plan, i.iccid, i.dn,
+                   TRIM(i.$CAJA_COL) AS caja_val, i.fecha_ingreso
+            FROM inventario_sims i
+            LEFT JOIN sucursales s ON s.id=i.id_sucursal
+            $whereSql $extraWhere
+            ORDER BY s.nombre, i.operador, i.tipo_plan, i.iccid";
+  }
+
+  // Limpia buffers y envía CSV
+  if (ob_get_level()) { while (ob_get_level()) { ob_end_clean(); } }
+  header('Content-Type: text/csv; charset=UTF-8');
+  header('Content-Disposition: attachment; filename="inventario_sims_disponibles.csv"');
+
+  $stmt=$conn->prepare($sql);
+  if ($p){ $stmt->bind_param($t, ...$p); }
+  $stmt->execute();
+  $res=$stmt->get_result();
+
+  $out=fopen('php://output','w');
+  fputcsv($out, ['Sucursal','Operador','Tipo Plan','ICCID','DN','Caja','Fecha Ingreso']);
+  while($r=$res->fetch_assoc()){
+    fputcsv($out, [
+      $r['sucursal'] ?? '',
+      $r['operador'] ?? '',
+      $r['tipo_plan'] ?? '',
+      $r['iccid'] ?? '',
+      $r['dn'] ?? '',
+      $r['caja_val'] ?? '',
+      $r['fecha_ingreso'] ?? ''
+    ]);
+  }
+  fclose($out);
+  exit;
+}
+
+/* ===== Vista (con navbar) ===== */
 require_once __DIR__ . '/navbar.php';
 ?>
 <!doctype html>
@@ -171,6 +257,7 @@ require_once __DIR__ . '/navbar.php';
     .sticky-top-lite{ position: sticky; top: .5rem; z-index: 100; }
     .table thead th{ position:sticky; top:0; background:var(--bs-body-bg); z-index:5; }
     .searchbar{ max-width: 380px; }
+    .hint{ font-size:.86rem; color: var(--bs-secondary-color); }
   </style>
 </head>
 <body class="bg-body-tertiary">
@@ -186,7 +273,8 @@ require_once __DIR__ . '/navbar.php';
             <div class="text-secondary small">Central 2.0 · Vista <?= h($scope==='global'?'global':'por sucursal'); ?></div>
           </div>
 
-          <form class="row g-2 align-items-end" method="get">
+          <!-- Form principal: el Export usa estos valores actuales -->
+          <form id="filtros" class="row g-2 align-items-end" method="get">
             <?php if (isAdmin($ROL)): ?>
               <div class="col-auto">
                 <label class="form-label mb-1">Ámbito</label>
@@ -205,11 +293,35 @@ require_once __DIR__ . '/navbar.php';
                     </option>
                   <?php endforeach; ?>
                 </select>
+                <?php if ($scope!=='global'): ?>
+                  <!-- Clave: si el select está disabled, enviamos el valor por hidden -->
+                  <input type="hidden" name="sucursal" value="<?= (int)$selSucursal; ?>">
+                <?php endif; ?>
+                <?php if ($scope==='global' && $selSucursal===0): ?>
+                  <div class="hint">Elige una sucursal para habilitar “Caja”.</div>
+                <?php endif; ?>
               </div>
             <?php else: ?>
               <input type="hidden" name="scope" value="sucursal">
               <input type="hidden" name="sucursal" value="<?= (int)$selSucursal; ?>">
             <?php endif; ?>
+
+            <!-- Caja -->
+            <div class="col-auto">
+              <label class="form-label mb-1">Caja</label>
+              <select name="caja" class="form-select" <?= $haySucursalConcreta ? '' : 'disabled'; ?>>
+                <option value="0">Todas</option>
+                <?php if ($haySucursalConcreta && $cajas): ?>
+                  <?php foreach($cajas as $val=>$txt): ?>
+                    <option value="<?= h($val); ?>" <?= ((string)$val===(string)$caja)?'selected':''; ?>><?= h($txt); ?></option>
+                  <?php endforeach; ?>
+                <?php elseif ($haySucursalConcreta && !$cajas): ?>
+                  <option value="0" selected>(sin cajas registradas)</option>
+                <?php else: ?>
+                  <option value="0" selected>(selecciona sucursal)</option>
+                <?php endif; ?>
+              </select>
+            </div>
 
             <div class="col-auto">
               <label class="form-label mb-1">Operador</label>
@@ -228,9 +340,10 @@ require_once __DIR__ . '/navbar.php';
               <input type="text" class="form-control searchbar" name="q" value="<?= h($q); ?>" placeholder="ICCID o DN…">
             </div>
             <div class="col-auto d-flex gap-2">
-              <button class="btn btn-primary">Aplicar</button>
+              <button class="btn btn-primary" type="submit">Aplicar</button>
               <a class="btn btn-outline-secondary" href="inventario_sims_resumen.php">Limpiar</a>
-              <a class="btn btn-success" href="?<?= h(http_build_query(array_merge($_GET, ['export'=>'1']))); ?>">Exportar CSV</a>
+              <!-- Exporta con los valores actuales del form, sin exigir "Aplicar" -->
+              <button class="btn btn-success" type="submit" name="export" value="1">Exportar CSV</button>
             </div>
           </form>
         </div>
@@ -286,15 +399,24 @@ require_once __DIR__ . '/navbar.php';
               <span class="badge badge-soft">Bait: <?= (int)$c['bait']; ?></span>
               <span class="badge badge-soft">AT&amp;T: <?= (int)$c['att']; ?></span>
             </div>
-            <div class="d-flex gap-2">
+            <div class="d-flex gap-2 flex-wrap">
               <a class="btn btn-sm btn-outline-primary"
-                 href="?<?= h(http_build_query(array_merge($_GET, ['scope'=>'sucursal','sucursal'=>(int)$c['id_suc']]))); ?>">
+                 href="?<?= h(http_build_query(array_merge($_GET, [
+                   'scope'=>'sucursal',
+                   'sucursal'=>(int)$c['id_suc']
+                 ]))); ?>">
                 Ver detalle
               </a>
-              <a class="btn btn-sm btn-outline-success"
-                 href="?<?= h(http_build_query(array_merge($_GET, ['scope'=>'global','sucursal'=>(int)$c['id_suc'],'export'=>'1']))); ?>">
+              <!-- Export rápido desde tarjeta -->
+              <button class="btn btn-sm btn-outline-success" type="submit" form="filtros" name="export" value="1"
+                onclick="(function(f){
+                  const sel = f.querySelector('select[name=sucursal]');
+                  if (sel) sel.value='<?= (int)$c['id_suc']; ?>';
+                  const hid = f.querySelector('input[type=hidden][name=sucursal]');
+                  if (hid) hid.value='<?= (int)$c['id_suc']; ?>';
+                })(document.getElementById('filtros'));">
                 Exportar CSV
-              </a>
+              </button>
             </div>
           </div>
         </div>
@@ -342,7 +464,7 @@ require_once __DIR__ . '/navbar.php';
                   <td><?= h($r['dn']); ?></td>
                   <td><?= h($r['operador']); ?></td>
                   <td><?= h($r['tipo_plan']); ?></td>
-                  <td><?= h($r['caja_id']); ?></td>
+                  <td><?= h($r['caja_val']); ?></td>
                   <td class="text-nowrap"><?= h($r['fecha_ingreso']); ?></td>
                 </tr>
               <?php endforeach; endif; ?>
@@ -351,16 +473,12 @@ require_once __DIR__ . '/navbar.php';
         </div>
 
         <div class="d-flex gap-2 mt-3">
-          <a class="btn btn-success"
-             href="?<?= h(http_build_query(array_merge($_GET, ['export'=>'1']))); ?>">
-            Exportar CSV
-          </a>
+          <button class="btn btn-success" type="submit" form="filtros" name="export" value="1">Exportar CSV</button>
         </div>
       </div>
     </div>
   <?php endif; ?>
 
 </div>
-<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
 </body>
 </html>
