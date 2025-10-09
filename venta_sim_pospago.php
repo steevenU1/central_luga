@@ -3,6 +3,7 @@
    Cambios:
    - DN obligatorio (backend/frontend)
    - Duplicado ICCID muestra nombre de sucursal (no ID)
+   - 🔐 Si NO es eSIM, la SIM física (id_sim) es OBLIGATORIA (frontend + backend)
 */
 session_start();
 if (!isset($_SESSION['id_usuario'])) { header("Location: index.php"); exit(); }
@@ -71,7 +72,6 @@ if (($_SERVER['REQUEST_METHOD'] === 'POST') && (($_POST['accion'] ?? '') === 'al
   $operador = trim($_POST['operador'] ?? '');
   $dn       = trim($_POST['dn'] ?? '');
   $caja_id  = trim($_POST['caja_id'] ?? '');
-  $tipoPlan = 'Pospago'; // esta vista es Pospago
 
   // Validaciones
   if (!preg_match('/^\d{19}[A-Z]$/', $iccid)) {
@@ -131,7 +131,7 @@ if (($_SERVER['REQUEST_METHOD'] === 'POST') && (($_POST['accion'] ?? '') === 've
   abortar_si_captura_bloqueada(); // aplica SOLO a la venta
 
   $esEsim         = isset($_POST['es_esim']) ? 1 : 0;
-  $idSim          = $_POST['id_sim'] ?? null;
+  $idSim          = isset($_POST['id_sim']) && $_POST['id_sim'] !== '' ? (int)$_POST['id_sim'] : 0;
   $plan           = $_POST['plan'] ?? '';
   $precioPlan     = $planesPospago[$plan] ?? 0;
   $modalidad      = $_POST['modalidad'] ?? 'Sin equipo';
@@ -149,7 +149,14 @@ if (($_SERVER['REQUEST_METHOD'] === 'POST') && (($_POST['accion'] ?? '') === 've
   if ($mensaje === '' && !preg_match('/^\d{10}$/', $numeroCliente)) {
     $mensaje = '<div class="alert alert-danger">El número del cliente debe tener exactamente 10 dígitos.</div>';
   }
-  if ($mensaje === '' && !$esEsim && $idSim) {
+
+  // ⛔ Requisito: si NO es eSIM, id_sim es obligatorio
+  if ($mensaje === '' && !$esEsim && $idSim <= 0) {
+    $mensaje = '<div class="alert alert-danger">Debes seleccionar una SIM física si no es eSIM.</div>';
+  }
+
+  // Si no es eSIM, validar que la SIM exista y esté disponible en la sucursal
+  if ($mensaje === '' && !$esEsim && $idSim > 0) {
     $sql = "SELECT id FROM inventario_sims
             WHERE id=? AND estatus='Disponible' AND id_sucursal=?";
     $stmt = $conn->prepare($sql);
@@ -183,7 +190,7 @@ if (($_SERVER['REQUEST_METHOD'] === 'POST') && (($_POST['accion'] ?? '') === 've
     $stmt->close();
 
     // Detalle + mover inventario si SIM física
-    if (!$esEsim && $idSim) {
+    if (!$esEsim && $idSim > 0) {
       $sqlDetalle = "INSERT INTO detalle_venta_sims (id_venta, id_sim, precio_unitario) VALUES (?,?,?)";
       $stmt = $conn->prepare($sqlDetalle);
       $stmt->bind_param("iid", $idVenta, $idSim, $precioPlan);
@@ -279,6 +286,7 @@ $stmt->close();
   .btn-gradient:disabled{opacity:.7;}
   .badge-soft{background:#eef2ff; color:#1e40af; border:1px solid #dbeafe;}
   .list-compact{margin:0; padding-left:1rem;} .list-compact li{margin-bottom:.25rem;}
+  .req-hint{font-size:.8rem;color:#dc3545;display:none;}
 </style>
 
 </head>
@@ -341,6 +349,7 @@ $stmt->close();
             <?php endforeach; ?>
           </select>
           <div class="form-text">Escribe ICCID, caja o fecha para filtrar.</div>
+          <!-- <div class="req-hint" id="sim_req_hint">* Obligatorio si NO es eSIM</div> -->
           <div class="d-flex gap-2 mt-2">
             <button type="button" class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#modalAltaSim">
               <i class="bi bi-plus-circle me-1"></i> Agregar SIM (no está en inventario)
@@ -541,7 +550,22 @@ $stmt->close();
 <script>
 function toggleSimSelect() {
   const isEsim = document.getElementById('es_esim').checked;
-  document.getElementById('sim_fisica').style.display = isEsim ? 'none' : 'block';
+  const simWrap = document.getElementById('sim_fisica');
+  const simSel  = document.getElementById('id_sim');
+  const hint    = document.getElementById('sim_req_hint');
+
+  if (isEsim) {
+    simWrap.style.display = 'none';
+    // quitar requerido y limpiar selección si era física
+    simSel.removeAttribute('required');
+    $('#id_sim').val('').trigger('change');
+    hint.style.display = 'none';
+  } else {
+    simWrap.style.display = 'block';
+    // marcar requerido cuando no es eSIM
+    simSel.setAttribute('required', 'required');
+    hint.style.display = 'block';
+  }
 }
 function toggleEquipo() {
   const modalidad = document.getElementById('modalidad').value;
@@ -581,11 +605,20 @@ $(function(){
     const precio = parseFloat($precio.val());
     if (!plan) errs.push('Selecciona un plan.');
     if (isNaN(precio) || precio <= 0) errs.push('El precio/plan es inválido o 0.');
+
     const nom = ($nombre.val() || '').trim();
     if (!nom) errs.push('El nombre del cliente es obligatorio.');
+
     const num = ($numero.val() || '').trim();
     if (!num) { errs.push('El número del cliente es obligatorio.'); }
     else if (!/^\d{10}$/.test(num)) { errs.push('El número del cliente debe tener 10 dígitos.'); }
+
+    // 💡 Validación clave: si NO es eSIM, exigir SIM
+    const isEsim = $esim.is(':checked');
+    if (!isEsim) {
+      const simVal = ($simSel.val() || '').toString().trim();
+      if (!simVal) errs.push('Debes seleccionar una SIM física (no es eSIM).');
+    }
     return errs;
   }
 

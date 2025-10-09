@@ -1,10 +1,10 @@
 <?php
 /* =========================================================
-   Historial de Ventas SIM — versión corregida
-   - Semana Mar→Lun estable con TZ MX antes de calcular
+   Historial de Ventas SIM — botón Switch (Prepago = !Pospago)
+   - Semana Mar→Lun estable con TZ MX
    - Filtros GET robustos (tipo_venta, usuario, buscar)
-   - Navegación prev/next preserva filtros
    - Export semanal y mensual arrastran exactamente los GET
+   - Ejecutivo convierte sus ventas Prepago (no Pospago) a Portabilidad
 ========================================================= */
 
 session_start();
@@ -18,15 +18,19 @@ date_default_timezone_set('America/Mexico_City');
 
 require_once __DIR__ . '/db.php';
 
+/* ===== CSRF token ===== */
+if (empty($_SESSION['csrf_sim'])) {
+    $_SESSION['csrf_sim'] = bin2hex(random_bytes(32));
+}
+$CSRF = $_SESSION['csrf_sim'];
+
 /* ========================
    HELPERS
 ======================== */
 function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
-
 function get_get(string $key, $default = '') {
     return isset($_GET[$key]) ? $_GET[$key] : $default;
 }
-
 function hasColumn(mysqli $conn, string $table, string $column): bool {
     $tableEsc  = $conn->real_escape_string($table);
     $columnEsc = $conn->real_escape_string($column);
@@ -41,34 +45,18 @@ function hasColumn(mysqli $conn, string $table, string $column): bool {
     $res = $conn->query($sql);
     return $res && $res->num_rows > 0;
 }
-
-/**
- * Semana operativa Mar→Lun por índice (0 = semana actual, 1 = anterior, etc.)
- * Retorna [DateTimeImmutable $inicio, DateTimeImmutable $fin]
- */
+/** Semana Mar→Lun por índice (0 = actual) */
 function obtenerSemanaPorIndice(int $offset = 0): array {
-    // Día actual en MX
-    $hoy = new DateTimeImmutable('now'); // TZ ya seteada
-    // 1=lun ... 7=dom
-    $diaSemana = (int)$hoy->format('N');
-
-    // Queremos inicio en martes 00:00:00
+    $hoy = new DateTimeImmutable('now');
+    $diaSemana = (int)$hoy->format('N'); // 1=lun...7=dom
     $dif = $diaSemana - 2; // martes=2
     if ($dif < 0) $dif += 7;
-
-    $inicio = $hoy->sub(new DateInterval('P' . $dif . 'D'))
-                  ->setTime(0,0,0);
-
-    if ($offset !== 0) {
-        $inicio = $inicio->sub(new DateInterval('P' . (7 * max(0, $offset)) . 'D'));
-    }
-
-    $fin = $inicio->add(new DateInterval('P6D'))
-                  ->setTime(23,59,59);
-
-    return [$inicio, $fin];
+    $inicio = $hoy->sub(new DateInterval('P'.$dif.'D'))->setTime(0,0,0);
+    if ($offset !== 0) $inicio = $inicio->sub(new DateInterval('P'.(7*max(0,$offset)).'D'));
+    $fin = $inicio->add(new DateInterval('P6D'))->setTime(23,59,59);
+    return [$inicio,$fin];
 }
-
+/* Selects de Mes/Año */
 function mesOptionsHtml($mesSel){
     $meses = [1=>'Enero',2=>'Febrero',3=>'Marzo',4=>'Abril',5=>'Mayo',6=>'Junio',7=>'Julio',8=>'Agosto',9=>'Septiembre',10=>'Octubre',11=>'Noviembre',12=>'Diciembre'];
     $html = '';
@@ -97,39 +85,30 @@ list($inicioSemanaObj, $finSemanaObj) = obtenerSemanaPorIndice($semanaSelecciona
 $inicioSemana = $inicioSemanaObj->format('Y-m-d');
 $finSemana    = $finSemanaObj->format('Y-m-d');
 
-$id_sucursal = (int)($_SESSION['id_sucursal'] ?? 0);
-$rol         = $_SESSION['rol'] ?? 'Ejecutivo';
+/* Flag: ¿es la semana actual? (solo aquí se muestra el botón Switch) */
+$esSemanaActual = ($semanaSeleccionada === 0);
 
-/* Mes/Año para export mensual (no afectan la vista semanal) */
+$id_sucursal = (int)($_SESSION['id_sucursal'] ?? 0);
+$rolRaw      = $_SESSION['rol'] ?? 'Ejecutivo';
+$rol         = trim((string)$rolRaw);
+$esEjecutivo = (strcasecmp($rol, 'Ejecutivo') === 0); // case-insensitive
+
+/* Mes/Año para export mensual */
 $mesDefault  = (int)get_get('mes',  (int)date('n'));
 $anioDefault = (int)get_get('anio', (int)date('Y'));
 
 /* =========================================================
-   Filtro de USUARIOS para el <select>:
-   - SIEMPRE activos de la sucursal
-   - INACTIVOS solo si tuvieron ventas en la semana seleccionada
-   Compat: activo / estatus / fecha_baja
+   Combo de usuarios (activos + inactivos con ventas en semana)
 ========================================================= */
 $activeExprs = [];
-if (hasColumn($conn, 'usuarios', 'activo')) {
-    $activeExprs[] = 'u.activo = 1';
-}
-if (hasColumn($conn, 'usuarios', 'estatus')) {
-    $activeExprs[] = "LOWER(u.estatus) IN ('activo','activa','alta')";
-}
-if (hasColumn($conn, 'usuarios', 'fecha_baja')) {
-    $activeExprs[] = "(u.fecha_baja IS NULL OR u.fecha_baja='0000-00-00')";
-}
+if (hasColumn($conn, 'usuarios', 'activo'))        $activeExprs[] = 'u.activo = 1';
+if (hasColumn($conn, 'usuarios', 'estatus'))       $activeExprs[] = "LOWER(u.estatus) IN ('activo','activa','alta')";
+if (hasColumn($conn, 'usuarios', 'fecha_baja'))    $activeExprs[] = "(u.fecha_baja IS NULL OR u.fecha_baja='0000-00-00')";
 $activeExprSql = !empty($activeExprs) ? '(' . implode(' OR ', $activeExprs) . ')' : '1=1';
 
 $sqlUsuarios = "
-    SELECT 
-        u.id, 
-        u.nombre,
-        CASE 
-          WHEN {$activeExprSql} THEN 0 
-          ELSE 1 
-        END AS es_inactivo
+    SELECT u.id, u.nombre,
+           CASE WHEN {$activeExprSql} THEN 0 ELSE 1 END AS es_inactivo
     FROM usuarios u
     LEFT JOIN (
         SELECT id_usuario, COUNT(*) AS cnt
@@ -145,8 +124,7 @@ $stmtUsuarios = $conn->prepare($sqlUsuarios);
 $stmtUsuarios->bind_param("ssi", $inicioSemana, $finSemana, $id_sucursal);
 $stmtUsuarios->execute();
 $resUsuarios = $stmtUsuarios->get_result();
-$usuariosActivos = [];
-$usuariosInactivos = [];
+$usuariosActivos=[]; $usuariosInactivos=[];
 while ($row = $resUsuarios->fetch_assoc()) {
     if ((int)$row['es_inactivo'] === 1) $usuariosInactivos[] = $row; else $usuariosActivos[] = $row;
 }
@@ -160,11 +138,11 @@ $params = [$inicioSemana, $finSemana];
 $types  = "ss";
 
 /* Rol */
-if ($rol === 'Ejecutivo') {
+if ($esEjecutivo) {
     $where   .= " AND vs.id_usuario=?";
     $params[] = (int)$_SESSION['id_usuario'];
     $types   .= "i";
-} elseif ($rol === 'Gerente') {
+} elseif (strcasecmp($rol, 'Gerente') === 0) {
     $where   .= " AND vs.id_sucursal=?";
     $params[] = $id_sucursal;
     $types   .= "i";
@@ -172,56 +150,38 @@ if ($rol === 'Ejecutivo') {
 
 /* Filtros GET */
 $tipoVenta = trim((string)get_get('tipo_venta', ''));
-if ($tipoVenta !== '') {
-    $where   .= " AND vs.tipo_venta=?";
-    $params[] = $tipoVenta;
-    $types   .= "s";
-}
+if ($tipoVenta !== '') { $where.=" AND vs.tipo_venta=?"; $params[]=$tipoVenta; $types.="s"; }
 
 $usuarioSel = (string)get_get('usuario', '');
-if ($usuarioSel !== '') {
-    $where   .= " AND vs.id_usuario=?";
-    $params[] = (int)$usuarioSel;
-    $types   .= "i";
-}
+if ($usuarioSel !== '') { $where.=" AND vs.id_usuario=?"; $params[]=(int)$usuarioSel; $types.="i"; }
 
 $buscar = trim((string)get_get('buscar', ''));
 if ($buscar !== '') {
-    $where   .= " AND (vs.nombre_cliente LIKE ? OR EXISTS(
-                    SELECT 1
-                    FROM detalle_venta_sims d2
-                    LEFT JOIN inventario_sims i2 ON d2.id_sim = i2.id
-                    WHERE d2.id_venta = vs.id AND i2.iccid LIKE ?
-                 ))";
-    $busqLike = "%".$buscar."%";
-    $params[] = $busqLike;
-    $params[] = $busqLike;
-    $types   .= "ss";
+    $where .= " AND (vs.nombre_cliente LIKE ? OR EXISTS(
+                SELECT 1 FROM detalle_venta_sims d2
+                LEFT JOIN inventario_sims i2 ON d2.id_sim = i2.id
+                WHERE d2.id_venta = vs.id AND i2.iccid LIKE ?
+            ))";
+    $busqLike="%".$buscar."%"; $params[]=$busqLike; $params[]=$busqLike; $types.="ss";
 }
 
 /* ========================
    CONSULTA HISTORIAL
-   (LEFT JOIN para incluir eSIM)
-   Preferimos operador del inventario (i.operador) y caemos a vs.tipo_sim
+   - tipo_plan_inv protegido si la columna no existe (informativo)
 ======================== */
+$selTipoPlan = hasColumn($conn, 'inventario_sims', 'tipo_plan')
+    ? "i.tipo_plan AS tipo_plan_inv"
+    : "NULL AS tipo_plan_inv";
+
 $sqlVentas = "
     SELECT
-        vs.id,
-        vs.tipo_venta,
-        vs.modalidad,
-        vs.precio_total,
-        vs.comision_ejecutivo,
-        vs.comision_gerente,
-        vs.fecha_venta,
-        vs.comentarios,
-        vs.id_usuario,
-        vs.nombre_cliente,
-        vs.es_esim,
-        vs.tipo_sim,
-        u.nombre AS usuario,
-        s.nombre AS sucursal,
-        i.iccid,
-        i.operador AS operador_inv
+        vs.id, vs.tipo_venta, vs.modalidad, vs.precio_total,
+        vs.comision_ejecutivo, vs.comision_gerente,
+        vs.fecha_venta, vs.comentarios, vs.id_usuario,
+        vs.nombre_cliente, vs.es_esim, vs.tipo_sim,
+        u.nombre AS usuario, s.nombre AS sucursal,
+        i.iccid, i.operador AS operador_inv,
+        $selTipoPlan
     FROM ventas_sims vs
     INNER JOIN usuarios   u ON vs.id_usuario  = u.id
     INNER JOIN sucursales s ON vs.id_sucursal = s.id
@@ -241,13 +201,9 @@ $stmt->close();
    RESÚMENES
 ======================== */
 $totalVentas   = count($ventas);
-$sumPrecio     = 0.0;
-$sumComEje     = 0.0;
-$sumComGer     = 0.0;
-$cntEsim       = 0;
-$cntFisicas    = 0;
-$tipoCounts    = ['Nueva'=>0,'Portabilidad'=>0,'Regalo'=>0,'Pospago'=>0];
-
+$sumPrecio = $sumComEje = $sumComGer = 0.0;
+$cntEsim = $cntFisicas = 0;
+$tipoCounts = ['Nueva'=>0,'Portabilidad'=>0,'Regalo'=>0,'Pospago'=>0];
 foreach ($ventas as $v) {
   $sumPrecio += (float)$v['precio_total'];
   $sumComEje += (float)$v['comision_ejecutivo'];
@@ -272,8 +228,6 @@ foreach ($ventas as $v) {
     .page-title{ font-weight:700; letter-spacing:.2px; margin:0; }
     .small-muted{ color:var(--muted); font-size:.92rem; }
     .card-surface{ background:var(--surface); border:1px solid rgba(0,0,0,.05); box-shadow:0 6px 16px rgba(16,24,40,.06); border-radius:18px; }
-    .stat{ display:flex; align-items:center; gap:.75rem; }
-    .stat .icon{ width:40px; height:40px; border-radius:12px; display:grid; place-items:center; background:#eef2ff; }
     .chip{ display:inline-flex; align-items:center; gap:.4rem; padding:.25rem .6rem; border-radius:999px; font-weight:600; font-size:.85rem; border:1px solid transparent; }
     .chip-info{ background:#e8f0fe; color:#1a56db; border-color:#cbd8ff; }
     .chip-success{ background:#e7f8ef; color:#0f7a3d; border-color:#b7f1cf; }
@@ -289,6 +243,7 @@ foreach ($ventas as $v) {
 <?php include 'navbar.php'; ?>
 
 <div class="container py-3">
+
   <!-- Encabezado -->
   <div class="page-header">
     <div>
@@ -306,42 +261,13 @@ foreach ($ventas as $v) {
     </div>
   </div>
 
-  <!-- Tarjetas resumen -->
-  <div class="row g-3 mt-1">
-    <div class="col-12 col-md-4">
-      <div class="card card-surface p-3 h-100">
-        <div class="stat">
-          <div class="icon"><i class="bi bi-currency-dollar"></i></div>
-          <div>
-            <div class="small-muted">Monto vendido (semana)</div>
-            <div class="h4 m-0">$<?= number_format($sumPrecio,2) ?></div>
-          </div>
-        </div>
-      </div>
-    </div>
-    <div class="col-12 col-md-4">
-      <div class="card card-surface p-3 h-100">
-        <div class="stat">
-          <div class="icon"><i class="bi bi-person-badge"></i></div>
-          <div>
-            <div class="small-muted">Comisión ejecutivos</div>
-            <div class="h4 m-0">$<?= number_format($sumComEje,2) ?></div>
-          </div>
-        </div>
-      </div>
-    </div>
-    <div class="col-12 col-md-4">
-      <div class="card card-surface p-3 h-100">
-        <div class="stat">
-          <div class="icon"><i class="bi bi-people"></i></div>
-          <div>
-            <div class="small-muted">Comisión gerentes</div>
-            <div class="h4 m-0">$<?= number_format($sumComGer,2) ?></div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
+  <!-- Mensajes flash -->
+  <?php if (!empty($_SESSION['flash_ok'])): ?>
+    <div class="alert alert-success"><?= h($_SESSION['flash_ok']); unset($_SESSION['flash_ok']); ?></div>
+  <?php endif; ?>
+  <?php if (!empty($_SESSION['flash_error'])): ?>
+    <div class="alert alert-danger"><?= h($_SESSION['flash_error']); unset($_SESSION['flash_error']); ?></div>
+  <?php endif; ?>
 
   <!-- Chips por tipo de venta -->
   <div class="d-flex flex-wrap gap-2 mt-2">
@@ -359,7 +285,6 @@ foreach ($ventas as $v) {
         <?php
           $prev = max(0, $semanaSeleccionada - 1);
           $next = $semanaSeleccionada + 1;
-          // Preservar todos los filtros actuales
           $qsPrev = $_GET; $qsPrev['semana'] = $prev;
           $qsNext = $_GET; $qsNext['semana'] = $next;
         ?>
@@ -372,10 +297,7 @@ foreach ($ventas as $v) {
       <div class="col-md-3">
         <label class="small-muted">Semana</label>
         <select name="semana" class="form-select" onchange="this.form.submit()">
-          <?php for ($i=0; $i<8; $i++):
-            list($ini, $fin) = obtenerSemanaPorIndice($i);
-            $texto = "Del {$ini->format('d/m/Y')} al {$fin->format('d/m/Y')}";
-          ?>
+          <?php for ($i=0;$i<8;$i++): list($ini,$fin)=obtenerSemanaPorIndice($i); $texto="Del {$ini->format('d/m/Y')} al {$fin->format('d/m/Y')}"; ?>
             <option value="<?= $i ?>" <?= $i==$semanaSeleccionada?'selected':'' ?>><?= $texto ?></option>
           <?php endfor; ?>
         </select>
@@ -383,7 +305,7 @@ foreach ($ventas as $v) {
       <div class="col-md-3">
         <label class="small-muted">Tipo de venta</label>
         <select name="tipo_venta" class="form-select">
-          <?php $tv = (string)get_get('tipo_venta',''); ?>
+          <?php $tv=(string)get_get('tipo_venta',''); ?>
           <option value="">Todas</option>
           <option value="Nueva"         <?= $tv==='Nueva'?'selected':'' ?>>Nueva</option>
           <option value="Portabilidad"  <?= $tv==='Portabilidad'?'selected':'' ?>>Portabilidad</option>
@@ -394,74 +316,40 @@ foreach ($ventas as $v) {
       <div class="col-md-3">
         <label class="small-muted">Usuario</label>
         <select name="usuario" class="form-select">
-          <?php $uSel = (string)get_get('usuario',''); ?>
+          <?php $uSel=(string)get_get('usuario',''); ?>
           <option value="">Todos</option>
-
-          <?php if (!empty($usuariosActivos)): ?>
-            <optgroup label="Activos">
-              <?php foreach ($usuariosActivos as $u): ?>
-                <option value="<?= (int)$u['id'] ?>" <?= ($uSel!=='' && (int)$uSel===(int)$u['id'])?'selected':'' ?>>
-                  <?= h($u['nombre']) ?>
-                </option>
-              <?php endforeach; ?>
-            </optgroup>
-          <?php endif; ?>
-
-          <?php if (!empty($usuariosInactivos)): ?>
-            <optgroup label="Inactivos (con ventas en semana)">
-              <?php foreach ($usuariosInactivos as $u): ?>
-                <option value="<?= (int)$u['id'] ?>" <?= ($uSel!=='' && (int)$uSel===(int)$u['id'])?'selected':'' ?>>
-                  <?= h($u['nombre']) ?> (inactivo)
-                </option>
-              <?php endforeach; ?>
-            </optgroup>
-          <?php endif; ?>
+          <?php if ($usuariosActivos): ?><optgroup label="Activos">
+            <?php foreach($usuariosActivos as $u): ?>
+              <option value="<?= (int)$u['id'] ?>" <?= ($uSel!=='' && (int)$uSel===(int)$u['id'])?'selected':'' ?>><?= h($u['nombre']) ?></option>
+            <?php endforeach; ?>
+          </optgroup><?php endif; ?>
+          <?php if ($usuariosInactivos): ?><optgroup label="Inactivos (con ventas en semana)">
+            <?php foreach($usuariosInactivos as $u): ?>
+              <option value="<?= (int)$u['id'] ?>" <?= ($uSel!=='' && (int)$uSel===(int)$u['id'])?'selected':'' ?>><?= h($u['nombre']) ?> (inactivo)</option>
+            <?php endforeach; ?>
+          </optgroup><?php endif; ?>
         </select>
       </div>
       <div class="col-md-3">
         <label class="small-muted">Buscar (ICCID o Cliente)</label>
-        <input id="searchInput" name="buscar" type="text" class="form-control"
-               value="<?= h(get_get('buscar','')) ?>"
-               placeholder="Ej. 8952..., Juan Pérez">
+        <input id="searchInput" name="buscar" type="text" class="form-control" value="<?= h(get_get('buscar','')) ?>" placeholder="Ej. 8952..., Juan Pérez">
       </div>
     </div>
 
     <div class="mt-3 d-flex justify-content-end gap-2 flex-wrap">
-      <!-- Controles de export mensual (no afectan la vista semanal) -->
       <div class="d-flex align-items-center gap-2 me-auto">
         <label class="small-muted mb-0">Mes/Año para export mensual:</label>
-        <select name="mes" class="form-select form-select-sm" style="width:auto;">
-          <?= mesOptionsHtml($mesDefault) ?>
-        </select>
-        <select name="anio" class="form-select form-select-sm" style="width:auto;">
-          <?= anioOptionsHtml($anioDefault, 6) ?>
-        </select>
+        <select name="mes" class="form-select form-select-sm" style="width:auto;"><?= mesOptionsHtml($mesDefault) ?></select>
+        <select name="anio" class="form-select form-select-sm" style="width:auto;"><?= anioOptionsHtml($anioDefault, 6) ?></select>
       </div>
 
       <button class="btn btn-primary"><i class="bi bi-funnel"></i> Filtrar</button>
       <a href="historial_ventas_sims.php" class="btn btn-secondary">Limpiar</a>
 
-      <!-- Exportar SEMANAL (arrastra todos los GET actuales) -->
-      <button
-        type="submit"
-        class="btn btn-success"
-        formaction="exportar_excel_sims.php"
-        formmethod="GET"
-        formtarget="_blank"
-        title="Exporta SEMANAL con los filtros actuales"
-      >
+      <button type="submit" class="btn btn-success" formaction="exportar_excel_sims.php" formmethod="GET" formtarget="_blank" title="Exporta SEMANAL con los filtros actuales">
         <i class="bi bi-file-earmark-excel"></i> Exportar Semanal
       </button>
-
-      <!-- Exportar MENSUAL (usa Mes/Año + filtros actuales) -->
-      <button
-        type="submit"
-        class="btn btn-outline-success"
-        formaction="exportar_excel_sims_mensual.php"
-        formmethod="GET"
-        formtarget="_blank"
-        title="Exporta MENSUAL (usa Mes/Año + filtros actuales)"
-      >
+      <button type="submit" class="btn btn-outline-success" formaction="exportar_excel_sims_mensual.php" formmethod="GET" formtarget="_blank" title="Exporta MENSUAL (usa Mes/Año + filtros actuales)">
         <i class="bi bi-file-earmark-spreadsheet"></i> Exportar Mensual
       </button>
     </div>
@@ -501,13 +389,34 @@ foreach ($ventas as $v) {
           <tbody>
             <?php foreach ($ventas as $v): ?>
               <?php
+                $isEsim     = (int)($v['es_esim'] ?? 0) === 1;
+                $tipoIcon   = $isEsim ? 'bi-sim' : 'bi-sim-fill';
+                $operadorInv= trim((string)($v['operador_inv'] ?? ''));
+                $operadorVs = trim((string)($v['tipo_sim'] ?? ''));
+                $operador   = $operadorInv !== '' ? $operadorInv : $operadorVs;
+
+                $ventaTipo  = (string)$v['tipo_venta'];
+                $esPropia   = ((int)$v['id_usuario'] === (int)($_SESSION['id_usuario'] ?? 0));
+
+                // Prepago por regla de negocio: si NO es Pospago => es Prepago
+                $esPrepago  = ($ventaTipo !== 'Pospago');
+                $esPospago  = ($ventaTipo === 'Pospago');
+
+                /* Botón Switch:
+                   - Semana actual
+                   - Rol Ejecutivo
+                   - Venta propia
+                   - Prepago (no Pospago)
+                   - Debe estar en estado 'Nueva' (origen del cambio)
+                */
+                $puedeSwitch =
+                    $esSemanaActual &&
+                    $esEjecutivo &&
+                    $esPropia &&
+                    $esPrepago &&
+                    ($ventaTipo === 'Nueva');
+
                 $puedeEliminar = (($_SESSION['rol'] ?? '') === 'Admin');
-                $isEsim   = (int)($v['es_esim'] ?? 0) === 1;
-                $tipoIcon = $isEsim ? 'bi-sim' : 'bi-sim-fill';
-                // Preferimos operador del inventario; si no hay, usamos el guardado en la venta
-                $operadorInv = trim((string)($v['operador_inv'] ?? ''));
-                $operadorVs  = trim((string)($v['tipo_sim'] ?? ''));
-                $operador    = $operadorInv !== '' ? $operadorInv : $operadorVs;
               ?>
               <tr>
                 <td><span class="badge text-bg-secondary">#<?= (int)$v['id'] ?></span></td>
@@ -517,23 +426,37 @@ foreach ($ventas as $v) {
                 <td><?= h($v['nombre_cliente'] ?? '') ?></td>
                 <td>
                   <span class="chip chip-purple"><i class="bi <?= $tipoIcon ?>"></i> <?= $isEsim ? 'eSIM' : h($v['iccid']) ?></span>
+                  <?php if (!empty($v['tipo_plan_inv'])): ?>
+                    <span class="badge text-bg-light border ms-1"><?= h($v['tipo_plan_inv']) ?></span>
+                  <?php endif; ?>
                 </td>
-                <td>
-                  <span class="chip chip-info"><i class="bi bi-broadcast-pin"></i> <?= $operador !== '' ? h($operador) : '—' ?></span>
-                </td>
-                <td><?= h($v['tipo_venta']) ?></td>
-                <td><?= ($v['tipo_venta']==='Pospago') ? h($v['modalidad']) : '' ?></td>
+                <td><span class="chip chip-info"><i class="bi bi-broadcast-pin"></i> <?= $operador !== '' ? h($operador) : '—' ?></span></td>
+                <td><?= h($ventaTipo) ?></td>
+
+                <!-- Mostrar modalidad SOLO en Pospago -->
+                <td><?= $esPospago ? h($v['modalidad'] ?? '') : '' ?></td>
+
                 <td class="fw-semibold">$<?= number_format((float)$v['precio_total'],2) ?></td>
                 <td>$<?= number_format((float)$v['comision_ejecutivo'],2) ?></td>
                 <td>$<?= number_format((float)$v['comision_gerente'],2) ?></td>
                 <td><?= h($v['comentarios'] ?? '') ?></td>
                 <td class="text-nowrap">
+                  <?php if ($puedeSwitch): ?>
+                    <form class="d-inline" method="POST" action="switch_venta_sim.php">
+                      <input type="hidden" name="csrf" value="<?= h($CSRF) ?>">
+                      <input type="hidden" name="id_venta" value="<?= (int)$v['id'] ?>">
+                      <input type="hidden" name="back" value="<?= h($_SERVER['REQUEST_URI']) ?>">
+                      <button type="submit" class="btn btn-outline-primary btn-sm"
+                              onclick="return confirm('¿Convertir esta venta a PORTABILIDAD?');">
+                        <i class="bi bi-arrow-left-right"></i> Switch
+                      </button>
+                    </form>
+                  <?php endif; ?>
+
                   <?php if ($puedeEliminar): ?>
-                    <button
-                      class="btn btn-outline-danger btn-sm"
-                      data-bs-toggle="modal"
-                      data-bs-target="#confirmEliminarSim"
-                      data-idventa="<?= (int)$v['id'] ?>">
+                    <button class="btn btn-outline-danger btn-sm"
+                            data-bs-toggle="modal" data-bs-target="#confirmEliminarSim"
+                            data-idventa="<?= (int)$v['id'] ?>">
                       <i class="bi bi-trash"></i> Eliminar
                     </button>
                   <?php endif; ?>
@@ -569,27 +492,23 @@ foreach ($ventas as $v) {
   </div>
 </div>
 
-<!-- Bootstrap JS (si usas el modal) -->
 <!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script> -->
 <script>
-// Modal: setear id_venta
+// Modal: setear id_venta (eliminación)
 const modalSim = document.getElementById('confirmEliminarSim');
 modalSim?.addEventListener('show.bs.modal', (ev) => {
   const id = ev.relatedTarget?.getAttribute('data-idventa') || '';
   document.getElementById('modalIdVentaSim').value = id;
 });
 
-// Búsqueda rápida (front) usando el mismo campo 'buscar'
+// Búsqueda rápida
 (function(){
   const input = document.getElementById('searchInput');
   const rows  = Array.from(document.querySelectorAll('#tablaSims tbody tr'));
   const norm  = s => (s||'').toString().toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu,'');
   function filtra(){
     const q = norm(input?.value || '');
-    rows.forEach(tr => {
-      const ok = !q || norm(tr.innerText).includes(q);
-      tr.style.display = ok ? '' : 'none';
-    });
+    rows.forEach(tr => { tr.style.display = (!q || norm(tr.innerText).includes(q)) ? '' : 'none'; });
   }
   input?.addEventListener('input', filtra);
 })();
