@@ -1,0 +1,3 @@
+[2025-10-09T18:29:57-06:00] EXC Unknown column 'dv.imei2' in 'field list'
+#0 C:\laragon\www\luga_php\exportar_excel.php(129): mysqli->prepare('\r\nSELECT\r\n  v.i...')
+#1 {main}
