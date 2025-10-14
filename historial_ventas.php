@@ -55,21 +55,41 @@ $finSemana    = $finSemanaObj->format('Y-m-d');
 list($inicioActualObj, $finActualObj) = obtenerSemanaPorIndice(0);
 
 $msg              = $_GET['msg'] ?? '';
-$id_sucursal      = (int)($_SESSION['id_sucursal'] ?? 0);
+$id_sucursal_sesion = (int)($_SESSION['id_sucursal'] ?? 0);
 $ROL              = $_SESSION['rol'] ?? '';
 $idUsuarioSesion  = (int)($_SESSION['id_usuario'] ?? 0);
 
-// Subtipo sucursal
+/* =========================================================
+   Sucursal seleccionada (nuevo)
+   - Admin/GerenteZona pueden elegir; otros quedan en su sucursal
+========================================================= */
+$puedeElegirSucursal = in_array($ROL, ['Admin','GerenteZona'], true);
+$sucursalSeleccionada = $puedeElegirSucursal ? (int)($_GET['sucursal'] ?? 0) : 0;
+// Si no elige o no puede, usamos la de sesión
+$sucursalFiltro = $puedeElegirSucursal ? ($sucursalSeleccionada ?: $id_sucursal_sesion) : $id_sucursal_sesion;
+
+// Subtipo/Nombre de la sucursal (según filtro)
 $subtipoSucursal = '';
-if ($id_sucursal) {
-    $stmtSubtipo = $conn->prepare("SELECT subtipo FROM sucursales WHERE id = ? LIMIT 1");
-    $stmtSubtipo->bind_param("i", $id_sucursal);
-    $stmtSubtipo->execute();
-    $rowSub = $stmtSubtipo->get_result()->fetch_assoc();
-    $subtipoSucursal = $rowSub['subtipo'] ?? '';
-    $stmtSubtipo->close();
+$nombreSucursalFiltro = '';
+if ($sucursalFiltro) {
+    $stmtSub = $conn->prepare("SELECT nombre, subtipo FROM sucursales WHERE id = ? LIMIT 1");
+    $stmtSub->bind_param("i", $sucursalFiltro);
+    $stmtSub->execute();
+    $rowSub = $stmtSub->get_result()->fetch_assoc();
+    $nombreSucursalFiltro = $rowSub['nombre'] ?? '';
+    $subtipoSucursal      = $rowSub['subtipo'] ?? '';
+    $stmtSub->close();
 }
 $esSubdistribuidor = ($subtipoSucursal === 'Subdistribuidor');
+
+// Catálogo de sucursales para combo (solo Admin/GerenteZona)
+$listaSucursales = [];
+if ($puedeElegirSucursal) {
+    $rsSuc = $conn->query("SELECT id, nombre FROM sucursales ORDER BY nombre");
+    while ($r = $rsSuc->fetch_assoc()) {
+        $listaSucursales[] = $r;
+    }
+}
 
 /* =========================================================
    Detección del nombre de columna de tipo de producto
@@ -78,7 +98,7 @@ $colTipoProd = hasColumn($conn, 'productos', 'tipo') ? 'tipo' : 'tipo_producto';
 
 /* =========================================================
    Usuarios para filtro:
-   - SIEMPRE activos de la sucursal
+   - SIEMPRE activos de la sucursal filtrada (si se eligió una)
    - INACTIVOS solo si tuvieron ventas en la semana seleccionada
    Compat esquema: activo / estatus / fecha_baja
 ========================================================= */
@@ -102,19 +122,38 @@ $esInactivoCase = $activosExpr
     ? "CASE WHEN {$activosExpr} THEN 0 ELSE 1 END"
     : "CASE WHEN {$existsVentas} THEN 1 ELSE 0 END";
 
-$sqlUsuarios = "
-    SELECT u.id, u.nombre,
-           {$esInactivoCase} AS es_inactivo
-    FROM usuarios u
-    WHERE u.id_sucursal = ?
-      AND (
-            " . ($activosExpr ? "{$activosExpr} OR " : "") . "
-            {$existsVentas}
-          )
-    ORDER BY es_inactivo ASC, u.nombre ASC
-";
-$stmtUsuarios = $conn->prepare($sqlUsuarios);
-$stmtUsuarios->bind_param("iss", $id_sucursal, $inicioSemana, $finSemana);
+/* 
+   🔧 Aquí el ajuste clave:
+   - Si NO se selecciona sucursal (0 = Todas), NO imponemos u.id_sucursal=?,
+     para no matar el listado de usuarios al quedar en 0.
+*/
+if ($sucursalFiltro > 0) {
+    $sqlUsuarios = "
+        SELECT u.id, u.nombre,
+               {$esInactivoCase} AS es_inactivo
+        FROM usuarios u
+        WHERE u.id_sucursal = ?
+          AND (
+                " . ($activosExpr ? "{$activosExpr} OR " : "") . "
+                {$existsVentas}
+              )
+        ORDER BY es_inactivo ASC, u.nombre ASC
+    ";
+    $stmtUsuarios = $conn->prepare($sqlUsuarios);
+    $stmtUsuarios->bind_param("iss", $sucursalFiltro, $inicioSemana, $finSemana);
+} else {
+    $sqlUsuarios = "
+        SELECT u.id, u.nombre,
+               {$esInactivoCase} AS es_inactivo
+        FROM usuarios u
+        WHERE
+          " . ($activosExpr ? "({$activosExpr}) OR " : "") . "
+          {$existsVentas}
+        ORDER BY es_inactivo ASC, u.nombre ASC
+    ";
+    $stmtUsuarios = $conn->prepare($sqlUsuarios);
+    $stmtUsuarios->bind_param("ss", $inicioSemana, $finSemana);
+}
 $stmtUsuarios->execute();
 $resUsuarios = $stmtUsuarios->get_result();
 
@@ -130,21 +169,30 @@ while ($row = $resUsuarios->fetch_assoc()) {
 $stmtUsuarios->close();
 
 /* =========================================================
-   WHERE base para consultas de ventas
+   WHERE base para consultas de ventas (afecta métricas y listado)
+   (Sin cambios de lógica: solo añadimos filtro por sucursal cuando aplica)
 ========================================================= */
 $where  = " WHERE DATE(v.fecha_venta) BETWEEN ? AND ?";
 $params = [$inicioSemana, $finSemana];
 $types  = "ss";
 
-// Filtro por rol para el listado
+// Filtro por rol + sucursal seleccionada
 if ($ROL === 'Ejecutivo') {
     $where .= " AND v.id_usuario=?";
     $params[] = $idUsuarioSesion;
     $types .= "i";
 } elseif ($ROL === 'Gerente') {
+    // Gerente: amarrado a su propia sucursal (de sesión)
     $where .= " AND v.id_sucursal=?";
-    $params[] = $id_sucursal;
+    $params[] = $id_sucursal_sesion;
     $types .= "i";
+} else {
+    // Admin / GerenteZona: pueden filtrar por sucursal
+    if ($sucursalFiltro > 0) {
+        $where .= " AND v.id_sucursal=?";
+        $params[] = $sucursalFiltro;
+        $types .= "i";
+    }
 }
 
 // Filtros GET
@@ -313,8 +361,11 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
     <div>
       <h1 class="page-title">🧾 Historial de Ventas</h1>
       <div class="small-muted">
-        Usuario: <strong><?= h($_SESSION['nombre']) ?></strong> · Semana:
-        <strong><?= $inicioSemanaObj->format('d/m/Y') ?> – <?= $finSemanaObj->format('d/m/Y') ?></strong>
+        Usuario: <strong><?= h($_SESSION['nombre']) ?></strong>
+        <?php if ($puedeElegirSucursal): ?>
+          · Sucursal: <strong><?= $sucursalFiltro ? h($nombreSucursalFiltro) : 'Todas' ?></strong>
+        <?php endif; ?>
+        · Semana: <strong><?= $inicioSemanaObj->format('d/m/Y') ?> – <?= $finSemanaObj->format('d/m/Y') ?></strong>
       </div>
     </div>
     <div class="d-flex align-items-center gap-2">
@@ -407,6 +458,20 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
           <?php endfor; ?>
         </select>
       </div>
+
+      <?php if ($puedeElegirSucursal): ?>
+      <div class="col-md-3">
+        <label class="small-muted">Sucursal</label>
+        <select name="sucursal" class="form-select" onchange="this.form.submit()">
+          <option value="0" <?= $sucursalFiltro===0?'selected':'' ?>>Todas</option>
+          <?php foreach ($listaSucursales as $s): ?>
+            <option value="<?= (int)$s['id'] ?>" <?= ($sucursalFiltro==(int)$s['id'])?'selected':'' ?>>
+              <?= h($s['nombre']) ?>
+            </option>
+          <?php endforeach; ?>
+        </select>
+      </div>
+      <?php endif; ?>
 
       <div class="col-md-3">
         <label class="small-muted">Tipo de venta</label>
