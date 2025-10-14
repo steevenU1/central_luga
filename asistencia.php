@@ -188,6 +188,7 @@ $st->execute();
 $esDescansoHoy = (bool)$st->get_result()->fetch_column();
 $st->close();
 
+
 // Permiso (informativo)
 $st = $conn->prepare("SELECT status FROM permisos_solicitudes WHERE id_usuario=? AND fecha=? LIMIT 1");
 $st->bind_param('is', $idUsuario, $hoyYmd);
