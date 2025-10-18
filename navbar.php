@@ -216,7 +216,18 @@ $grpInventario = ['panel.php', 'inventario_subdistribuidor.php', 'inventario_glo
 $grpCompras    = ['compras_nueva.php', 'compras_resumen.php', 'modelos.php', 'proveedores.php', 'compras_ingreso.php'];
 $grpTraspasos  = ['generar_traspaso.php', 'generar_traspaso_sims.php', 'traspasos_sims_pendientes.php', 'traspasos_sims_salientes.php', 'traspasos_pendientes.php', 'traspasos_salientes.php', 'traspaso_nuevo.php'];
 $grpEfectivo   = ['cobros.php', 'cortes_caja.php', 'generar_corte.php', 'depositos_sucursal.php', 'depositos.php', 'recoleccion_comisiones.php'];
-$grpOperacion  = ['lista_precios.php', 'prospectos.php', 'insumos_pedido.php', 'insumos_admin.php', 'mantenimiento_solicitar.php', 'mantenimiento_admin.php', 'gestionar_usuarios.php', 'zona_asistencias.php', 'nomina_mi_semana.php'];
+$grpOperacion  = [
+  'lista_precios.php',
+  'prospectos.php',
+  'insumos_pedido.php',
+  'insumos_admin.php',
+  'mantenimiento_solicitar.php',
+  'mantenimiento_admin.php',
+  'gestionar_usuarios.php',
+  'zona_asistencias.php',
+  'nomina_mi_semana.php',
+  'panel_operador.php', // ✅ NUEVO: para resaltar el parent
+];
 $grpRH         = ['reporte_nomina.php', 'reporte_nomina_gerentes_zona.php', 'admin_expedientes.php', 'admin_asistencias.php', 'productividad_ejecutivo.php'];
 /* ✅ Incluimos tareas.php al grupo Operativos para resaltar activo */
 $grpOperativos = [
@@ -835,6 +846,14 @@ function item_active(string $f, string $c): string
           </a>
           <ul class="dropdown-menu">
             <li><a class="dropdown-item <?= item_active('lista_precios.php', $current) ?>" href="lista_precios.php">Lista de precios</a></li>
+
+            <?php if (in_array($rolUsuario, ['Admin', 'Logistica'], true)): ?>
+              <li>
+                <a class="dropdown-item <?= item_active('panel_operador.php', $current) ?>" href="panel_operador.php">
+                  <i class="bi bi-person-gear me-1"></i>Panel Operador
+                </a>
+              </li>
+            <?php endif; ?>
 
             <?php if (in_array($rolUsuario, ['Gerente', 'Ejecutivo'], true) && $esSucursalPropia): ?>
               <li><a class="dropdown-item <?= item_active('nomina_mi_semana.php', $current) ?>" href="nomina_mi_semana.php">Mi nómina</a></li>

@@ -10,7 +10,7 @@ if (!isset($_SESSION['id_usuario'])) {
 }
 
 require_once __DIR__ . '/db.php';
-require_once __DIR__ . '/guard_corte.php'; // ⬅️ Nuevo: helper del candado
+require_once __DIR__ . '/guard_corte.php'; // ⬅️ Helper del candado
 
 $id_usuario           = (int)($_SESSION['id_usuario'] ?? 0);
 $id_sucursal_usuario  = (int)($_SESSION['id_sucursal'] ?? 0);
@@ -323,8 +323,8 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
   </div>
 </div>
 
-<!-- Bootstrap JS (bundle) -->
-<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
+<!-- Bootstrap JS (bundle) para que funcione el modal -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 
 <script>
 $(document).ready(function() {

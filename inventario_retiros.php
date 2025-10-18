@@ -1,7 +1,12 @@
 <?php
 // inventario_retiros.php — Retiros multi-sucursal con carrito persistente, reversión parcial e IMEI finder
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
-if (!isset($_SESSION['id_usuario']) || ($_SESSION['rol'] ?? '') !== 'Admin') { header("Location: 403.php"); exit(); }
+
+// ✅ Permitir Admin y Logistica
+$ROL = $_SESSION['rol'] ?? '';
+if (!isset($_SESSION['id_usuario']) || !in_array($ROL, ['Admin','Logistica'], true)) {
+  header("Location: 403.php"); exit();
+}
 
 require_once __DIR__.'/db.php';
 require_once __DIR__.'/navbar.php';
@@ -40,7 +45,7 @@ if (!$nomSucursalSel) { $idSucursalSel = $idEulalia; $nomSucursalSel = $nombreEu
 // ===============================
 $mensaje = $_GET['msg'] ?? '';
 $alert   = '';
-if ($mensaje === 'ok')      $alert = "<div class='alert alert-success my-3'>✅ Retiro realizado correctamente.</div>";
+if ($mensaje === 'ok')        $alert = "<div class='alert alert-success my-3'>✅ Retiro realizado correctamente.</div>";
 elseif ($mensaje === 'revok') $alert = "<div class='alert alert-success my-3'>✅ Reversión aplicada.</div>";
 elseif ($mensaje === 'err')  { $err=h($_GET['errdetail'] ?? 'Ocurrió un error.'); $alert="<div class='alert alert-danger my-3'>❌ $err</div>"; }
 
@@ -220,7 +225,7 @@ if ($findImei !== '') {
   <link rel="icon" href="/img/favicon.ico?v=7" sizes="any">
 
   <!-- Bootstrap & Icons -->
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <!-- <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"> -->
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet" />
 
   <!-- DataTables -->
@@ -247,15 +252,42 @@ if ($findImei !== '') {
     .copy-btn{ border:0; background:transparent; cursor:pointer; }
     .copy-btn:hover{ opacity:.85; }
     .sel-panel{ display:none; }
+
+    /* ===== Carrito (FAB + Offcanvas) restilizado ===== */
+    .fab-cart{
+      position: fixed; right: 16px; bottom: 18px; z-index: 1035;
+      border-radius: 999px; box-shadow: 0 12px 30px rgba(2,6,23,.25);
+      padding-left: 16px; padding-right: 16px;
+      display:flex; align-items:center; gap:10px;
+    }
+    .fab-cart i{ font-size: 1.2rem; }
+    .fab-badge{ position: absolute; top: -6px; right: -6px; font-size: .75rem; }
+
+    .offcanvas.custom-cart .offcanvas-header{
+      background: linear-gradient(135deg,#111827,#1f2937);
+      color:#e5e7eb; border-bottom: 1px solid rgba(255,255,255,.1);
+    }
+    .offcanvas.custom-cart .offcanvas-title{ font-weight:700; }
+    .offcanvas.custom-cart .table thead{
+      position: sticky; top:0; z-index: 1;
+      background:#f8fafc;
+    }
+    .cart-row:hover{ background: #fff7ed; }
+    .badge-ghost{
+      background:#f1f5f9; border:1px solid #e2e8f0; color:#0f172a; border-radius:999px; padding:.2rem .6rem;
+    }
+    .btn-ghost{
+      background:#fff; border:1px solid #e5e7eb;
+    }
   </style>
 </head>
-<body>
+<body data-msg="<?= h($mensaje) ?>">
 <div class="container-fluid px-3 px-lg-4">
 
   <div class="page-head">
     <div>
       <h2 class="page-title">📤 Retiros de Inventario — <?= h($nomSucursalSel) ?></h2>
-      <div class="mt-1"><span class="role-chip">Admin</span></div>
+      <div class="mt-1"><span class="role-chip"><?= h($ROL) ?></span></div>
     </div>
     <div class="d-flex gap-2 align-items-center">
       <form method="GET" class="d-flex align-items-center gap-2">
@@ -328,9 +360,10 @@ if ($findImei !== '') {
             <strong>Seleccionados:</strong> <span id="selCount">0</span>
             <span id="selExtra" class="text-muted small"></span>
           </div>
-          <div class="d-flex gap-2">
+          <div class="d-flex flex-wrap gap-2">
             <button type="button" id="btnVerSel" class="btn btn-outline-secondary btn-sm">Ver seleccionados</button>
-            <button type="button" id="btnClearSel" class="btn btn-outline-danger btn-sm">Vaciar</button>
+            <button type="button" id="btnClearSel" class="btn btn-outline-danger btn-sm">Vaciar carrito</button>
+            <button type="button" id="btnClearAll" class="btn btn-outline-danger btn-sm">Vaciar TODOS</button>
           </div>
         </div>
 
@@ -527,7 +560,39 @@ if ($findImei !== '') {
 
 </div>
 
-<!-- Modales -->
+<!-- ===== FAB Carrito (contador + acceso rápido) ===== -->
+<button type="button" class="btn btn-primary fab-cart" id="openCart">
+  <i class="bi bi-cart-fill"></i>
+  <span class="badge text-bg-danger fab-badge" id="fabCount" style="display:none">0</span>
+</button>
+
+<!-- ===== Offcanvas Carrito ===== -->
+<div class="offcanvas offcanvas-end custom-cart" tabindex="-1" id="carritoOffcanvas" aria-labelledby="carritoLabel">
+  <div class="offcanvas-header">
+    <h5 class="offcanvas-title" id="carritoLabel">Carrito de retiros — <?= h($nomSucursalSel) ?></h5>
+    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas"></button>
+  </div>
+  <div class="offcanvas-body d-flex flex-column">
+    <div class="mb-2 d-flex flex-wrap gap-2">
+      <span class="badge-ghost">Sucursal: <?= h($nomSucursalSel) ?></span>
+      <button class="btn btn-ghost btn-sm" id="ocVaciar"><i class="bi bi-trash3 me-1"></i>Vaciar carrito</button>
+      <button class="btn btn-ghost btn-sm" id="ocVaciarTodos"><i class="bi bi-trash3-fill me-1"></i>Vaciar TODOS</button>
+    </div>
+    <div class="table-responsive" style="max-height:50vh;overflow:auto;border:1px solid #e5e7eb;border-radius:12px;">
+      <table class="table table-sm align-middle mb-0">
+        <thead class="table-light">
+          <tr><th style="width:48px">#</th><th>ID</th><th>Marca</th><th>Modelo</th><th>Cap.</th><th>Color</th><th>IMEI</th><th style="width:56px;"></th></tr>
+        </thead>
+        <tbody id="ocBody"><tr><td colspan="8" class="text-center text-muted">Sin seleccionados</td></tr></tbody>
+      </table>
+    </div>
+    <div class="mt-3 d-grid">
+      <button class="btn btn-danger" id="ocRetirar"><i class="bi bi-box-arrow-up me-1"></i> Retirar seleccionados</button>
+    </div>
+  </div>
+</div>
+
+<!-- ====== Modales ====== -->
 <div class="modal fade" id="confirmModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-xl modal-dialog-scrollable">
     <div class="modal-content">
@@ -582,8 +647,17 @@ if ($findImei !== '') {
 <script src="https://cdn.datatables.net/buttons/2.4.2/js/buttons.html5.min.js"></script>
 
 <script>
-  // === util
-  function copyText(t){ navigator.clipboard.writeText(t).then(()=>{ const toast=document.createElement('div'); toast.className='position-fixed top-0 start-50 translate-middle-x p-2'; toast.style.zIndex=1080; toast.innerHTML='<span class="badge text-bg-success rounded-pill">IMEI copiado</span>'; document.body.appendChild(toast); setTimeout(()=> toast.remove(), 1200); }); }
+  // === utils básicos
+  function copyText(t){
+    navigator.clipboard.writeText(t).then(()=>{
+      const toast=document.createElement('div');
+      toast.className='position-fixed top-0 start-50 translate-middle-x p-2';
+      toast.style.zIndex=1080;
+      toast.innerHTML='<span class="badge text-bg-success rounded-pill">IMEI copiado</span>';
+      document.body.appendChild(toast);
+      setTimeout(()=> toast.remove(), 1200);
+    });
+  }
   function confirmarReversionTotal(){ return confirm("¿Revertir TODO el retiro?"); }
 
   // === DataTable hist
@@ -601,7 +675,7 @@ if ($findImei !== '') {
     });
   });
 
-  // === Modal Detalle (carga template con form de reversión parcial)
+  // === Modal Detalle
   const detalleModal = new bootstrap.Modal(document.getElementById('detalleModal'));
   document.addEventListener('click', (e) => {
     const btn = e.target.closest('.btn-detalle'); if (!btn) return;
@@ -614,118 +688,224 @@ if ($findImei !== '') {
     }
   });
 
-  // === Carrito persistente por sucursal (localStorage)
-  const sucursalId = <?= (int)$idSucursalSel ?>;
-  const storeKey = `retiros:sel:${sucursalId}`;
-  let carrito = new Set(JSON.parse(localStorage.getItem(storeKey) || '[]'));
+  // === Carrito persistente enriquecido por sucursal (localStorage)
+  (function(){
+    const sucursalId = <?= (int)$idSucursalSel ?>;
+    const storeKey = `retiros:sel:${sucursalId}`; // guarda { items:[{id,marca,modelo,cap,color,imei}], updated_at:epoch }
+    const ONE_DAY = 24*60*60*1000;
 
-  const chkAll = document.getElementById('chkAll');
-  const panelSel = document.getElementById('panelSel');
-  const selCount = document.getElementById('selCount');
-  const selExtra = document.getElementById('selExtra');
-  const btnVerSel = document.getElementById('btnVerSel');
-  const btnClearSel = document.getElementById('btnClearSel');
+    // Fallback por si localStorage truena
+    let memoryState = { items: [], updated_at: Date.now() };
+    function canUseLS(){ try { localStorage.setItem('__t','1'); localStorage.removeItem('__t'); return true; } catch { return false; } }
+    const useLS = canUseLS();
 
-  function persist(){ localStorage.setItem(storeKey, JSON.stringify(Array.from(carrito))); }
-  function syncChecksFromCarrito(){
-    document.querySelectorAll('.chk-item').forEach(chk=>{
-      const id = parseInt(chk.dataset.id,10); chk.checked = carrito.has(id);
-    });
-    updatePanel();
-  }
-  function updatePanel(){
-    const visibleSelected = Array.from(document.querySelectorAll('.chk-item')).filter(c=>c.checked).length;
-    const total = carrito.size;
-    selCount.textContent = total;
-    selExtra.textContent = (total>visibleSelected) ? `(+${total-visibleSelected} fuera de este listado)` : '';
-    panelSel.style.display = total>0 ? 'flex' : 'none';
-    // actualizar master checkbox: solo marca visibles
-    const visibles = document.querySelectorAll('.chk-item').length;
-    chkAll.checked = (visibles>0 && visibleSelected === visibles);
-    chkAll.indeterminate = (visibleSelected>0 && visibleSelected<visibles);
-  }
-
-  // marcar/ desmarcar visibles
-  chkAll?.addEventListener('change', e=>{
-    document.querySelectorAll('.chk-item').forEach(chk=>{
-      const id = parseInt(chk.dataset.id,10);
-      chk.checked = e.target.checked;
-      if (chk.checked) carrito.add(id); else carrito.delete(id);
-    });
-    persist(); updatePanel();
-  });
-
-  // eventos por fila
-  document.querySelectorAll('.chk-item').forEach(chk=>{
-    chk.addEventListener('change', ()=>{
-      const id = parseInt(chk.dataset.id,10);
-      if (chk.checked) carrito.add(id); else carrito.delete(id);
-      persist(); updatePanel();
-    });
-  });
-
-  // ver seleccionados (marca los que estén en la tabla; útil tras una búsqueda)
-  btnVerSel?.addEventListener('click', ()=>{
-    document.querySelectorAll('.chk-item').forEach(chk=>{
-      const id = parseInt(chk.dataset.id,10);
-      chk.checked = carrito.has(id);
-    });
-    updatePanel();
-  });
-
-  // vaciar carrito
-  btnClearSel?.addEventListener('click', ()=>{
-    if (!confirm('¿Vaciar la selección?')) return;
-    carrito.clear(); persist(); syncChecksFromCarrito();
-  });
-
-  // Modal Resumen (construye lista desde los visibles y muestra contador total)
-  const formRetiro = document.getElementById('formRetiro');
-  const confirmModal = new bootstrap.Modal(document.getElementById('confirmModal'));
-  document.getElementById('btnResumen')?.addEventListener('click', ()=>{
-    if (carrito.size===0){ alert('No hay equipos seleccionados.'); return; }
-    document.getElementById('resMotivo').textContent  = document.getElementById('motivo').value || '—';
-    document.getElementById('resDestino').textContent = document.getElementById('destino').value || '—';
-    document.getElementById('resNota').textContent    = document.getElementById('nota').value || '—';
-    document.getElementById('resCantidad').textContent = carrito.size;
-
-    const tbody = document.getElementById('resumenBody'); tbody.innerHTML = '';
-    let idx=0;
-    // Solo listamos los visibles con datos (los no visibles igual se mandan)
-    document.querySelectorAll('.chk-item:checked').forEach(chk=>{
-      const tr = chk.closest('tr'); const c = tr.querySelectorAll('td');
-      const row = document.createElement('tr');
-      row.innerHTML = `<td>${++idx}</td><td>${chk.dataset.id}</td><td>${c[1]?.textContent??''}</td><td>${c[2]?.textContent??''}</td>
-                       <td>${c[3]?.textContent??''}</td><td>${c[4]?.textContent??''}</td><td>${c[5]?.textContent??''}</td>`;
-      tbody.appendChild(row);
-    });
-    const extras = carrito.size - idx;
-    if (extras>0){
-      const tr = document.createElement('tr');
-      tr.innerHTML = `<td colspan="7" class="text-muted">+ ${extras} seleccionados fuera de este listado</td>`;
-      tbody.appendChild(tr);
+    function loadState(){
+      try {
+        if (!useLS) return memoryState;
+        const raw = localStorage.getItem(storeKey);
+        if (!raw) return { items: [], updated_at: Date.now() };
+        let data = JSON.parse(raw);
+        // Migración desde arreglo simple de IDs
+        if (Array.isArray(data)) data = { items: data.map(id => ({ id:Number(id) })), updated_at: Date.now() };
+        if (!data.items) data.items = [];
+        if (!data.updated_at) data.updated_at = Date.now();
+        if (Date.now() - data.updated_at > ONE_DAY) {
+          localStorage.removeItem(storeKey);
+          return { items: [], updated_at: Date.now() };
+        }
+        return data;
+      } catch { return { items: [], updated_at: Date.now() }; }
     }
-    confirmModal.show();
-  });
+    function saveState(state){
+      state.updated_at = Date.now();
+      if (useLS) localStorage.setItem(storeKey, JSON.stringify(state));
+      else memoryState = state;
+      updatePanel(); renderOffcanvas(); updateFab();
+    }
+    function clearState(){
+      if (useLS) localStorage.removeItem(storeKey); else memoryState = { items: [], updated_at: Date.now() };
+      updatePanel(); renderOffcanvas(); updateFab();
+      document.querySelectorAll('.chk-item').forEach(chk => { chk.checked = false; });
+    }
+    function clearAllCarts(){
+      if (useLS) Object.keys(localStorage).forEach(k => { if (k.startsWith('retiros:sel:')) localStorage.removeItem(k); });
+      memoryState = { items: [], updated_at: Date.now() };
+      clearState();
+    }
+    function getItemsSet(){ return new Set(loadState().items.map(x => Number(x.id))); }
 
-  // Submit: inyecta TODOS los IDs del carrito como inputs hidden (evita perder selección entre búsquedas)
-  document.getElementById('btnConfirmarEnviar')?.addEventListener('click', ()=>{
-    if (carrito.size===0){ alert('No hay equipos seleccionados.'); return; }
-    const cont = document.getElementById('selHidden'); cont.innerHTML='';
-    carrito.forEach(id=>{
-      const inp = document.createElement('input'); inp.type='hidden'; inp.name='items[]'; inp.value=id;
-      cont.appendChild(inp);
+    // refs UI
+    const chkAll = document.getElementById('chkAll');
+    const panelSel = document.getElementById('panelSel');
+    const selCount = document.getElementById('selCount');
+    const selExtra = document.getElementById('selExtra');
+    const btnVerSel = document.getElementById('btnVerSel');
+    const btnClearSel = document.getElementById('btnClearSel');
+    const btnClearAll = document.getElementById('btnClearAll');
+    const formRetiro = document.getElementById('formRetiro');
+
+    // FAB / Offcanvas
+    const carritoCanvas = new bootstrap.Offcanvas(document.getElementById('carritoOffcanvas'));
+    const openCartBtn = document.getElementById('openCart');
+    const ocBody = document.getElementById('ocBody');
+    const ocVaciar = document.getElementById('ocVaciar');
+    const ocVaciarTodos = document.getElementById('ocVaciarTodos');
+    const ocRetirar = document.getElementById('ocRetirar');
+    const fabCount = document.getElementById('fabCount');
+
+    openCartBtn?.addEventListener('click', ()=> carritoCanvas.show());
+    ocVaciar?.addEventListener('click', ()=> { if(confirm('¿Vaciar carrito de esta sucursal?')) clearState(); });
+    ocVaciarTodos?.addEventListener('click', ()=> { if(confirm('¿Vaciar carritos de TODAS las sucursales?')) clearAllCarts(); });
+    ocRetirar?.addEventListener('click', ()=> document.getElementById('btnConfirmarEnviar')?.click());
+
+    // helpers
+    function rowToItem(chk){
+      const tr = chk.closest('tr'); const tds = tr ? tr.querySelectorAll('td') : [];
+      return {
+        id: Number(chk.dataset.id),
+        marca: tds[1]?.textContent?.trim() || '',
+        modelo: tds[2]?.textContent?.trim() || '',
+        cap: tds[3]?.textContent?.trim() || '',
+        color: tds[4]?.textContent?.trim() || '',
+        imei: tds[5]?.querySelector('span')?.textContent?.trim() || ''
+      };
+    }
+    function syncChecksFromState(){
+      const set = getItemsSet();
+      document.querySelectorAll('.chk-item').forEach(chk => { chk.checked = set.has(Number(chk.dataset.id)); });
+      updatePanel();
+    }
+    function updatePanel(){
+      const state = loadState();
+      const visibles = Array.from(document.querySelectorAll('.chk-item'));
+      const visibleSelected = visibles.filter(c => c.checked).length;
+      const total = state.items.length;
+      if (selCount) selCount.textContent = total;
+      if (selExtra) selExtra.textContent = (total>visibleSelected) ? `(+${total-visibleSelected} fuera de este listado)` : '';
+      if (panelSel) panelSel.style.display = total>0 ? 'flex' : 'none';
+      const visiblesCount = visibles.length;
+      if (chkAll){
+        chkAll.checked = (visiblesCount>0 && visibleSelected === visiblesCount);
+        chkAll.indeterminate = (visibleSelected>0 && visibleSelected<visiblesCount);
+      }
+      updateFab();
+    }
+    function updateFab(){
+      const n = loadState().items.length;
+      if (fabCount){
+        if (n>0) { fabCount.style.display='inline-block'; fabCount.textContent = n; }
+        else { fabCount.style.display='none'; }
+      }
+    }
+    function renderOffcanvas(){
+      if (!ocBody) return;
+      const items = loadState().items;
+      ocBody.innerHTML = '';
+      if (items.length === 0){
+        ocBody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">Sin seleccionados</td></tr>';
+        return;
+      }
+      let i=0;
+      items.forEach(it=>{
+        const tr = document.createElement('tr');
+        tr.className='cart-row';
+        tr.innerHTML = `
+          <td>${++i}</td>
+          <td>${it.id}</td>
+          <td>${it.marca||''}</td>
+          <td>${it.modelo||''}</td>
+          <td>${it.cap||''}</td>
+          <td>${it.color||''}</td>
+          <td class="font-monospace">${it.imei||''}</td>
+          <td class="text-end">
+            <button class="btn btn-outline-danger btn-sm" data-remove="${it.id}" title="Quitar"><i class="bi bi-x-lg"></i></button>
+          </td>`;
+        ocBody.appendChild(tr);
+      });
+    }
+    ocBody?.addEventListener('click', (e)=>{
+      const btn = e.target.closest('button[data-remove]'); if (!btn) return;
+      const id = Number(btn.getAttribute('data-remove'));
+      const st = loadState(); st.items = st.items.filter(x => Number(x.id) !== id); saveState(st);
+      const chk = document.querySelector(`.chk-item[data-id="${id}"]`); if (chk) chk.checked = false;
     });
-    formRetiro.submit();
-  });
 
-  // Búsqueda con Enter sin disparar el form de retiro
-  document.getElementById('qsearch')?.addEventListener('keydown', e => {
-    if (e.key === 'Enter') { e.preventDefault(); document.getElementById('searchForm').submit(); }
-  });
+    // Delegación para .chk-item
+    document.addEventListener('change', (e)=>{
+      const chk = e.target.closest?.('.chk-item'); if (!chk) return;
+      const st = loadState();
+      const id = Number(chk.dataset.id);
+      if (chk.checked) {
+        if (!st.items.some(x => Number(x.id)===id)) st.items.push(rowToItem(chk));
+      } else {
+        st.items = st.items.filter(x => Number(x.id)!==id);
+      }
+      saveState(st);
+    });
 
-  // Al cargar, reflejamos carrito en los checkboxes actuales
-  syncChecksFromCarrito();
+    // Master checkbox
+    chkAll?.addEventListener('change', e=>{
+      const st = loadState();
+      document.querySelectorAll('.chk-item').forEach(chk=>{
+        const id = Number(chk.dataset.id);
+        if (e.target.checked) {
+          if (!st.items.some(x => Number(x.id)===id)) st.items.push(rowToItem(chk));
+          chk.checked = true;
+        } else {
+          st.items = st.items.filter(x => Number(x.id)!==id);
+          chk.checked = false;
+        }
+      });
+      saveState(st);
+    });
+
+    // Panel superior
+    btnVerSel?.addEventListener('click', ()=> syncChecksFromState());
+    btnClearSel?.addEventListener('click', ()=>{ if (!confirm('¿Vaciar la selección de esta sucursal?')) return; clearState(); });
+    btnClearAll?.addEventListener('click', ()=>{ if (!confirm('¿Vaciar los carritos de TODAS las sucursales?')) return; clearAllCarts(); });
+
+    // Resumen (usa carrito)
+    const confirmModal = new bootstrap.Modal(document.getElementById('confirmModal'));
+    document.getElementById('btnResumen')?.addEventListener('click', ()=>{
+      const st = loadState();
+      if (st.items.length===0){ alert('No hay equipos seleccionados.'); return; }
+      document.getElementById('resMotivo').textContent  = document.getElementById('motivo')?.value || '—';
+      document.getElementById('resDestino').textContent = document.getElementById('destino')?.value || '—';
+      document.getElementById('resNota').textContent    = document.getElementById('nota')?.value || '—';
+      document.getElementById('resCantidad').textContent = st.items.length;
+
+      const tbody = document.getElementById('resumenBody'); tbody.innerHTML = '';
+      let idx=0;
+      st.items.forEach(it=>{
+        const row = document.createElement('tr');
+        row.innerHTML = `<td>${++idx}</td><td>${it.id}</td><td>${it.marca||''}</td><td>${it.modelo||''}</td>
+                         <td>${it.cap||''}</td><td>${it.color||''}</td><td class="font-monospace">${it.imei||''}</td>`;
+        tbody.appendChild(row);
+      });
+      confirmModal.show();
+    });
+
+    // Submit: inyecta TODOS los IDs del carrito como inputs hidden
+    document.getElementById('btnConfirmarEnviar')?.addEventListener('click', ()=>{
+      const st = loadState();
+      if (st.items.length===0){ alert('No hay equipos seleccionados.'); return; }
+      const cont = document.getElementById('selHidden'); cont.innerHTML='';
+      st.items.forEach(it=>{
+        const inp = document.createElement('input'); inp.type='hidden'; inp.name='items[]'; inp.value=it.id;
+        cont.appendChild(inp);
+      });
+      formRetiro?.submit();
+    });
+
+    // Búsqueda con Enter sin disparar el form de retiro
+    document.getElementById('qsearch')?.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); document.getElementById('searchForm').submit(); }
+    });
+
+    // Arranque
+    syncChecksFromState(); renderOffcanvas(); updateFab();
+  })();
 </script>
 </body>
 </html>
+

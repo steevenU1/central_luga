@@ -1,19 +1,13 @@
 <?php
 // producto_nuevo_individual.php
 session_start();
-if (!isset($_SESSION['id_usuario']) || $_SESSION['rol'] !== 'Admin') {
+$ROL = $_SESSION['rol'] ?? '';
+if (!isset($_SESSION['id_usuario']) || !in_array($ROL, ['Admin','Logistica'], true)) {
   header("Location: 403.php");
   exit();
 }
 
 require_once __DIR__ . '/db.php';
-require_once __DIR__ . '/navbar.php';
-
-$mensaje = "";
-$alertCls = "info";
-
-// Traer sucursales
-$sucursales = $conn->query("SELECT id, nombre FROM sucursales ORDER BY nombre");
 
 // ---------- Helpers ----------
 function esc($s){ return htmlspecialchars($s ?? '', ENT_QUOTES, 'UTF-8'); }
@@ -22,14 +16,17 @@ function n2($v){ return number_format((float)$v, 2, '.', ''); }
 
 /** Lee valores ENUM desde INFORMATION_SCHEMA para armar selects confiables */
 function getEnumOptions(mysqli $conn, string $table, string $column): array {
-  $sql = "SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1";
+  $sql = "SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+          WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1";
   $stmt = $conn->prepare($sql);
+  if (!$stmt) return [];
   $stmt->bind_param("ss", $table, $column);
   $stmt->execute();
-  $res = $stmt->get_result()->fetch_assoc();
+  $res = $stmt->get_result();
+  $row = $res ? $res->fetch_assoc() : null;
   $stmt->close();
-  if (!$res) return [];
-  $colType = $res['COLUMN_TYPE']; // ej: enum('A','B','C')
+  if (!$row) return [];
+  $colType = $row['COLUMN_TYPE']; // ej: enum('A','B','C')
   if (preg_match("/^enum\\((.*)\\)$/i", $colType, $m)) {
     $parts = str_getcsv($m[1], ',', "'");
     return array_map('trim', $parts);
@@ -37,16 +34,104 @@ function getEnumOptions(mysqli $conn, string $table, string $column): array {
   return [];
 }
 
-// Opciones dinámicas desde el esquema real
-$optsTipo       = getEnumOptions($conn, 'productos', 'tipo_producto');    // p.ej. ['Equipo','Modem','Accesorio']
-$optsGama       = getEnumOptions($conn, 'productos', 'gama');              // según tu enum real
-$optsCicloVida  = getEnumOptions($conn, 'productos', 'ciclo_vida');        // p.ej. ['Nuevo','Línea','Fin de vida']
-$optsResurtible = getEnumOptions($conn, 'productos', 'resurtible');        // p.ej. ['Sí','No']
+/* ============================================================
+   ENDPOINT AJAX: buscar en catalogo_modelos por codigo_producto
+   URL: producto_nuevo_individual.php?ajax=modelo&codigo=ABC123
+   Retorna JSON { ok:true, data:{...} } / { ok:false, error:"..." }
+   ============================================================ */
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'modelo') {
+  header('Content-Type: application/json; charset=utf-8');
 
-// Defaults amigables si por alguna razón no pudo leer el ENUM (no rompe el flujo)
+  $codigo = norm($_GET['codigo'] ?? '');
+  if ($codigo === '') { echo json_encode(['ok'=>false,'error'=>'Código vacío']); exit; }
+
+  $sql = "SELECT 
+            marca, modelo, color, ram, capacidad, codigo_producto, descripcion,
+            nombre_comercial, compania, financiera, fecha_lanzamiento, precio_lista,
+            tipo_producto, subtipo, gama, ciclo_vida, abc, operador, resurtible
+          FROM catalogo_modelos
+          WHERE codigo_producto = ?
+            AND (activo = 1 OR activo IS NULL)
+          LIMIT 1";
+
+  if ($st = $conn->prepare($sql)) {
+    $st->bind_param('s', $codigo);
+    $st->execute();
+
+    // Intento 1: con mysqlnd
+    $res = @($st->get_result());
+    if ($res !== null && $res !== false) {
+      $row = $res->fetch_assoc();
+      $st->close();
+    } else {
+      // Fallback sin mysqlnd: bind_result
+      $st->store_result();
+      $row = null;
+      $st->bind_result(
+        $marca, $modelo, $color, $ram, $capacidad, $codigo_producto, $descripcion,
+        $nombre_comercial, $compania, $financiera, $fecha_lanzamiento, $precio_lista,
+        $tipo_producto, $subtipo, $gama, $ciclo_vida, $abc, $operador, $resurtible
+      );
+      if ($st->num_rows > 0 && $st->fetch()) {
+        $row = [
+          'marca'            => $marca,
+          'modelo'           => $modelo,
+          'color'            => $color,
+          'ram'              => $ram,
+          'capacidad'        => $capacidad,
+          'codigo_producto'  => $codigo_producto,
+          'descripcion'      => $descripcion,
+          'nombre_comercial' => $nombre_comercial,
+          'compania'         => $compania,
+          'financiera'       => $financiera,
+          'fecha_lanzamiento'=> $fecha_lanzamiento,
+          'precio_lista'     => $precio_lista,
+          'tipo_producto'    => $tipo_producto,
+          'subtipo'          => $subtipo,
+          'gama'             => $gama,
+          'ciclo_vida'       => $ciclo_vida,
+          'abc'              => $abc,
+          'operador'         => $operador,
+          'resurtible'       => $resurtible,
+        ];
+      }
+      $st->close();
+    }
+
+    if ($row) {
+      // Normaliza formatos para inputs del form
+      $row['precio_lista'] = ($row['precio_lista'] !== null) ? (float)$row['precio_lista'] : null;
+      // fecha_lanzamiento ya viene YYYY-MM-DD (date)
+      echo json_encode(['ok'=>true,'data'=>$row]); exit;
+    } else {
+      echo json_encode(['ok'=>false,'error'=>'No se encontró el código en catalogo_modelos']); exit;
+    }
+  }
+
+  echo json_encode(['ok'=>false,'error'=>'Error al preparar consulta']); exit;
+}
+
+// 👇 A partir de aquí ya es UI normal (no AJAX)
+require_once __DIR__ . '/navbar.php';
+
+// ================== UI vars ==================
+$mensaje = "";
+$alertCls = "info";
+
+// Traer sucursales
+$sucursales = $conn->query("SELECT id, nombre FROM sucursales ORDER BY nombre");
+
+// Opciones dinámicas desde el esquema real
+$optsTipo       = getEnumOptions($conn, 'productos', 'tipo_producto');    // ['Equipo','Modem','Accesorio'] etc.
+$optsGama       = getEnumOptions($conn, 'productos', 'gama');
+$optsCicloVida  = getEnumOptions($conn, 'productos', 'ciclo_vida');
+$optsResurtible = getEnumOptions($conn, 'productos', 'resurtible');
+
+// Defaults amigables si no pudo leer el ENUM
 if (!$optsTipo)       $optsTipo       = ['Equipo','Modem','Accesorio'];
 if (!$optsCicloVida)  $optsCicloVida  = ['Nuevo','Línea','Fin de vida'];
 if (!$optsResurtible) $optsResurtible = ['Sí','No'];
+// (gama es opcional: si tu tabla no tiene ENUM, el select muestra "—" + opciones reales si existen)
 
 // ---------- POST ----------
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -98,10 +183,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   } else {
     // IMEI duplicado (en imei1 o imei2)
     $stmt = $conn->prepare("SELECT id FROM productos WHERE imei1=? OR imei2=? LIMIT 1");
-    $stmt->bind_param("ss", $imei1, $imei1);
-    $stmt->execute();
-    $dup = $stmt->get_result()->fetch_assoc();
-    $stmt->close();
+    if ($stmt) {
+      $stmt->bind_param("ss", $imei1, $imei1);
+      $stmt->execute();
+      $dup = ($stmt->get_result()) ? $stmt->get_result()->fetch_assoc() : null;
+      // Fallback sin mysqlnd
+      if ($dup === null) {
+        $stmt->store_result();
+        $stmt->bind_result($dummyId);
+        $dup = ($stmt->num_rows > 0 && $stmt->fetch()) ? ['id'=>$dummyId] : null;
+      }
+      $stmt->close();
+    } else {
+      $dup = null; // si falla el prepare, deja seguir y que truene en el insert con FK/UNIQUE si aplica
+    }
 
     if ($dup) {
       $mensaje  = "❌ Ya existe un producto con IMEI $imei1.";
@@ -115,30 +210,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
 
       $stmt = $conn->prepare($sql);
-      $stmt->bind_param(
-        "ssssssssddsdssssssssssss",
-        $codigo_producto, $marca, $modelo, $color, $ram, $capacidad, $imei1, $imei2, $costo, $costo_con_iva, $proveedor,
-        $precio_lista, $descripcion, $nombre_comercial, $compania, $financiera, $fecha_lanz,
-        $tipo_producto, $subtipo, $gama, $ciclo_vida, $abc, $operador, $resurtible
-      );
+      if ($stmt) {
+        $stmt->bind_param(
+          "ssssssssddsdssssssssssss",
+          $codigo_producto, $marca, $modelo, $color, $ram, $capacidad, $imei1, $imei2, $costo, $costo_con_iva, $proveedor,
+          $precio_lista, $descripcion, $nombre_comercial, $compania, $financiera, $fecha_lanz,
+          $tipo_producto, $subtipo, $gama, $ciclo_vida, $abc, $operador, $resurtible
+        );
 
-      if ($stmt->execute()) {
-        $id_producto = $stmt->insert_id;
-        $stmt->close();
+        if ($stmt->execute()) {
+          $id_producto = $stmt->insert_id;
+          $stmt->close();
 
-        // Inventario
-        $stmt2 = $conn->prepare("INSERT INTO inventario (id_producto, id_sucursal, estatus) VALUES (?,?, 'Disponible')");
-        $stmt2->bind_param("ii", $id_producto, $id_sucursal);
-        $stmt2->execute();
-        $stmt2->close();
+          // Inventario
+          $stmt2 = $conn->prepare("INSERT INTO inventario (id_producto, id_sucursal, estatus) VALUES (?,?, 'Disponible')");
+          if ($stmt2) {
+            $stmt2->bind_param("ii", $id_producto, $id_sucursal);
+            $stmt2->execute();
+            $stmt2->close();
+          }
 
-        $mensaje  = "✅ Producto {$marca} {$modelo} registrado y cargado a inventario de la sucursal seleccionada.";
-        $alertCls = "success";
+          $mensaje  = "✅ Producto {$marca} {$modelo} registrado y cargado a inventario de la sucursal seleccionada.";
+          $alertCls = "success";
 
-        // Limpiar POST para no re-enviar
-        $_POST = [];
+          // Limpiar POST para no re-enviar
+          $_POST = [];
+        } else {
+          $err = esc($conn->error ?: 'Error desconocido');
+          $mensaje  = "❌ Error al registrar el producto: $err";
+          $alertCls = "danger";
+        }
       } else {
-        $mensaje  = "❌ Error al registrar el producto: " . esc($conn->error);
+        $err = esc($conn->error ?: 'Error al preparar consulta');
+        $mensaje  = "❌ Error al registrar el producto: $err";
         $alertCls = "danger";
       }
     }
@@ -152,6 +256,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   <title>Nuevo Producto Individual</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    .autofilled { box-shadow: 0 0 0 0.2rem rgba(13,110,253,.15); }
+  </style>
 </head>
 <body class="bg-light">
 <div class="container my-4" style="max-width: 980px;">
@@ -159,7 +266,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <h3 class="mb-0">📦 Registrar Producto Individual</h3>
     <span class="ms-2 badge text-bg-secondary">Carga directa a inventario</span>
   </div>
-  <p class="text-muted">Captura completa del producto y selección de sucursal destino. Los IMEIs se validan para evitar duplicados.</p>
+  <p class="text-muted">Escribe el <strong>código de producto</strong> y autocompleta desde <code>catalogo_modelos</code>. Los IMEIs se validan para evitar duplicados.</p>
 
   <?php if ($mensaje): ?>
     <div class="alert alert-<?= esc($alertCls) ?> shadow-sm"><?= $mensaje ?></div>
@@ -170,15 +277,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <!-- Identificación -->
     <h5 class="fw-semibold mb-3">Identificación</h5>
     <div class="row g-3 mb-3">
-      <div class="col-md-4">
+      <div class="col-md-6">
         <label class="form-label">Código de producto</label>
-        <input type="text" name="codigo_producto" maxlength="50" class="form-control" value="<?= esc($_POST['codigo_producto'] ?? '') ?>" placeholder="Se genera si lo dejas vacío">
+        <div class="input-group">
+          <input id="codigo_producto" type="text" name="codigo_producto" maxlength="50" class="form-control"
+                 value="<?= esc($_POST['codigo_producto'] ?? '') ?>" placeholder="Ej. SM-A155M-128GG-BLK">
+          <button type="button" id="btnLookup" class="btn btn-outline-primary">Autocompletar</button>
+        </div>
+        <div class="form-text" id="lookupMsg"></div>
+        <div class="form-check mt-1">
+          <input class="form-check-input" type="checkbox" id="overwriteFields">
+          <label class="form-check-label" for="overwriteFields">Sobrescribir campos existentes</label>
+        </div>
       </div>
-      <div class="col-md-4">
+      <div class="col-md-3">
         <label class="form-label">Marca *</label>
         <input type="text" name="marca" class="form-control" required value="<?= esc($_POST['marca'] ?? '') ?>">
       </div>
-      <div class="col-md-4">
+      <div class="col-md-3">
         <label class="form-label">Modelo *</label>
         <input type="text" name="modelo" class="form-control" required value="<?= esc($_POST['modelo'] ?? '') ?>">
       </div>
@@ -246,9 +362,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <label class="form-label">Tipo de producto *</label>
         <select name="tipo_producto" class="form-select" required>
           <?php
-            $val = $_POST['tipo_producto'] ?? 'Equipo';
+            $valTP = $_POST['tipo_producto'] ?? 'Equipo';
             foreach ($optsTipo as $opt) {
-              $sel = ($val === $opt) ? 'selected' : '';
+              $sel = ($valTP === $opt) ? 'selected' : '';
               echo "<option value=\"".esc($opt)."\" $sel>".esc($opt)."</option>";
             }
           ?>
@@ -263,9 +379,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <select name="gama" class="form-select">
           <option value="">—</option>
           <?php
-            $val = $_POST['gama'] ?? '';
+            $valG = $_POST['gama'] ?? '';
             foreach ($optsGama as $opt) {
-              $sel = ($val === $opt) ? 'selected' : '';
+              $sel = ($valG === $opt) ? 'selected' : '';
               echo "<option value=\"".esc($opt)."\" $sel>".esc($opt)."</option>";
             }
           ?>
@@ -279,9 +395,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <select name="ciclo_vida" class="form-select">
           <option value="">—</option>
           <?php
-            $val = $_POST['ciclo_vida'] ?? '';
+            $valCV = $_POST['ciclo_vida'] ?? '';
             foreach ($optsCicloVida as $opt) {
-              $sel = ($val === $opt) ? 'selected' : '';
+              $sel = ($valCV === $opt) ? 'selected' : '';
               echo "<option value=\"".esc($opt)."\" $sel>".esc($opt)."</option>";
             }
           ?>
@@ -296,9 +412,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <select name="resurtible" class="form-select">
           <option value="">—</option>
           <?php
-            $val = $_POST['resurtible'] ?? '';
+            $valR = $_POST['resurtible'] ?? '';
             foreach ($optsResurtible as $opt) {
-              $sel = ($val === $opt) ? 'selected' : '';
+              $sel = ($valR === $opt) ? 'selected' : '';
               echo "<option value=\"".esc($opt)."\" $sel>".esc($opt)."</option>";
             }
           ?>
@@ -342,9 +458,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           <option value="">Seleccione sucursal…</option>
           <?php
           if ($sucursales && $sucursales->num_rows) {
-            $val = (int)($_POST['id_sucursal'] ?? 0);
+            $valSuc = (int)($_POST['id_sucursal'] ?? 0);
             while($s = $sucursales->fetch_assoc()){
-              $sel = ($val === (int)$s['id']) ? 'selected' : '';
+              $sel = ($valSuc === (int)$s['id']) ? 'selected' : '';
               echo '<option value="'.(int)$s['id'].'" '.$sel.'>'.esc($s['nombre']).'</option>';
             }
           }
@@ -359,5 +475,98 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     </div>
   </form>
 </div>
+
+<!-- JS: Autocompletar desde catalogo_modelos -->
+<script>
+(function(){
+  const $codigo = document.getElementById('codigo_producto');
+  const $msg = document.getElementById('lookupMsg');
+  const $btn = document.getElementById('btnLookup');
+  const $overwrite = document.getElementById('overwriteFields');
+
+  const map = [
+    'marca','modelo','color','ram','capacidad','precio_lista','descripcion','nombre_comercial',
+    'compania','financiera','fecha_lanzamiento','tipo_producto','subtipo','gama','ciclo_vida',
+    'abc','operador','resurtible'
+  ];
+
+  function setVal(name, value, overwrite=false){
+    const el = document.querySelector(`[name="${name}"]`);
+    if (!el) return;
+
+    const isSelect = el.tagName === 'SELECT';
+    const current = (el.value || '').trim();
+
+    if (!overwrite && current) return; // respeta lo que ya capturó el usuario
+
+    if (isSelect) {
+      // Busca coincidencia case-insensitive
+      let found = false;
+      const valLower = (value ?? '').toString().toLowerCase();
+      Array.from(el.options).forEach(opt=>{
+        if (opt.value.toLowerCase() === valLower || opt.text.toLowerCase() === valLower) {
+          opt.selected = true; found = true;
+        }
+      });
+      if (!found && value != null && value !== '') {
+        // Si no existe opción, intenta set directo (para selects no-ENUM)
+        el.value = value;
+      }
+    } else {
+      el.value = (value ?? '');
+    }
+    el.classList.add('autofilled');
+  }
+
+  function clearHighlights(){
+    document.querySelectorAll('.autofilled').forEach(el=>el.classList.remove('autofilled'));
+  }
+
+  async function lookup(){
+    clearHighlights();
+    const code = ($codigo.value || '').trim();
+    if (!code) {
+      $msg.textContent = 'Escribe un código de producto.';
+      $msg.className = 'form-text text-muted';
+      return;
+    }
+    $msg.textContent = 'Buscando en catálogo…';
+    $msg.className = 'form-text text-primary';
+
+    try {
+      const res = await fetch(`<?= esc(basename(__FILE__)) ?>?ajax=modelo&codigo=${encodeURIComponent(code)}`, {cache:'no-store'});
+      const data = await res.json();
+      if (!data.ok) {
+        $msg.textContent = data.error || 'No se encontró el código.';
+        $msg.className = 'form-text text-danger';
+        return;
+      }
+
+      const d = data.data || {};
+      map.forEach(k => setVal(k, d[k], $overwrite.checked));
+
+      // También podríamos rellenar codigo_producto si viene distinto en catálogo
+      if (!document.querySelector('[name="codigo_producto"]').value && d.codigo_producto) {
+        document.querySelector('[name="codigo_producto"]').value = d.codigo_producto;
+      }
+
+      // Mensaje bonito
+      const desc = [d.marca, d.modelo, d.capacidad, d.color].filter(Boolean).join(' ');
+      $msg.textContent = `Modelo cargado${desc ? ': ' + desc : ''}. Revisa los campos resaltados.`;
+      $msg.className = 'form-text text-success';
+    } catch (e) {
+      console.error(e);
+      $msg.textContent = 'Error al consultar el catálogo.';
+      $msg.className = 'form-text text-danger';
+    }
+  }
+
+  // Disparadores
+  $btn?.addEventListener('click', lookup);
+  $codigo?.addEventListener('change', lookup);
+  $codigo?.addEventListener('blur', (e)=>{ if ((e.target.value||'').trim()) lookup(); });
+  $codigo?.addEventListener('keydown', (e)=>{ if (e.key === 'Enter') { e.preventDefault(); lookup(); } });
+})();
+</script>
 </body>
 </html>
