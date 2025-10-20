@@ -1,4 +1,19 @@
 <?php
+/** procesar_venta.php — Central LUGA (versión con comisiones actualizadas)
+ *
+ * Reglas de comisiones:
+ * - EJECUTIVO (campo `comision`):
+ *     Equipos: [1–3499]=75, [3500–5499]=100, [5500+]=150
+ *     Módem/MiFi: 50
+ *     Combo: 75 fijo
+ * - GERENTE (campo `comision`):
+ *     Tabla Gerente: [1–3499]=25, [3500–5499]=75, [5500+]=100, Módem=25
+ *     (Combo usa tabla Gerente para `comision`; si lo quieres 75 fijo también aquí, se ajusta fácil)
+ * - `comision_gerente` SIEMPRE:
+ *     No combo → tabla Gerente; Combo → 75 fijo (ajuste solicitado)
+ * - `comision_especial` se suma SOLO a `comision`, no a `comision_gerente`.
+ */
+
 session_start();
 if (!isset($_SESSION['id_usuario'])) {
   header("Location: index.php");
@@ -8,10 +23,11 @@ if (!isset($_SESSION['id_usuario'])) {
 require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/guard_corte.php';
 
+date_default_timezone_set('America/Mexico_City');
+
 /* ========================
    Candado de captura por corte de AYER
-   - Tomamos id_sucursal del POST si viene (multi-sucursal), si no, de sesión.
-   - Si está bloqueado, redirigimos a la pantalla de nueva venta con mensaje.
+   - Sucursal del POST si viene (multi-sucursal), si no, de sesión
 ======================== */
 $id_sucursal_guard = isset($_POST['id_sucursal'])
   ? (int)$_POST['id_sucursal']
@@ -24,12 +40,7 @@ if ($bloquear) {
 }
 
 /* ========================
-   Config / Constantes
-======================== */
-const GERENTE_COMISION_REGULAR_CAPTURA = 25.0;
-
-/* ========================
-   Helpers
+   Helpers / Utilidades
 ======================== */
 
 /** Verifica si existe una columna en la tabla dada */
@@ -48,16 +59,8 @@ function columnExists(mysqli $conn, string $table, string $column): bool {
   return $res && $res->num_rows > 0;
 }
 
-/** Detecta la columna de tipo de producto */
+/** Detecta el nombre de la columna de tipo de producto (compatibilidad de esquema) */
 $colTipoProd = columnExists($conn, 'productos', 'tipo') ? 'tipo' : 'tipo_producto';
-
-/** Comisión por tramo SIN cuota (LUGA) para ejecutivos */
-function comisionTramoSinCuota(float $precio): float {
-  if ($precio >= 1     && $precio <= 3500) return 75.0;
-  if ($precio >= 3501  && $precio <= 5500) return 100.0;
-  if ($precio >= 5501)                     return 150.0;
-  return 0.0;
-}
 
 /** Normaliza texto: minúsculas, sin acentos, sin separadores (mi-fi -> mifi) */
 function norm(string $s): string {
@@ -69,7 +72,7 @@ function norm(string $s): string {
   return preg_replace('/[^a-z0-9]+/', '', $s);
 }
 
-/** Detecta si el producto es MiFi/Módem usando varias columnas */
+/** Detecta si el producto es MiFi/Módem usando varias columnas del producto */
 function esMiFiModem(array $row): bool {
   $candidatos = [];
   $candidatos[] = isset($row['tipo_raw']) ? (string)$row['tipo_raw'] : '';
@@ -83,41 +86,70 @@ function esMiFiModem(array $row): bool {
   return false;
 }
 
-/**
- * Comisión regular en CAPTURA (no aplica cuota aquí)
- * Reglas LUGA:
- * - Gerente vendiendo: SIEMPRE 25 por renglón (principal y combo)
- * - Ejecutivo Financiamiento+Combo:
- *     principal → por tramo precio_lista (salvo MiFi/Módem)
- *     combo     → 75 fijo
- * - Ejecutivo Contado o solo Financiamiento:
- *     por tramo precio_lista, salvo MiFi/Módem = 50
- */
-function calcularComisionRegularCaptura(
-  string $rolVendedor,
-  string $tipoVenta,
-  bool   $esCombo,
-  float  $precioLista,
-  bool   $esMiFi = false
-): float {
-  if ($rolVendedor === 'Gerente') {
-    return GERENTE_COMISION_REGULAR_CAPTURA;
-  }
-  if ($tipoVenta === 'Financiamiento+Combo') {
-    if ($esCombo) return 75.0;
-    if ($esMiFi)  return 50.0;
-    return comisionTramoSinCuota($precioLista);
-  }
-  if ($esMiFi) return 50.0;
-  return comisionTramoSinCuota($precioLista);
+/* ========================
+   Tablas de comisión
+======================== */
+
+/** EJECUTIVO — por tramo de precio_lista */
+function comisionTramoEjecutivo(float $precio): float {
+  if ($precio >= 1     && $precio <= 3499) return 75.0;
+  if ($precio >= 3500  && $precio <= 5499) return 100.0;
+  if ($precio >= 5500)                     return 150.0;
+  return 0.0;
 }
 
-/** Comisión especial por producto según catálogo */
-function obtenerComisionEspecial(int $id_producto, mysqli $conn): float {
+/** GERENTE — por tramo de precio_lista o módem */
+function comisionTramoGerente(float $precio, bool $isModem): float {
+  if ($isModem) return 25.0;
+  if ($precio >= 1     && $precio <= 3499) return 25.0;
+  if ($precio >= 3500  && $precio <= 5499) return 75.0;
+  if ($precio >= 5500)                     return 100.0;
+  return 0.0;
+}
+
+/**
+ * Comisión para el campo `comision` considerando:
+ * - rol del vendedor (Ejecutivo/ Gerente)
+ * - si es combo (75 fijo para Ejecutivo; para Gerente usamos tabla Gerente)
+ * - si es módem
+ * - precio_lista
+ */
+function calcularComisionBaseParaCampoComision(
+  string $rolVendedor,
+  bool   $esCombo,
+  bool   $esModem,
+  float  $precioLista
+): float {
+  if ($rolVendedor === 'Gerente') {
+    // Para `comision`, si vende Gerente: usa tabla de Gerente (incluye módem y combos)
+    return comisionTramoGerente($precioLista, $esModem);
+  }
+
+  // Ejecutivo
+  if ($esCombo) return 75.0;       // combo fijo para Ejecutivo
+  if ($esModem) return 50.0;       // módem Ejecutivo
+  return comisionTramoEjecutivo($precioLista);
+}
+
+/** Comisión para `comision_gerente`:
+ *  - Combo: 75 fijo (ajuste solicitado)
+ *  - No combo: tabla de Gerente por precio / módem
+ */
+function calcularComisionGerenteParaCampo(
+  bool $esCombo,
+  bool $esModem,
+  float $precioLista
+): float {
+  if ($esCombo) return 75.0; // NUEVO: combo siempre 75 en comision_gerente
+  return comisionTramoGerente($precioLista, $esModem);
+}
+
+/** Comisión especial por producto según catálogo (se suma SOLO a `comision`) */
+function obtenerComisionEspecial(int $id_producto, mysqli $conn, string $colTipoProd): float {
   $hoy = date('Y-m-d');
 
   $stmt = $conn->prepare("
-    SELECT marca, modelo, capacidad, ".$GLOBALS['colTipoProd']." AS tipo_raw,
+    SELECT marca, modelo, capacidad, $colTipoProd AS tipo_raw,
            nombre_comercial, subtipo, descripcion
     FROM productos WHERE id=?
   ");
@@ -159,9 +191,8 @@ function validarInventario(mysqli $conn, int $id_inv, int $id_sucursal): bool {
 }
 
 /**
- * Registra un renglón de venta (principal o combo)
- * Inserta es_combo si la columna existe.
- * Devuelve la comisión total del renglón (regular + especial).
+ * Registra un renglón de venta (principal o combo) en detalle_venta
+ * y actualiza inventario. Devuelve la comisión TOTAL del renglón (base + especial).
  */
 function venderEquipo(
   mysqli $conn,
@@ -169,17 +200,18 @@ function venderEquipo(
   int $id_inventario,
   bool $esCombo,
   string $rolVendedor,
-  string $tipoVenta,
-  bool $tieneEsCombo
+  string $tipoVenta, // compatibilidad
+  bool $tieneEsCombo,
+  bool $tieneComisionGerente,
+  string $colTipoProd
 ): float {
 
-  $col = $GLOBALS['colTipoProd'];
-
+  // 1) Traer datos del producto
   $sql = "
     SELECT i.id_producto,
            p.imei1,
            p.precio_lista,
-           p.`$col` AS tipo_raw,
+           p.`$colTipoProd` AS tipo_raw,
            p.nombre_comercial,
            p.subtipo,
            p.descripcion,
@@ -194,52 +226,85 @@ function venderEquipo(
   $stmtProd->execute();
   $row = $stmtProd->get_result()->fetch_assoc();
   $stmtProd->close();
-  if (!$row) { throw new RuntimeException("Equipo $id_inventario no disponible."); }
+  if (!$row) { throw new RuntimeException("El equipo $id_inventario no está disponible."); }
 
   $precioL = (float)$row['precio_lista'];
-  $esMiFi  = esMiFiModem($row);
+  $esModem = esMiFiModem($row);
 
-  $comReg = calcularComisionRegularCaptura($rolVendedor, $tipoVenta, $esCombo, $precioL, $esMiFi);
+  // 2) Calcular comisiones base
+  $comisionBase        = calcularComisionBaseParaCampoComision($rolVendedor, $esCombo, $esModem, $precioL);
+  $comisionGerenteBase = calcularComisionGerenteParaCampo($esCombo, $esModem, $precioL);
 
-  if ($rolVendedor === 'Gerente' && (float)$comReg !== GERENTE_COMISION_REGULAR_CAPTURA) {
-    $comReg = GERENTE_COMISION_REGULAR_CAPTURA;
-  }
+  // 3) Comisión especial (solo suma a `comision`)
+  $comEsp = obtenerComisionEspecial((int)$row['id_producto'], $conn, $colTipoProd);
 
-  $comEsp = obtenerComisionEspecial((int)$row['id_producto'], $conn);
-  $comTot = (float)$comReg + (float)$comEsp;
+  // 4) Totales a guardar
+  $comisionRegular = $comisionBase;           // base sin especial
+  $comisionTotal   = $comisionBase + $comEsp; // `comision`
 
-  if ($tieneEsCombo) {
+  // 5) INSERT en detalle_venta con las columnas disponibles
+  if ($tieneEsCombo && $tieneComisionGerente) {
     $stmtD = $conn->prepare("
       INSERT INTO detalle_venta
-        (id_venta, id_producto, es_combo, imei1, precio_unitario, comision, comision_regular, comision_especial)
+        (id_venta, id_producto, es_combo, imei1, precio_unitario,
+         comision, comision_regular, comision_especial, comision_gerente)
+      VALUES (?,?,?,?,?,?,?,?,?)
+    ");
+    $esComboInt = $esCombo ? 1 : 0;
+    $stmtD->bind_param(
+      "iiisddddd",
+      $id_venta, $row['id_producto'], $esComboInt, $row['imei1'],
+      $precioL, $comisionTotal, $comisionRegular, $comEsp, $comisionGerenteBase
+    );
+  } elseif ($tieneComisionGerente) {
+    $stmtD = $conn->prepare("
+      INSERT INTO detalle_venta
+        (id_venta, id_producto, imei1, precio_unitario,
+         comision, comision_regular, comision_especial, comision_gerente)
+      VALUES (?,?,?,?,?,?,?,?)
+    ");
+    $stmtD->bind_param(
+      "iisddddd",
+      $id_venta, $row['id_producto'], $row['imei1'],
+      $precioL, $comisionTotal, $comisionRegular, $comEsp, $comisionGerenteBase
+    );
+  } elseif ($tieneEsCombo) {
+    $stmtD = $conn->prepare("
+      INSERT INTO detalle_venta
+        (id_venta, id_producto, es_combo, imei1, precio_unitario,
+         comision, comision_regular, comision_especial)
       VALUES (?,?,?,?,?,?,?,?)
     ");
     $esComboInt = $esCombo ? 1 : 0;
-    $stmtD->bind_param("iiisdddd",
+    $stmtD->bind_param(
+      "iiisdddd",
       $id_venta, $row['id_producto'], $esComboInt, $row['imei1'],
-      $precioL, $comTot, $comReg, $comEsp
+      $precioL, $comisionTotal, $comisionRegular, $comEsp
     );
   } else {
     $stmtD = $conn->prepare("
       INSERT INTO detalle_venta
-        (id_venta, id_producto, imei1, precio_unitario, comision, comision_regular, comision_especial)
+        (id_venta, id_producto, imei1, precio_unitario,
+         comision, comision_regular, comision_especial)
       VALUES (?,?,?,?,?,?,?)
     ");
-    $stmtD->bind_param("iisdddd",
+    $stmtD->bind_param(
+      "iisdddd",
       $id_venta, $row['id_producto'], $row['imei1'],
-      $precioL, $comTot, $comReg, $comEsp
+      $precioL, $comisionTotal, $comisionRegular, $comEsp
     );
   }
 
   $stmtD->execute();
   $stmtD->close();
 
+  // 6) Marcar inventario como vendido
   $stmtU = $conn->prepare("UPDATE inventario SET estatus='Vendido' WHERE id=?");
   $stmtU->bind_param("i", $id_inventario);
   $stmtU->execute();
   $stmtU->close();
 
-  return $comTot;
+  return $comisionTotal;
 }
 
 /* ========================
@@ -349,20 +414,29 @@ try {
   $stmtVenta->close();
 
   /* ========================
-     3) Registrar equipos
-     (CAPTURA sin cuota)
+     3) Registrar equipos (CAPTURA base)
   ======================= */
-  $tieneEsCombo = columnExists($conn, 'detalle_venta', 'es_combo');
+  $tieneEsCombo          = columnExists($conn, 'detalle_venta', 'es_combo');
+  $tieneComisionGerente  = columnExists($conn, 'detalle_venta', 'comision_gerente');
 
   $totalComision = 0.0;
-  $totalComision += venderEquipo($conn, $id_venta, $equipo1, false, $rol_usuario, $tipo_venta, $tieneEsCombo);
 
+  // Principal
+  $totalComision += venderEquipo(
+    $conn, $id_venta, $equipo1, false,
+    $rol_usuario, $tipo_venta, $tieneEsCombo, $tieneComisionGerente, $colTipoProd
+  );
+
+  // Combo (si aplica)
   if ($tipo_venta === 'Financiamiento+Combo' && $equipo2) {
-    $totalComision += venderEquipo($conn, $id_venta, $equipo2, true, $rol_usuario, $tipo_venta, $tieneEsCombo);
+    $totalComision += venderEquipo(
+      $conn, $id_venta, $equipo2, true,
+      $rol_usuario, $tipo_venta, $tieneEsCombo, $tieneComisionGerente, $colTipoProd
+    );
   }
 
   /* ========================
-     4) Actualizar venta
+     4) Actualizar venta (total de comisiones)
   ======================= */
   $stmtUpd = $conn->prepare("UPDATE ventas SET comision=? WHERE id=?");
   $stmtUpd->bind_param("di", $totalComision, $id_venta);
@@ -371,7 +445,7 @@ try {
 
   $conn->commit();
 
-  header("Location: historial_ventas.php?msg=" . urlencode("Venta #$id_venta registrada. Comisión $" . number_format($totalComision,2)));
+  header("Location: historial_ventas.php?msg=" . urlencode("Venta #$id_venta registrada. Comisión $" . number_format($totalComision, 2)));
   exit();
 } catch (Throwable $e) {
   $conn->rollback();

@@ -54,21 +54,21 @@ $finSemana    = $finSemanaObj->format('Y-m-d');
 // Rango de la semana ACTUAL (para permitir edición)
 list($inicioActualObj, $finActualObj) = obtenerSemanaPorIndice(0);
 
-$msg              = $_GET['msg'] ?? '';
-$id_sucursal_sesion = (int)($_SESSION['id_sucursal'] ?? 0);
-$ROL              = $_SESSION['rol'] ?? '';
-$idUsuarioSesion  = (int)($_SESSION['id_usuario'] ?? 0);
+$msg                 = $_GET['msg'] ?? '';
+$id_sucursal_sesion  = (int)($_SESSION['id_sucursal'] ?? 0);
+$ROL                 = $_SESSION['rol'] ?? '';
+$idUsuarioSesion     = (int)($_SESSION['id_usuario'] ?? 0);
 
 /* =========================================================
-   Sucursal seleccionada (nuevo)
-   - Admin/GerenteZona pueden elegir; otros quedan en su sucursal
+   Sucursal seleccionada
+   - SOLO Admin ve y puede elegir; default: TODAS (0)
+   - Otros roles: quedan amarrados a su sucursal de sesión
 ========================================================= */
-$puedeElegirSucursal = in_array($ROL, ['Admin','GerenteZona'], true);
-$sucursalSeleccionada = $puedeElegirSucursal ? (int)($_GET['sucursal'] ?? 0) : 0;
-// Si no elige o no puede, usamos la de sesión
-$sucursalFiltro = $puedeElegirSucursal ? ($sucursalSeleccionada ?: $id_sucursal_sesion) : $id_sucursal_sesion;
+$puedeElegirSucursal   = ($ROL === 'Admin');
+$sucursalSeleccionada  = $puedeElegirSucursal ? (int)($_GET['sucursal'] ?? 0) : 0; // Admin default 0 (Todas)
+$sucursalFiltro        = $puedeElegirSucursal ? $sucursalSeleccionada : $id_sucursal_sesion;
 
-// Subtipo/Nombre de la sucursal (según filtro)
+// Subtipo/Nombre de la sucursal (según filtro) — para header
 $subtipoSucursal = '';
 $nombreSucursalFiltro = '';
 if ($sucursalFiltro) {
@@ -82,7 +82,7 @@ if ($sucursalFiltro) {
 }
 $esSubdistribuidor = ($subtipoSucursal === 'Subdistribuidor');
 
-// Catálogo de sucursales para combo (solo Admin/GerenteZona)
+// Catálogo de sucursales para combo (solo Admin)
 $listaSucursales = [];
 if ($puedeElegirSucursal) {
     $rsSuc = $conn->query("SELECT id, nombre FROM sucursales ORDER BY nombre");
@@ -123,11 +123,24 @@ $esInactivoCase = $activosExpr
     : "CASE WHEN {$existsVentas} THEN 1 ELSE 0 END";
 
 /* 
-   🔧 Aquí el ajuste clave:
-   - Si NO se selecciona sucursal (0 = Todas), NO imponemos u.id_sucursal=?,
-     para no matar el listado de usuarios al quedar en 0.
+   Lista de usuarios:
+   - Si Admin y 'Todas' (0): NO filtramos por u.id_sucursal
+   - Si Admin y una sucursal (>0): filtramos por esa sucursal
+   - Si no Admin: usamos sucursal de sesión
 */
-if ($sucursalFiltro > 0) {
+if ($puedeElegirSucursal && $sucursalFiltro === 0) {
+    $sqlUsuarios = "
+        SELECT u.id, u.nombre,
+               {$esInactivoCase} AS es_inactivo
+        FROM usuarios u
+        WHERE
+          " . ($activosExpr ? "({$activosExpr}) OR " : "") . "
+          {$existsVentas}
+        ORDER BY es_inactivo ASC, u.nombre ASC
+    ";
+    $stmtUsuarios = $conn->prepare($sqlUsuarios);
+    $stmtUsuarios->bind_param("ss", $inicioSemana, $finSemana);
+} else {
     $sqlUsuarios = "
         SELECT u.id, u.nombre,
                {$esInactivoCase} AS es_inactivo
@@ -141,18 +154,6 @@ if ($sucursalFiltro > 0) {
     ";
     $stmtUsuarios = $conn->prepare($sqlUsuarios);
     $stmtUsuarios->bind_param("iss", $sucursalFiltro, $inicioSemana, $finSemana);
-} else {
-    $sqlUsuarios = "
-        SELECT u.id, u.nombre,
-               {$esInactivoCase} AS es_inactivo
-        FROM usuarios u
-        WHERE
-          " . ($activosExpr ? "({$activosExpr}) OR " : "") . "
-          {$existsVentas}
-        ORDER BY es_inactivo ASC, u.nombre ASC
-    ";
-    $stmtUsuarios = $conn->prepare($sqlUsuarios);
-    $stmtUsuarios->bind_param("ss", $inicioSemana, $finSemana);
 }
 $stmtUsuarios->execute();
 $resUsuarios = $stmtUsuarios->get_result();
@@ -170,25 +171,23 @@ $stmtUsuarios->close();
 
 /* =========================================================
    WHERE base para consultas de ventas (afecta métricas y listado)
-   (Sin cambios de lógica: solo añadimos filtro por sucursal cuando aplica)
 ========================================================= */
 $where  = " WHERE DATE(v.fecha_venta) BETWEEN ? AND ?";
 $params = [$inicioSemana, $finSemana];
 $types  = "ss";
 
-// Filtro por rol + sucursal seleccionada
+// Filtro por rol + sucursal
 if ($ROL === 'Ejecutivo') {
     $where .= " AND v.id_usuario=?";
     $params[] = $idUsuarioSesion;
     $types .= "i";
 } elseif ($ROL === 'Gerente') {
-    // Gerente: amarrado a su propia sucursal (de sesión)
     $where .= " AND v.id_sucursal=?";
     $params[] = $id_sucursal_sesion;
     $types .= "i";
 } else {
-    // Admin / GerenteZona: pueden filtrar por sucursal
-    if ($sucursalFiltro > 0) {
+    // Admin: puede filtrar todas o por una
+    if ($puedeElegirSucursal && $sucursalFiltro > 0) {
         $where .= " AND v.id_sucursal=?";
         $params[] = $sucursalFiltro;
         $types .= "i";
@@ -215,11 +214,7 @@ if (!empty($_GET['buscar'])) {
 }
 
 /* =========================================================
-   MÉTRICAS PARA CARDS (ajustadas)
-   - Unidades (SIN módem/MiFi)
-   - Módems (unidades)
-   - Combos (unidades = 1 por venta F+Combo)
-   - Monto vendido (0 si venta solo tiene módem/MiFi)
+   MÉTRICAS PARA CARDS
 ========================================================= */
 
 // Unidades sin módem y módems (detalle_venta)
@@ -271,7 +266,7 @@ $stM->execute();
 $totalMonto = (float)($stM->get_result()->fetch_assoc()['total_monto'] ?? 0);
 $stM->close();
 
-// Comisiones (igual que antes)
+// Comisiones
 $sqlResumen = "
     SELECT IFNULL(SUM(dv.comision_regular + dv.comision_especial),0) AS total_comisiones
     FROM detalle_venta dv

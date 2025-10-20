@@ -1,35 +1,45 @@
 <?php
-// guard_corte.php
-function debe_bloquear_captura(mysqli $conn, int $idSucursal): array {
-  // Devuelve [bool $bloquear, string $motivo, string $ayer]
-  date_default_timezone_set('America/Mexico_City');
-  $ayer = (new DateTime('yesterday'))->format('Y-m-d');
+// guard_corte.php — Candado de captura por cortes pendientes
+// Regla: bloquear si EXISTEN cobros de la sucursal con corte_generado=0
+//        cuya fecha_cobro sea ANTERIOR a HOY (zona MX).
 
-  // 1) ¿Hubo cobros ayer?
-  $sqlCobros = "SELECT COUNT(*) AS n FROM cobros WHERE id_sucursal=? AND DATE(fecha_cobro)=?";
-  $st = $conn->prepare($sqlCobros);
-  $st->bind_param('is', $idSucursal, $ayer);
-  $st->execute();
-  $nCobros = (int)$st->get_result()->fetch_assoc()['n'];
-  $st->close();
+if (!function_exists('debe_bloquear_captura')) {
+  function debe_bloquear_captura(mysqli $conn, int $id_sucursal): array
+  {
+    // Asegura TZ consistente para el cálculo de "hoy"
+    @date_default_timezone_set('America/Mexico_City');
+    // Opcional (si tu MySQL lo permite): fija TZ de la sesión
+    @$conn->query("SET time_zone = '-06:00'");
 
-  // Si no hubo cobros, por defecto no bloqueamos (ajústalo si lo quieres estricto)
-  if ($nCobros === 0) {
-    return [false, "Sin cobros ayer ($ayer).", $ayer];
+    // Para el mensaje usamos “ayer” solo como referencia visual
+    $ayer = (new DateTime('now', new DateTimeZone('America/Mexico_City')))
+              ->modify('-1 day')->format('Y-m-d');
+
+    // 🔎 Regla clave: SOLO contar cobros de fechas ANTERIORES a HOY
+    // Usamos DATE(fecha_cobro) < CURDATE() para ignorar la hora
+    $sql = "
+      SELECT COUNT(*) AS pendientes
+      FROM cobros
+      WHERE id_sucursal      = ?
+        AND corte_generado   = 0
+        AND DATE(fecha_cobro) < CURDATE()
+    ";
+
+    $pendientes = 0;
+    if ($stmt = $conn->prepare($sql)) {
+      $stmt->bind_param('i', $id_sucursal);
+      $stmt->execute();
+      $stmt->bind_result($pendientes);
+      $stmt->fetch();
+      $stmt->close();
+    }
+
+    if ($pendientes > 0) {
+      $motivo = "Tienes cobros pendientes de corte de <strong>días anteriores</strong>. "
+              . "Genera el corte correspondiente para continuar.";
+      return [true, $motivo, $ayer];
+    }
+
+    return [false, '', $ayer];
   }
-
-  // 2) ¿Existe corte de AYER?
-  $sqlCorte = "SELECT id, estado FROM cortes_caja WHERE id_sucursal=? AND DATE(fecha_operacion)=? LIMIT 1";
-  $st2 = $conn->prepare($sqlCorte);
-  $st2->bind_param('is', $idSucursal, $ayer);
-  $st2->execute();
-  $row = $st2->get_result()->fetch_assoc();
-  $st2->close();
-
-  if (!$row) {
-    return [true, "La sucursal no generó el corte del día $ayer.", $ayer];
-  }
-
-  // Si existe, consideramos que “generó su corte” (estado puede ser Pendiente o Cerrado)
-  return [false, "Corte #{$row['id']} encontrado (estado: {$row['estado']}).", $ayer];
 }

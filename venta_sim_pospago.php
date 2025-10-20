@@ -1,9 +1,17 @@
 <?php
-/* venta_sim_pospago.php — Alta express de SIM en el mismo archivo (sin endpoints extra)
-   Cambios:
-   - DN obligatorio (backend/frontend)
-   - Duplicado ICCID muestra nombre de sucursal (no ID)
-   - 🔐 Si NO es eSIM, la SIM física (id_sim) es OBLIGATORIA (frontend + backend)
+/* venta_sim_pospago.php — Venta pospago + alta rápida de SIM (mismo archivo)
+   Comisiones pospago (BAIT) — reglas FIJAS:
+   - comision_ejecutivo:
+       * Si rol = Gerente → 0
+       * 339: Con=220 / Sin=200
+       * 289: Con=180 / Sin=150
+       * 249: Con=140 / Sin=120
+       * 199: Con=120 / Sin=100
+   - comision_gerente:
+       * 339: Con=80 / Sin=70
+       * 289: Con=60 / Sin=50
+       * 249: Con=40 / Sin=30
+       * 199: Con=30 / Sin=20
 */
 session_start();
 if (!isset($_SESSION['id_usuario'])) { header("Location: index.php"); exit(); }
@@ -12,6 +20,7 @@ require_once __DIR__.'/db.php';
 
 $idUsuario  = (int)($_SESSION['id_usuario'] ?? 0);
 $idSucursal = (int)($_SESSION['id_sucursal'] ?? 0);
+$rolUsuario = (string)($_SESSION['rol'] ?? 'Ejecutivo'); // ← usado para comision_ejecutivo=0 si es Gerente
 $nombreUser = trim($_SESSION['nombre'] ?? 'Usuario');
 $mensaje    = '';
 $selSimId   = isset($_GET['sel_sim']) ? (int)$_GET['sel_sim'] : 0; // para preseleccionar tras alta
@@ -30,42 +39,61 @@ $planesPospago = [
 ================================ */
 function tipos_mysqli(array $vals): string {
   $t = '';
-  foreach ($vals as $v) {
-    if (is_int($v))   { $t .= 'i'; continue; }
-    if (is_float($v)) { $t .= 'd'; continue; }
-    $t .= 's';
-  }
+  foreach ($vals as $v) { $t .= is_int($v) ? 'i' : (is_float($v) ? 'd' : 's'); }
   return $t;
-}
-function obtenerFilaPospagoVigente(mysqli $conn, float $planMonto): ?array {
-  $sql = "SELECT comision_con_equipo, comision_sin_equipo
-          FROM esquemas_comisiones_pospago
-          WHERE tipo='Ejecutivo' AND plan_monto=?
-          ORDER BY fecha_inicio DESC
-          LIMIT 1";
-  $stmt = $conn->prepare($sql);
-  $stmt->bind_param("d", $planMonto);
-  $stmt->execute();
-  $row = $stmt->get_result()->fetch_assoc();
-  $stmt->close();
-  return $row ?: null;
-}
-function calcularComisionPospago(mysqli $conn, float $planMonto, string $modalidad): float {
-  $fila = obtenerFilaPospagoVigente($conn, $planMonto);
-  if (!$fila) return 0.0;
-  $conEquipo = (stripos($modalidad, 'con') !== false);
-  return (float)($conEquipo ? $fila['comision_con_equipo'] : $fila['comision_sin_equipo']);
 }
 function redir(string $msg, array $extra = []) {
   $qs = array_merge(['msg'=>$msg], $extra);
   $url = basename($_SERVER['PHP_SELF']).'?'.http_build_query($qs);
-  header("Location: $url");
-  exit();
+  header("Location: $url"); exit();
+}
+/** Comisión EJECUTIVO pospago (0 si rol=Gerente) */
+function calcComisionEjecutivoPospago(string $rolUsuario, int $planMonto, string $modalidad): float {
+  if (strcasecmp($rolUsuario, 'Gerente') === 0) return 0.0; // gerente no cobra como ejecutivo
+  $mod = strtolower($modalidad);
+  $con = (strpos($mod,'con') !== false);
+
+  $tabla = [
+    339 => ['con'=>220.0, 'sin'=>200.0],
+    289 => ['con'=>180.0, 'sin'=>150.0],
+    249 => ['con'=>140.0, 'sin'=>120.0],
+    199 => ['con'=>120.0, 'sin'=>100.0],
+  ];
+  if (!isset($tabla[$planMonto])) return 0.0;
+  return $con ? $tabla[$planMonto]['con'] : $tabla[$planMonto]['sin'];
+}
+/** Comisión GERENTE pospago */
+function calcComisionGerentePospago(int $planMonto, string $modalidad): float {
+  $mod = strtolower($modalidad);
+  $con = (strpos($mod,'con') !== false);
+
+  $tabla = [
+    339 => ['con'=>80.0, 'sin'=>70.0],
+    289 => ['con'=>60.0, 'sin'=>50.0],
+    249 => ['con'=>40.0, 'sin'=>30.0],
+    199 => ['con'=>30.0, 'sin'=>20.0],
+  ];
+  if (!isset($tabla[$planMonto])) return 0.0;
+  return $con ? $tabla[$planMonto]['con'] : $tabla[$planMonto]['sin'];
+}
+/** Verifica columna (para detalle opcional) */
+function columnExists(mysqli $conn, string $table, string $column): bool {
+  $t = $conn->real_escape_string($table);
+  $c = $conn->real_escape_string($column);
+  $sql = "
+    SELECT 1
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME   = '$t'
+      AND COLUMN_NAME  = '$c'
+    LIMIT 1
+  ";
+  $res = $conn->query($sql);
+  return $res && $res->num_rows > 0;
 }
 
 /* ===============================
-   POST: Alta rápida de SIM (misma página)
-   NO usa candado_captura (no es venta)
+   POST: Alta rápida de SIM (no venta)
 ================================ */
 if (($_SERVER['REQUEST_METHOD'] === 'POST') && (($_POST['accion'] ?? '') === 'alta_sim')) {
   $iccid    = strtoupper(trim($_POST['iccid'] ?? ''));
@@ -80,12 +108,11 @@ if (($_SERVER['REQUEST_METHOD'] === 'POST') && (($_POST['accion'] ?? '') === 'al
   if (!in_array($operador, ['Bait','AT&T'], true)) {
     redir('sim_err', ['e'=>'Operador inválido. Elige Bait o AT&T.']);
   }
-  // DN OBLIGATORIO
   if ($dn === '' || !preg_match('/^\d{10}$/', $dn)) {
     redir('sim_err', ['e'=>'El DN es obligatorio y debe tener 10 dígitos.']);
   }
 
-  // Duplicado global (con nombre de sucursal)
+  // Duplicado global con nombre de sucursal
   $stmt = $conn->prepare("
     SELECT i.id, i.id_sucursal, i.estatus, s.nombre AS sucursal_nombre
     FROM inventario_sims i
@@ -98,16 +125,14 @@ if (($_SERVER['REQUEST_METHOD'] === 'POST') && (($_POST['accion'] ?? '') === 'al
   $stmt->close();
 
   if ($dup) {
-    // Si ya existe y está disponible en ESTA sucursal, lo “seleccionamos”
     if ((int)$dup['id_sucursal'] === $idSucursal && $dup['estatus'] === 'Disponible') {
       redir('sim_dup', ['sel_sim'=>(int)$dup['id']]);
     }
-    // Existe en otra sucursal o con otro estatus
     $msg = "El ICCID ya existe (ID {$dup['id']}) en la sucursal {$dup['sucursal_nombre']} con estatus {$dup['estatus']}.";
     redir('sim_err', ['e'=>$msg]);
   }
 
-  // Insert en inventario_sims (Disponible en la sucursal del usuario)
+  // Insert en inventario pospago
   $sql = "INSERT INTO inventario_sims (iccid, dn, operador, caja_id, tipo_plan, estatus, id_sucursal)
           VALUES (?,?,?,?, 'Pospago', 'Disponible', ?)";
   $stmt = $conn->prepare($sql);
@@ -126,19 +151,26 @@ if (($_SERVER['REQUEST_METHOD'] === 'POST') && (($_POST['accion'] ?? '') === 'al
 /* ===============================
    POST: Procesar Venta (usa candado)
 ================================ */
-require_once __DIR__ . '/candado_captura.php'; // ya existe en tu proyecto
+require_once __DIR__ . '/candado_captura.php';
 if (($_SERVER['REQUEST_METHOD'] === 'POST') && (($_POST['accion'] ?? '') === 'venta')) {
-  abortar_si_captura_bloqueada(); // aplica SOLO a la venta
+  abortar_si_captura_bloqueada();
 
   $esEsim         = isset($_POST['es_esim']) ? 1 : 0;
   $idSim          = isset($_POST['id_sim']) && $_POST['id_sim'] !== '' ? (int)$_POST['id_sim'] : 0;
   $plan           = $_POST['plan'] ?? '';
-  $precioPlan     = $planesPospago[$plan] ?? 0;
   $modalidad      = $_POST['modalidad'] ?? 'Sin equipo';
   $idVentaEquipo  = ($_POST['id_venta_equipo'] ?? '') !== '' ? (int)$_POST['id_venta_equipo'] : null;
   $nombreCliente  = trim($_POST['nombre_cliente'] ?? '');
   $numeroCliente  = trim($_POST['numero_cliente'] ?? '');
   $comentarios    = trim($_POST['comentarios'] ?? '');
+
+  $planesPospago = [
+    "Plan Bait 199" => 199,
+    "Plan Bait 249" => 249,
+    "Plan Bait 289" => 289,
+    "Plan Bait 339" => 339,
+  ];
+  $precioPlan = $planesPospago[$plan] ?? 0;
 
   if (!$plan || $precioPlan <= 0) {
     $mensaje = '<div class="alert alert-danger">Selecciona un plan válido.</div>';
@@ -149,13 +181,9 @@ if (($_SERVER['REQUEST_METHOD'] === 'POST') && (($_POST['accion'] ?? '') === 've
   if ($mensaje === '' && !preg_match('/^\d{10}$/', $numeroCliente)) {
     $mensaje = '<div class="alert alert-danger">El número del cliente debe tener exactamente 10 dígitos.</div>';
   }
-
-  // ⛔ Requisito: si NO es eSIM, id_sim es obligatorio
   if ($mensaje === '' && !$esEsim && $idSim <= 0) {
     $mensaje = '<div class="alert alert-danger">Debes seleccionar una SIM física si no es eSIM.</div>';
   }
-
-  // Si no es eSIM, validar que la SIM exista y esté disponible en la sucursal
   if ($mensaje === '' && !$esEsim && $idSim > 0) {
     $sql = "SELECT id FROM inventario_sims
             WHERE id=? AND estatus='Disponible' AND id_sucursal=?";
@@ -170,20 +198,26 @@ if (($_SERVER['REQUEST_METHOD'] === 'POST') && (($_POST['accion'] ?? '') === 've
   }
 
   if ($mensaje === '') {
-    $comisionEjecutivo = calcularComisionPospago($conn, (float)$precioPlan, $modalidad);
-    $comisionGerente   = 0.0;
+    // 💰 Comisiones fijas
+    $comisionEjecutivo = calcComisionEjecutivoPospago($rolUsuario, (int)$precioPlan, $modalidad);
+    $comisionGerente   = calcComisionGerentePospago((int)$precioPlan, $modalidad);
 
-    // Venta
+    // Insert venta
     $sqlVenta = "INSERT INTO ventas_sims
-      (tipo_venta, comentarios, precio_total, comision_ejecutivo, comision_gerente,
-       id_usuario, id_sucursal, fecha_venta, es_esim, modalidad, id_venta_equipo, numero_cliente, nombre_cliente)
-      VALUES ('Pospago', ?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?)";
-    $stmt = $conn->prepare($sqlVenta);
+      (tipo_venta, tipo_sim, comentarios, precio_total,
+       comision_ejecutivo, comision_gerente,
+       id_usuario, id_sucursal, fecha_venta,
+       es_esim, modalidad, id_venta_equipo, numero_cliente, nombre_cliente)
+      VALUES ('Pospago', 'Bait', ?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?)";
+    // tipo_sim = 'Bait' porque todos los planes especificados son BAIT
     $vals = [
-      $comentarios, $precioPlan, $comisionEjecutivo, $comisionGerente,
-      $idUsuario, $idSucursal, $esEsim, $modalidad, $idVentaEquipo, $numeroCliente, $nombreCliente
+      $comentarios, $precioPlan,
+      $comisionEjecutivo, $comisionGerente,
+      $idUsuario, $idSucursal,
+      $esEsim, $modalidad, $idVentaEquipo, $numeroCliente, $nombreCliente
     ];
     $types = tipos_mysqli($vals);
+    $stmt  = $conn->prepare($sqlVenta);
     $stmt->bind_param($types, ...$vals);
     $stmt->execute();
     $idVenta = (int)$stmt->insert_id;
@@ -191,12 +225,13 @@ if (($_SERVER['REQUEST_METHOD'] === 'POST') && (($_POST['accion'] ?? '') === 've
 
     // Detalle + mover inventario si SIM física
     if (!$esEsim && $idSim > 0) {
-      $sqlDetalle = "INSERT INTO detalle_venta_sims (id_venta, id_sim, precio_unitario) VALUES (?,?,?)";
-      $stmt = $conn->prepare($sqlDetalle);
-      $stmt->bind_param("iid", $idVenta, $idSim, $precioPlan);
-      $stmt->execute();
-      $stmt->close();
-
+      if (columnExists($conn, 'detalle_venta_sims', 'id_venta')) {
+        $sqlDetalle = "INSERT INTO detalle_venta_sims (id_venta, id_sim, precio_unitario) VALUES (?,?,?)";
+        $stmt = $conn->prepare($sqlDetalle);
+        $stmt->bind_param("iid", $idVenta, $idSim, $precioPlan);
+        $stmt->execute();
+        $stmt->close();
+      }
       $sqlUpdate = "UPDATE inventario_sims
                     SET estatus='Vendida', id_usuario_venta=?, fecha_venta=NOW()
                     WHERE id=?";
@@ -206,7 +241,9 @@ if (($_SERVER['REQUEST_METHOD'] === 'POST') && (($_POST['accion'] ?? '') === 've
       $stmt->close();
     }
 
-    $mensaje = '<div class="alert alert-success">✅ Venta pospago registrada correctamente. Comisión: $'.number_format($comisionEjecutivo,2).'</div>';
+    $mensaje = '<div class="alert alert-success">✅ Venta pospago registrada. Comisiones — Ejecutivo: $'
+      . number_format($comisionEjecutivo,2)
+      . ' | Gerente: $' . number_format($comisionGerente,2) . '</div>';
   }
 }
 
@@ -222,7 +259,7 @@ if ($rowNS) { $nomSucursal = $rowNS['nombre']; }
 $stmtNS->close();
 
 /* ===============================
-   LISTAR SIMs DISPONIBLES (Select2)
+   LISTAR SIMs DISPONIBLES
 ================================ */
 $sql = "SELECT id, iccid, caja_id, fecha_ingreso
         FROM inventario_sims
@@ -236,7 +273,7 @@ $disponibles = $disponiblesRes->fetch_all(MYSQLI_ASSOC);
 $stmt->close();
 
 /* ===============================
-   LISTAR VENTAS DE EQUIPO (MISMO DÍA)
+   LISTAR VENTAS DE EQUIPO (HOY)
 ================================ */
 $sqlEquipos = "
   SELECT v.id, v.fecha_venta, v.nombre_cliente,
@@ -349,7 +386,6 @@ $stmt->close();
             <?php endforeach; ?>
           </select>
           <div class="form-text">Escribe ICCID, caja o fecha para filtrar.</div>
-          <!-- <div class="req-hint" id="sim_req_hint">* Obligatorio si NO es eSIM</div> -->
           <div class="d-flex gap-2 mt-2">
             <button type="button" class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#modalAltaSim">
               <i class="bi bi-plus-circle me-1"></i> Agregar SIM (no está en inventario)
@@ -429,7 +465,7 @@ $stmt->close();
   </form>
 </div>
 
-<!-- Modal: Alta rápida de SIM (mismo archivo, POST accion=alta_sim) -->
+<!-- Modal: Alta rápida de SIM -->
 <div class="modal fade" id="modalAltaSim" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-md modal-dialog-centered">
     <div class="modal-content">
@@ -542,7 +578,6 @@ $stmt->close();
 </div>
 
 <!-- JS -->
-<!-- Si Bootstrap JS ya va en navbar.php, no lo dupliques. Si no, descomenta: -->
 <!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
 <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
@@ -552,19 +587,13 @@ function toggleSimSelect() {
   const isEsim = document.getElementById('es_esim').checked;
   const simWrap = document.getElementById('sim_fisica');
   const simSel  = document.getElementById('id_sim');
-  const hint    = document.getElementById('sim_req_hint');
-
   if (isEsim) {
     simWrap.style.display = 'none';
-    // quitar requerido y limpiar selección si era física
     simSel.removeAttribute('required');
     $('#id_sim').val('').trigger('change');
-    hint.style.display = 'none';
   } else {
     simWrap.style.display = 'block';
-    // marcar requerido cuando no es eSIM
-    simSel.setAttribute('required', 'required');
-    hint.style.display = 'block';
+    simSel.setAttribute('required','required');
   }
 }
 function toggleEquipo() {
@@ -594,7 +623,6 @@ $(function(){
   $('.select2-sims').select2({ placeholder:'-- Selecciona SIM --', width:'100%', language:{ noResults:()=> 'Sin resultados', searching:()=> 'Buscando…' }});
   $('.select2-ventas').select2({ placeholder:'-- Selecciona venta --', width:'100%', language:{ noResults:()=> 'Sin resultados', searching:()=> 'Buscando…' }});
 
-  // Si venimos de alta (sel_sim en URL), Select2 respeta option[selected]; refrescamos UI:
   <?php if ($selSimId): ?> $('#id_sim').trigger('change'); <?php endif; ?>
 
   toggleSimSelect(); toggleEquipo(); setPrecio();
@@ -613,7 +641,6 @@ $(function(){
     if (!num) { errs.push('El número del cliente es obligatorio.'); }
     else if (!/^\d{10}$/.test(num)) { errs.push('El número del cliente debe tener 10 dígitos.'); }
 
-    // 💡 Validación clave: si NO es eSIM, exigir SIM
     const isEsim = $esim.is(':checked');
     if (!isEsim) {
       const simVal = ($simSel.val() || '').toString().trim();

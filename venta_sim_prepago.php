@@ -1,16 +1,25 @@
 <?php
 /* venta_sim_prepago.php — Alta express de SIM (misma página) + venta normal
-   - DN obligatorio en alta
-   - Mensaje de duplicado muestra nombre de sucursal
-   - Si ICCID ya existe Disponible en tu sucursal, lo preselecciona
+   Reglas de comisiones SIMs (fijas):
+   - comision_ejecutivo:
+       * Si rol = Gerente → 0
+       * Nueva + Bait = 10, Nueva + ATT = 5
+       * Portabilidad + Bait = 50, Portabilidad + ATT = 10
+       * Otros (Regalo, etc.) = 0
+   - comision_gerente:
+       * Nueva + Bait = 5, Nueva + ATT = 5
+       * Portabilidad + Bait = 10, Portabilidad + ATT = 5
+       * Otros = 0
+   - tipo_sim se toma del inventario y se normaliza a {Bait, ATT}.
 */
 session_start();
 if (!isset($_SESSION['id_usuario'])) { header("Location: index.php"); exit(); }
 
-include 'db.php';
+require_once __DIR__ . '/db.php';
 
 $idUsuario   = (int)($_SESSION['id_usuario'] ?? 0);
 $idSucursal  = (int)($_SESSION['id_sucursal'] ?? 0);
+$rolUsuario  = (string)($_SESSION['rol'] ?? 'Ejecutivo'); // ← usamos esto para comision_ejecutivo
 $nombreUser  = trim($_SESSION['nombre'] ?? 'Usuario');
 $mensaje     = '';
 
@@ -21,71 +30,49 @@ $flash    = $_GET['msg'] ?? ''; // sim_ok, sim_dup, sim_err
 /* =========================
    FUNCIONES AUXILIARES
 ========================= */
-function obtenerEsquemaVigente($conn, $fechaVenta) {
-    $sql = "SELECT * FROM esquemas_comisiones
-            WHERE fecha_inicio <= ?
-              AND (fecha_fin IS NULL OR fecha_fin >= ?)
-              AND activo = 1
-            ORDER BY fecha_inicio DESC
-            LIMIT 1";
-    $stmt = $conn->prepare($sql);
-    $stmt->bind_param("ss", $fechaVenta, $fechaVenta);
-    $stmt->execute();
-    return $stmt->get_result()->fetch_assoc();
-}
-function cumpleCuotaSucursal($conn, $idSucursal, $fechaVenta) {
-    $sql = "SELECT cuota_monto
-            FROM cuotas_sucursales
-            WHERE id_sucursal=? AND fecha_inicio <= ?
-            ORDER BY fecha_inicio DESC LIMIT 1";
-    $stmt = $conn->prepare($sql);
-    $stmt->bind_param("is", $idSucursal, $fechaVenta);
-    $stmt->execute();
-    $row = $stmt->get_result()->fetch_assoc();
-    $cuota = $row['cuota_monto'] ?? 0;
-
-    // Semana martes-lunes
-    $ini = new DateTime($fechaVenta);
-    $dif = $ini->format('N') - 2;
-    if ($dif < 0) $dif += 7;
-    $ini->modify("-$dif days")->setTime(0,0,0);
-    $fin = clone $ini;
-    $fin->modify("+6 days")->setTime(23,59,59);
-
-    $q = "SELECT SUM(precio_total) AS monto
-          FROM ventas_sims
-          WHERE id_sucursal=? AND fecha_venta BETWEEN ? AND ?";
-    $stmt2 = $conn->prepare($q);
-    $inicio = $ini->format('Y-m-d H:i:s');
-    $final  = $fin->format('Y-m-d H:i:s');
-    $stmt2->bind_param("iss", $idSucursal, $inicio, $final);
-    $stmt2->execute();
-    $row2 = $stmt2->get_result()->fetch_assoc();
-    $monto = $row2['monto'] ?? 0;
-
-    return $monto >= $cuota;
-}
-function calcularComisionesSIM($esquema, $tipoSim, $tipoVenta, $cumpleCuota) {
-    $tipoSim   = strtolower($tipoSim);
-    $tipoVenta = strtolower($tipoVenta);
-    $col = null;
-
-    if ($tipoSim == 'bait') {
-        $col = ($tipoVenta == 'portabilidad')
-            ? ($cumpleCuota ? 'comision_sim_bait_port_con' : 'comision_sim_bait_port_sin')
-            : ($cumpleCuota ? 'comision_sim_bait_nueva_con' : 'comision_sim_bait_nueva_sin');
-    } elseif ($tipoSim == 'att') {
-        $col = ($tipoVenta == 'portabilidad')
-            ? ($cumpleCuota ? 'comision_sim_att_port_con' : 'comision_sim_att_port_sin')
-            : ($cumpleCuota ? 'comision_sim_att_nueva_con' : 'comision_sim_att_nueva_sin');
-    }
-
-    return (float)($esquema[$col] ?? 0);
-}
 function redir($msg, $extra = []) {
     $qs = array_merge(['msg'=>$msg], $extra);
     $url = basename($_SERVER['PHP_SELF']).'?'.http_build_query($qs);
     header("Location: $url"); exit();
+}
+
+/** Normaliza a 'Bait' o 'ATT' */
+function normalizarOperadorSIM(string $op): string {
+    $op = strtoupper(trim($op));
+    if ($op === 'AT&T' || $op === 'ATT') return 'ATT';
+    return 'Bait';
+}
+
+/** Calcula comisión del ejecutivo según reglas fijas */
+function calcComisionEjecutivoSIM(string $rolUsuario, string $tipoVenta, string $tipoSim): float {
+    $tipoVenta = strtolower($tipoVenta);
+    $tipoSim   = strtoupper($tipoSim); // 'BAIT' | 'ATT'
+
+    // Si el vendedor es Gerente → 0
+    if (strcasecmp($rolUsuario, 'Gerente') === 0) return 0.0;
+
+    if ($tipoVenta === 'nueva') {
+        if ($tipoSim === 'BAIT') return 10.0;
+        if ($tipoSim === 'ATT')  return 5.0;
+    } elseif ($tipoVenta === 'portabilidad') {
+        if ($tipoSim === 'BAIT') return 50.0;
+        if ($tipoSim === 'ATT')  return 10.0;
+    }
+    return 0.0; // Regalo u otros
+}
+
+/** Calcula comisión del gerente según reglas fijas */
+function calcComisionGerenteSIM(string $tipoVenta, string $tipoSim): float {
+    $tipoVenta = strtolower($tipoVenta);
+    $tipoSim   = strtoupper($tipoSim);
+
+    if ($tipoVenta === 'nueva') {
+        return 5.0; // Bait o ATT
+    } elseif ($tipoVenta === 'portabilidad') {
+        if ($tipoSim === 'BAIT') return 10.0;
+        if ($tipoSim === 'ATT')  return 5.0;
+    }
+    return 0.0;
 }
 
 /* =========================
@@ -147,17 +134,16 @@ if (($_SERVER['REQUEST_METHOD'] === 'POST') && (($_POST['accion'] ?? '') === 'al
 }
 
 /* =========================
-   PROCESAR VENTA SIM (tu lógica intacta)
+   PROCESAR VENTA SIM (reglas fijas)
 ========================= */
 require_once __DIR__ . '/candado_captura.php';
 abortar_si_captura_bloqueada(); // por defecto bloquea POST
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && (($_POST['accion'] ?? '') !== 'alta_sim')) {
-    $idSim       = (int)$_POST['id_sim'];
-    $tipoVenta   = $_POST['tipo_venta'];
-    $precio      = (float)$_POST['precio'];
-    $comentarios = trim($_POST['comentarios']);
-    $fechaVenta  = date('Y-m-d');
+    $idSim       = (int)($_POST['id_sim'] ?? 0);
+    $tipoVenta   = trim($_POST['tipo_venta'] ?? '');
+    $precio      = (float)($_POST['precio'] ?? 0);
+    $comentarios = trim($_POST['comentarios'] ?? '');
 
     // 1) Verificar SIM y OBTENER operador DESDE INVENTARIO (ignorar POST)
     $sql = "SELECT id, iccid, operador
@@ -172,46 +158,81 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (($_POST['accion'] ?? '') !== 'alta
     if (!$sim) {
         $mensaje = '<div class="alert alert-danger">La SIM seleccionada no está disponible.</div>';
     } else {
-        // Normalizar operador -> tipoSim que usa el esquema
-        $tipoSim = (strtoupper($sim['operador']) === 'ATT') ? 'ATT' : 'Bait';
+        // Normalizar operador -> tipoSim válido en la tabla ventas_sims (enum 'Bait','ATT')
+        $tipoSim = normalizarOperadorSIM($sim['operador']); // 'Bait' | 'ATT'
 
-        // 2) Comisiones
-        $esquema     = obtenerEsquemaVigente($conn, $fechaVenta);
-        $cumpleCuota = cumpleCuotaSucursal($conn, $idSucursal, $fechaVenta);
+        // Reglas de precio
+        if ($tipoVenta === 'Regalo') {
+            if (round($precio, 2) != 0.00) {
+                $mensaje = '<div class="alert alert-danger">Para "Regalo" el precio debe ser 0.</div>';
+        }   } else {
+            if ($precio <= 0) {
+                $mensaje = '<div class="alert alert-danger">El precio debe ser mayor a 0 para Nueva/Portabilidad.</div>';
+            }
+        }
 
-        $comisionEjecutivo = calcularComisionesSIM($esquema, $tipoSim, $tipoVenta, $cumpleCuota);
-        $comisionGerente   = $comisionEjecutivo > 0
-            ? ($cumpleCuota ? $esquema['comision_gerente_sim_con'] : $esquema['comision_gerente_sim_sin'])
-            : 0;
+        if ($mensaje === '') {
+            // 2) Comisiones fijas
+            $comisionEjecutivo = calcComisionEjecutivoSIM($rolUsuario, $tipoVenta, $tipoSim);
+            $comisionGerente   = calcComisionGerenteSIM($tipoVenta, $tipoSim);
 
-        // 3) Insertar venta
-        $sqlVenta = "INSERT INTO ventas_sims
-            (tipo_venta, tipo_sim, comentarios, precio_total, comision_ejecutivo, comision_gerente, id_usuario, id_sucursal, fecha_venta)
-            VALUES (?,?,?,?,?,?,?,?,NOW())";
-        $stmt = $conn->prepare($sqlVenta);
-        $stmt->bind_param("sssddiii", $tipoVenta, $tipoSim, $comentarios, $precio, $comisionEjecutivo, $comisionGerente, $idUsuario, $idSucursal);
-        $stmt->execute();
-        $idVenta = $stmt->insert_id;
-        $stmt->close();
+            // 3) Insertar venta (campos que existen según tu captura de pantalla)
+            $sqlVenta = "INSERT INTO ventas_sims
+                (tipo_venta, tipo_sim, comentarios, precio_total,
+                 comision_ejecutivo, comision_gerente, id_usuario, id_sucursal, fecha_venta)
+                VALUES (?,?,?,?,?,?,?,?, NOW())";
+            $stmt = $conn->prepare($sqlVenta);
+            $stmt->bind_param("sssddiii",
+                $tipoVenta,              // enum('Nueva','Portabilidad','Regalo','Pospago')
+                $tipoSim,                // enum('Bait','ATT')
+                $comentarios,
+                $precio,
+                $comisionEjecutivo,
+                $comisionGerente,
+                $idUsuario,
+                $idSucursal
+            );
+            $stmt->execute();
+            $idVenta = (int)$stmt->insert_id;
+            $stmt->close();
 
-        // 4) Detalle
-        $sqlDetalle = "INSERT INTO detalle_venta_sims (id_venta, id_sim, precio_unitario) VALUES (?,?,?)";
-        $stmt = $conn->prepare($sqlDetalle);
-        $stmt->bind_param("iid", $idVenta, $idSim, $precio);
-        $stmt->execute();
-        $stmt->close();
+            // 4) Detalle (si manejas tabla detalle_venta_sims)
+            if (columnExists($conn, 'detalle_venta_sims', 'id_venta')) {
+                $sqlDetalle = "INSERT INTO detalle_venta_sims (id_venta, id_sim, precio_unitario) VALUES (?,?,?)";
+                $stmt = $conn->prepare($sqlDetalle);
+                $stmt->bind_param("iid", $idVenta, $idSim, $precio);
+                $stmt->execute();
+                $stmt->close();
+            }
 
-        // 5) Actualizar inventario
-        $sqlUpdate = "UPDATE inventario_sims
-                      SET estatus='Vendida', id_usuario_venta=?, fecha_venta=NOW()
-                      WHERE id=?";
-        $stmt = $conn->prepare($sqlUpdate);
-        $stmt->bind_param("ii", $idUsuario, $idSim);
-        $stmt->execute();
-        $stmt->close();
+            // 5) Actualizar inventario
+            $sqlUpdate = "UPDATE inventario_sims
+                          SET estatus='Vendida', id_usuario_venta=?, fecha_venta=NOW()
+                          WHERE id=?";
+            $stmt = $conn->prepare($sqlUpdate);
+            $stmt->bind_param("ii", $idUsuario, $idSim);
+            $stmt->execute();
+            $stmt->close();
 
-        $mensaje = '<div class="alert alert-success">✅ Venta de SIM registrada correctamente.</div>';
+            $mensaje = '<div class="alert alert-success">✅ Venta de SIM registrada correctamente.</div>';
+        }
     }
+}
+
+/* ===== Util: verifica columna (para detalle opcional) ===== */
+function columnExists(mysqli $conn, string $table, string $column): bool {
+  $t = $conn->real_escape_string($table);
+  $c = $conn->real_escape_string($column);
+  $sql = "
+    SELECT 1
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME   = '$t'
+      AND COLUMN_NAME  = '$c'
+    LIMIT 1
+  ";
+  $res = $conn->query($sql);
+  return $res && $res->num_rows > 0;
 }
 
 /* ===== Nombre de sucursal del usuario ===== */
@@ -487,7 +508,7 @@ $stmt->close();
 </div>
 
 <!-- JS -->
-<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
 
@@ -507,9 +528,6 @@ $(function(){
     width: '100%',
     language: { noResults: () => 'Sin resultados', searching: () => 'Buscando…' }
   });
-
-  // Preselección si venimos de alta
-  <?php if ($selSimId): ?> $('#selectSim').trigger('change'); <?php endif; ?>
 
   function actualizarTipo() {
     const $opt = $simSel.find(':selected');
