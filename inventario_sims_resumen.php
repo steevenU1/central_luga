@@ -1,11 +1,10 @@
 <?php
-// inventario_sims_resumen.php — Central 2.0 (FINAL corregido)
-// - Filtro por caja robusto: detecta columna (caja_id | id_caja | caja), usa TRIM, soporta VARCHAR/INT.
-// - Export CSV toma los valores actuales del formulario (no exige "Aplicar") y respeta caja/sucursal/rol.
-// - Si el select de sucursal está disabled (vista "Por sucursal"), se envía por <input hidden> para no vaciar el export.
-// - Admin: Global o por sucursal; otros roles: solo su sucursal.
-// - Filtros: operador, tipo_plan, q (ICCID/DN), caja.
-// - UI: KPIs + cards por sucursal + tabla detalle por sucursal.
+// inventario_sims_resumen.php — Central 2.0 (UI buscador PRO + Búsqueda global por caja + Localizador)
+// - Caja (select) = coincidencia exacta (requiere sucursal concreta).
+// - Caja (texto, caja_q) = coincidencia parcial por LIKE y funciona también en Global sin elegir sucursal.
+// - Si caja_q tiene valor, ignora el select "caja".
+// - KPIs, Cards, Localizador y Export CSV respetan caja_q en Global y Sucursal.
+// - Admin: Global o Por sucursal; otros roles: solo su sucursal.
 
 session_start();
 if (!isset($_SESSION['id_usuario'])) { header("Location: index.php"); exit(); }
@@ -25,7 +24,7 @@ function selectOptions(array $opts, $sel){
     $html.='<option value="'.h($val).'"'.$selAttr.'>'.h($txt).'</option>';
   } return $html;
 }
-function isAdmin($rol){ return in_array($rol, ['Admin'], true); }
+function isAdmin($rol){ return $rol === 'Admin'; }
 
 /** Detecta la columna real usada para “caja” en inventario_sims. */
 function detectarColCaja(mysqli $conn): string {
@@ -44,10 +43,6 @@ function detectarColCaja(mysqli $conn): string {
 function condCajaNoVacia(string $expr): string {
   return "NULLIF(TRIM($expr),'') IS NOT NULL AND TRIM($expr) <> '0'";
 }
-/** Orden sugerida (queda para otros usos) */
-function orderCaja(string $expr): string {
-  return "CAST(TRIM($expr) AS UNSIGNED), TRIM($expr)";
-}
 
 /* ===== Parámetros / filtros ===== */
 $scope        = isAdmin($ROL) ? ($_GET['scope'] ?? 'global') : 'sucursal';
@@ -56,10 +51,14 @@ $operador     = $_GET['operador']  ?? 'ALL';
 $tipoPlan     = $_GET['tipo_plan'] ?? 'ALL';
 $q            = trim((string)($_GET['q'] ?? ''));
 
-// caja como string TRIMEADO (soporta VARCHAR o INT con espacios)
+// Select de caja (exacto; útil con sucursal concreta)
 $cajaRaw = $_GET['caja'] ?? '0';
 $caja    = (string)(is_array($cajaRaw) ? '0' : trim((string)$cajaRaw));
 if ($caja === '') $caja = '0';
+
+// Búsqueda por texto de caja (global o sucursal)
+$caja_q = trim((string)($_GET['caja_q'] ?? ''));
+$useCajaLike = ($caja_q !== '');
 
 if (!isAdmin($ROL)) { $scope='sucursal'; $selSucursal=$ID_SUCURSAL; }
 if ($scope!=='global') { $scope='sucursal'; }
@@ -68,7 +67,7 @@ $CAJA_COL = detectarColCaja($conn);
 $CAJA_TR  = "TRIM(i.$CAJA_COL)";
 $haySucursalConcreta = ($scope==='sucursal') || ($scope==='global' && $selSucursal>0);
 
-/* ===== WHERE base (solo disponibles) ===== */
+/* ===== WHERE base ===== */
 $where = ["i.estatus='Disponible'"];
 $params=[]; $types='';
 
@@ -87,13 +86,12 @@ if (isAdmin($ROL)) {
   $sucursales = $rs->fetch_all(MYSQLI_ASSOC);
 }
 
-/* ===== Cajas (si hay sucursal concreta) — FIX DISTINCT+ORDER BY ===== */
+/* ===== Cajas del select (solo cuando hay sucursal concreta) ===== */
 $cajas = [];
 if ($haySucursalConcreta) {
   $sqlCajas = "
-    SELECT DISTINCT
-      TRIM(i.$CAJA_COL)                   AS caja_val,
-      CAST(TRIM(i.$CAJA_COL) AS UNSIGNED) AS caja_num
+    SELECT DISTINCT TRIM(i.$CAJA_COL) AS caja_val,
+           CAST(TRIM(i.$CAJA_COL) AS UNSIGNED) AS caja_num
     FROM inventario_sims i
     WHERE i.estatus='Disponible'
       AND i.id_sucursal = ?
@@ -106,44 +104,81 @@ if ($haySucursalConcreta) {
   $res = $st->get_result();
   while($r = $res->fetch_assoc()){
     $val = (string)$r['caja_val'];
-    $cajas[$val] = $val; // puede ser "1", "01", "A-01", etc.
+    $cajas[$val] = $val;
   }
   $st->close();
 }
 
 /* ===== KPIs ===== */
-function kpisGlobal(mysqli $conn, $whereSql, $params, $types, $selSucursal, $scope, $caja, $haySucursalConcreta, $CAJA_TR){
+function kpis(mysqli $conn, $whereSql, $params, $types, $scope, $selSucursal, $useCajaLike, $caja_q, $caja, $CAJA_TR){
   $extra=''; $p=$params; $t=$types;
-  if ($scope==='sucursal' || ($scope==='global' && $selSucursal>0)) {
+
+  if ($scope==='sucursal') {
     $extra .= ($whereSql ? " AND " : "WHERE ")."i.id_sucursal=?";
     $p[]=$selSucursal; $t.='i';
-    if ($haySucursalConcreta && $caja !== '0') {
+    if ($useCajaLike) {
+      $extra .= " AND $CAJA_TR LIKE ?";
+      $p[]="%$caja_q%"; $t.='s';
+    } elseif ($caja !== '0') {
       $extra .= " AND $CAJA_TR=?";
       $p[]=$caja; $t.='s';
     }
+  } else { // GLOBAL
+    if ($selSucursal>0) {
+      $extra .= ($whereSql ? " AND " : "WHERE ")."i.id_sucursal=?";
+      $p[]=$selSucursal; $t.='i';
+      if ($useCajaLike) {
+        $extra .= " AND $CAJA_TR LIKE ?";
+        $p[]="%$caja_q%"; $t.='s';
+      } elseif ($caja !== '0') {
+        $extra .= " AND $CAJA_TR=?";
+        $p[]=$caja; $t.='s';
+      }
+    } else {
+      // Global sin sucursal: si hay caja_q, filtra en TODAS
+      if ($useCajaLike) {
+        $extra .= ($whereSql ? " AND " : "WHERE ")."$CAJA_TR LIKE ?";
+        $p[]="%$caja_q%"; $t.='s';
+      }
+      // Nota: el select "caja" no aplica globalmente sin sucursal.
+    }
   }
+
   $sql="SELECT COUNT(*) total,
                SUM(i.operador='Bait') bait,
                SUM(i.operador='AT&T') att
         FROM inventario_sims i $whereSql $extra";
-  $st=$conn->prepare($sql); if ($p){ $st->bind_param($t, ...$p); } $st->execute();
+  $st=$conn->prepare($sql);
+  if ($p){ $st->bind_param($t, ...$p); }
+  $st->execute();
   $row=$st->get_result()->fetch_assoc() ?: [];
   return ['total'=>(int)($row['total']??0), 'bait'=>(int)($row['bait']??0), 'att'=>(int)($row['att']??0)];
 }
-$kpis = kpisGlobal($conn,$whereSql,$params,$types,$selSucursal,$scope,$caja,$haySucursalConcreta,$CAJA_TR);
+$kpis = kpis($conn,$whereSql,$params,$types,$scope,$selSucursal,$useCajaLike,$caja_q,$caja,$CAJA_TR);
 
-/* ===== Cards por sucursal (solo global) ===== */
+/* ===== Cards por sucursal (GLOBAL) ===== */
 $cards=[];
 if ($scope==='global'){
   $extra=''; $p=$params; $t=$types;
+
   if ($selSucursal>0){
     $extra .= ($whereSql ? " AND " : "WHERE ")."i.id_sucursal=?";
     $p[]=$selSucursal; $t.='i';
-    if ($haySucursalConcreta && $caja !== '0'){
+    if ($useCajaLike){
+      $extra .= " AND $CAJA_TR LIKE ?";
+      $p[]="%$caja_q%"; $t.='s';
+    } elseif ($caja !== '0') {
       $extra .= " AND $CAJA_TR=?";
       $p[]=$caja; $t.='s';
     }
+  } else {
+    // GLOBAL sin sucursal seleccionada: permitir filtrar por caja_q en todas
+    if ($useCajaLike){
+      $extra .= ($whereSql ? " AND " : "WHERE ")."$CAJA_TR LIKE ?";
+      $p[]="%$caja_q%"; $t.='s';
+    }
   }
+
   $sql="SELECT s.id id_suc, s.nombre,
                COUNT(i.id) disponibles,
                SUM(i.operador='Bait') bait,
@@ -154,11 +189,13 @@ if ($scope==='global'){
         GROUP BY s.id
         HAVING disponibles > 0
         ORDER BY s.nombre";
-  $st=$conn->prepare($sql); if ($p){ $st->bind_param($t, ...$p); } $st->execute();
+  $st=$conn->prepare($sql);
+  if ($p){ $st->bind_param($t, ...$p); }
+  $st->execute();
   $res=$st->get_result(); while($row=$res->fetch_assoc()){ $cards[]=$row; }
 }
 
-/* ===== Detalle de una sucursal ===== */
+/* ===== Detalle (SUCURSAL) ===== */
 $detalle=[]; $sucursalNombre='';
 if ($scope==='sucursal'){
   $st=$conn->prepare("SELECT nombre FROM sucursales WHERE id=? LIMIT 1");
@@ -167,7 +204,10 @@ if ($scope==='sucursal'){
 
   $extra = ($whereSql ? " AND " : "WHERE ")."i.id_sucursal=?";
   $p=array_merge($params,[$selSucursal]); $t=$types.'i';
-  if ($caja !== '0'){
+  if ($useCajaLike){
+    $extra .= " AND $CAJA_TR LIKE ?";
+    $p[]="%{$caja_q}%"; $t.='s';
+  } elseif ($caja !== '0'){
     $extra .= " AND $CAJA_TR=?";
     $p[]=$caja; $t.='s';
   }
@@ -180,14 +220,20 @@ if ($scope==='sucursal'){
   $res=$st->get_result(); while($row=$res->fetch_assoc()){ $detalle[]=$row; }
 }
 
-/* ===== EXPORT CSV (antes de cualquier salida visible) ===== */
+/* ===== EXPORT CSV ===== */
 if (isset($_GET['export']) && $_GET['export']==='1') {
   $extraWhere=''; $p=$params; $t=$types;
 
   if ($scope==='sucursal') {
     $extraWhere .= ($whereSql ? " AND " : "WHERE ")."i.id_sucursal=?";
     $p[]=$selSucursal; $t.='i';
-    if ($caja !== '0'){ $extraWhere .= " AND $CAJA_TR=?"; $p[]=$caja; $t.='s'; }
+    if ($useCajaLike){
+      $extraWhere .= " AND $CAJA_TR LIKE ?";
+      $p[]="%$caja_q%"; $t.='s';
+    } elseif ($caja !== '0'){
+      $extraWhere .= " AND $CAJA_TR=?";
+      $p[]=$caja; $t.='s';
+    }
 
     $sql = "SELECT s.nombre AS sucursal, i.operador, i.tipo_plan, i.iccid, i.dn,
                    TRIM(i.$CAJA_COL) AS caja_val, i.fecha_ingreso
@@ -199,7 +245,19 @@ if (isset($_GET['export']) && $_GET['export']==='1') {
     if ($selSucursal>0){
       $extraWhere .= ($whereSql ? " AND " : "WHERE ")."i.id_sucursal=?";
       $p[]=$selSucursal; $t.='i';
-      if ($caja !== '0'){ $extraWhere .= " AND $CAJA_TR=?"; $p[]=$caja; $t.='s'; }
+      if ($useCajaLike){
+        $extraWhere .= " AND $CAJA_TR LIKE ?";
+        $p[]="%$caja_q%"; $t.='s';
+      } elseif ($caja !== '0'){
+        $extraWhere .= " AND $CAJA_TR=?";
+        $p[]=$caja; $t.='s';
+      }
+    } else {
+      // Export global por caja_q (todas las sucursales)
+      if ($useCajaLike){
+        $extraWhere .= ($whereSql ? " AND " : "WHERE ")."$CAJA_TR LIKE ?";
+        $p[]="%$caja_q%"; $t.='s';
+      }
     }
     $sql = "SELECT s.nombre AS sucursal, i.operador, i.tipo_plan, i.iccid, i.dn,
                    TRIM(i.$CAJA_COL) AS caja_val, i.fecha_ingreso
@@ -209,7 +267,6 @@ if (isset($_GET['export']) && $_GET['export']==='1') {
             ORDER BY s.nombre, i.operador, i.tipo_plan, i.iccid";
   }
 
-  // Limpia buffers y envía CSV
   if (ob_get_level()) { while (ob_get_level()) { ob_end_clean(); } }
   header('Content-Type: text/csv; charset=UTF-8');
   header('Content-Disposition: attachment; filename="inventario_sims_disponibles.csv"');
@@ -236,7 +293,7 @@ if (isset($_GET['export']) && $_GET['export']==='1') {
   exit;
 }
 
-/* ===== Vista (con navbar) ===== */
+/* ===== Vista ===== */
 require_once __DIR__ . '/navbar.php';
 ?>
 <!doctype html>
@@ -246,6 +303,7 @@ require_once __DIR__ . '/navbar.php';
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Inventario SIMs — Central 2.0</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
   <style>
     .kpi-card{ border:0; border-radius:1rem; box-shadow:0 6px 20px rgba(0,0,0,.08); }
     .kpi-value{ font-size: clamp(1.8rem, 2.5vw, 2.4rem); font-weight:800; line-height:1; }
@@ -256,8 +314,43 @@ require_once __DIR__ . '/navbar.php';
     .grid{ display:grid; grid-template-columns: repeat(auto-fill, minmax(260px,1fr)); gap:1rem; }
     .sticky-top-lite{ position: sticky; top: .5rem; z-index: 100; }
     .table thead th{ position:sticky; top:0; background:var(--bs-body-bg); z-index:5; }
-    .searchbar{ max-width: 380px; }
+
+    /* ======= Buscador PRO ======= */
+    .filter-card{ border:0; border-radius:1rem; box-shadow:0 10px 28px rgba(2,8,20,.08); }
+    .filter-title{ font-weight:800; letter-spacing:.2px; }
+    .label-lite{ font-size:.75rem; text-transform:uppercase; letter-spacing:.06em; color:var(--bs-secondary-color); margin-bottom:.4rem; }
+    .input-pill .form-control, .input-pill .form-select{
+      border-radius: .8rem; padding-left: 2.25rem;
+    }
+    .input-icon{ position:relative; }
+    .input-icon > i{
+      position:absolute; left:.75rem; top:50%; transform:translateY(-50%); opacity:.65;
+    }
+    .filter-grid{
+      display:grid; gap: .85rem 1rem;
+      grid-template-columns: repeat(12, 1fr);
+      align-items:end;
+    }
+    /* Layout en desktop (≥992px) */
+    @media (min-width: 992px){
+      .g-ambito   { grid-column: span 2; }
+      .g-sucursal { grid-column: span 5; }
+      .g-caja-sel { grid-column: span 3; }
+      .g-caja-txt { grid-column: span 4; }
+      .g-operador { grid-column: span 2; }
+      .g-plan     { grid-column: span 2; }
+      .g-buscar   { grid-column: span 4; }
+      .g-actions  { grid-column: span 4; justify-self:end; }
+    }
+    /* Layout en móviles */
+    @media (max-width: 991.98px){
+      .g-ambito,.g-sucursal,.g-caja-sel,.g-caja-txt,.g-operador,.g-plan,.g-buscar,.g-actions{ grid-column: 1 / -1; }
+    }
     .hint{ font-size:.86rem; color: var(--bs-secondary-color); }
+    .btn-soft{
+      border-radius: .75rem;
+      box-shadow: 0 6px 16px rgba(2,8,20,.08);
+    }
   </style>
 </head>
 <body class="bg-body-tertiary">
@@ -265,88 +358,122 @@ require_once __DIR__ . '/navbar.php';
 
   <!-- Encabezado + Filtros -->
   <div class="sticky-top-lite mb-3">
-    <div class="card border-0 shadow-sm rounded-4">
+    <div class="card filter-card">
       <div class="card-body">
-        <div class="d-flex flex-column flex-lg-row gap-3 align-items-lg-end justify-content-between">
-          <div>
-            <h2 class="mb-1">Inventario de SIMs <span class="text-secondary">— Disponibles</span></h2>
-            <div class="text-secondary small">Central 2.0 · Vista <?= h($scope==='global'?'global':'por sucursal'); ?></div>
+        <div class="row g-4 align-items-center">
+          <div class="col-lg-3">
+            <h2 class="filter-title mb-1">Inventario de SIMs — <span class="text-secondary">Disponibles</span></h2>
+            <div class="text-secondary small">
+              Central 2.0 · Vista <?= h($scope==='global'?'global':'por sucursal'); ?>.
+              <?= ($scope==='global' && $selSucursal===0) ? 'Puedes buscar por caja en todas las sucursales.' : '' ?>
+            </div>
           </div>
 
-          <!-- Form principal: el Export usa estos valores actuales -->
-          <form id="filtros" class="row g-2 align-items-end" method="get">
-            <?php if (isAdmin($ROL)): ?>
-              <div class="col-auto">
-                <label class="form-label mb-1">Ámbito</label>
-                <select name="scope" class="form-select">
-                  <option value="global"   <?= $scope==='global'?'selected':''; ?>>Global</option>
-                  <option value="sucursal" <?= $scope==='sucursal'?'selected':''; ?>>Por sucursal</option>
-                </select>
-              </div>
-              <div class="col-auto">
-                <label class="form-label mb-1">Sucursal</label>
-                <select name="sucursal" class="form-select" <?= $scope==='global'?'':'disabled'; ?>>
-                  <option value="0">— Todas —</option>
-                  <?php foreach($sucursales as $s): ?>
-                    <option value="<?= (int)$s['id']; ?>" <?= (int)$s['id']===$selSucursal?'selected':''; ?>>
-                      <?= h($s['nombre']); ?>
-                    </option>
-                  <?php endforeach; ?>
-                </select>
-                <?php if ($scope!=='global'): ?>
-                  <!-- Clave: si el select está disabled, enviamos el valor por hidden -->
-                  <input type="hidden" name="sucursal" value="<?= (int)$selSucursal; ?>">
-                <?php endif; ?>
-                <?php if ($scope==='global' && $selSucursal===0): ?>
-                  <div class="hint">Elige una sucursal para habilitar “Caja”.</div>
-                <?php endif; ?>
-              </div>
-            <?php else: ?>
-              <input type="hidden" name="scope" value="sucursal">
-              <input type="hidden" name="sucursal" value="<?= (int)$selSucursal; ?>">
-            <?php endif; ?>
+          <div class="col-lg-9">
+            <form id="filtros" class="filter-grid" method="get">
+              <?php if (isAdmin($ROL)): ?>
+                <div class="g-ambito">
+                  <div class="label-lite">Ámbito</div>
+                  <div class="input-icon input-pill">
+                    <i class="bi bi-globe2"></i>
+                    <select name="scope" class="form-select">
+                      <option value="global"   <?= $scope==='global'?'selected':''; ?>>Global</option>
+                      <option value="sucursal" <?= $scope==='sucursal'?'selected':''; ?>>Por sucursal</option>
+                    </select>
+                  </div>
+                </div>
 
-            <!-- Caja -->
-            <div class="col-auto">
-              <label class="form-label mb-1">Caja</label>
-              <select name="caja" class="form-select" <?= $haySucursalConcreta ? '' : 'disabled'; ?>>
-                <option value="0">Todas</option>
-                <?php if ($haySucursalConcreta && $cajas): ?>
-                  <?php foreach($cajas as $val=>$txt): ?>
-                    <option value="<?= h($val); ?>" <?= ((string)$val===(string)$caja)?'selected':''; ?>><?= h($txt); ?></option>
-                  <?php endforeach; ?>
-                <?php elseif ($haySucursalConcreta && !$cajas): ?>
-                  <option value="0" selected>(sin cajas registradas)</option>
-                <?php else: ?>
-                  <option value="0" selected>(selecciona sucursal)</option>
-                <?php endif; ?>
-              </select>
-            </div>
+                <div class="g-sucursal">
+                  <div class="label-lite">Sucursal</div>
+                  <div class="input-icon input-pill">
+                    <i class="bi bi-building"></i>
+                    <select name="sucursal" class="form-select" <?= $scope==='global'?'':'disabled'; ?>>
+                      <option value="0">— Todas —</option>
+                      <?php foreach($sucursales as $s): ?>
+                        <option value="<?= (int)$s['id']; ?>" <?= (int)$s['id']===$selSucursal?'selected':''; ?>>
+                          <?= h($s['nombre']); ?>
+                        </option>
+                      <?php endforeach; ?>
+                    </select>
+                  </div>
+                  <?php if ($scope!=='global'): ?>
+                    <input type="hidden" name="sucursal" value="<?= (int)$selSucursal; ?>">
+                  <?php endif; ?>
+                  <!-- <div class="hint mt-1">Elige sucursal para usar el select de “Caja”, o escribe la caja en el campo de texto.</div> -->
+                </div>
 
-            <div class="col-auto">
-              <label class="form-label mb-1">Operador</label>
-              <select name="operador" class="form-select">
-                <?= selectOptions(['ALL'=>'Todos','Bait'=>'Bait','AT&T'=>'AT&T'], $operador); ?>
-              </select>
-            </div>
-            <div class="col-auto">
-              <label class="form-label mb-1">Tipo plan</label>
-              <select name="tipo_plan" class="form-select">
-                <?= selectOptions(['ALL'=>'Todos','Prepago'=>'Prepago','Pospago'=>'Pospago'], $tipoPlan); ?>
-              </select>
-            </div>
-            <div class="col-auto">
-              <label class="form-label mb-1">Buscar</label>
-              <input type="text" class="form-control searchbar" name="q" value="<?= h($q); ?>" placeholder="ICCID o DN…">
-            </div>
-            <div class="col-auto d-flex gap-2">
-              <button class="btn btn-primary" type="submit">Aplicar</button>
-              <a class="btn btn-outline-secondary" href="inventario_sims_resumen.php">Limpiar</a>
-              <!-- Exporta con los valores actuales del form, sin exigir "Aplicar" -->
-              <button class="btn btn-success" type="submit" name="export" value="1">Exportar CSV</button>
-            </div>
-          </form>
+                <div class="g-caja-sel">
+                  <div class="label-lite">Caja (select)</div>
+                  <div class="input-icon input-pill">
+                    <i class="bi bi-box-seam"></i>
+                    <select name="caja" class="form-select" <?= $haySucursalConcreta ? '' : 'disabled'; ?>>
+                      <option value="0">Todas</option>
+                      <?php if ($haySucursalConcreta && $cajas): ?>
+                        <?php foreach($cajas as $val=>$txt): ?>
+                          <option value="<?= h($val); ?>" <?= ((string)$val===(string)$caja && !$useCajaLike)?'selected':''; ?>>
+                            <?= h($txt); ?>
+                          </option>
+                        <?php endforeach; ?>
+                      <?php elseif ($haySucursalConcreta && !$cajas): ?>
+                        <option value="0" selected>(sin cajas registradas)</option>
+                      <?php else: ?>
+                        <option value="0" selected>(elige sucursal o usa "Caja (texto)")</option>
+                      <?php endif; ?>
+                    </select>
+                  </div>
+                </div>
+              <?php else: ?>
+                <input type="hidden" name="scope" value="sucursal">
+                <input type="hidden" name="sucursal" value="<?= (int)$selSucursal; ?>">
+              <?php endif; ?>
+
+              <div class="g-caja-txt">
+                <div class="label-lite">Caja (texto)</div>
+                <div class="input-icon input-pill">
+                  <i class="bi bi-search"></i>
+                  <input type="text" class="form-control" name="caja_q"
+                         value="<?= h($caja_q); ?>" placeholder="Ej: 12 / A-01">
+                </div>
+                <!-- <div class="hint mt-1">En Global sin sucursal, busca en todas. Si escribes algo aquí, ignora el select.</div> -->
+              </div>
+
+              <div class="g-operador">
+                <div class="label-lite">Operador</div>
+                <div class="input-icon input-pill">
+                  <i class="bi bi-diagram-3"></i>
+                  <select name="operador" class="form-select">
+                    <?= selectOptions(['ALL'=>'Todos','Bait'=>'Bait','AT&T'=>'AT&T'], $operador); ?>
+                  </select>
+                </div>
+              </div>
+
+              <!-- <div class="g-plan">
+                <div class="label-lite">Tipo plan</div>
+                <div class="input-icon input-pill">
+                  <i class="bi bi-card-checklist"></i>
+                  <select name="tipo_plan" class="form-select">
+                    <?= selectOptions(['ALL'=>'Todos','Prepago'=>'Prepago','Pospago'=>'Pospago'], $tipoPlan); ?>
+                  </select>
+                </div>
+              </div> -->
+
+              <div class="g-buscar">
+                <div class="label-lite">Buscar ICCID / DN</div>
+                <div class="input-icon input-pill">
+                  <i class="bi bi-upc-scan"></i>
+                  <input type="text" class="form-control" name="q" value="<?= h($q); ?>" placeholder="ICCID o DN…">
+                </div>
+              </div>
+
+              <div class="g-actions d-flex gap-2">
+                <button class="btn btn-primary btn-soft px-4" type="submit"><i class="bi bi-funnel me-1"></i>Aplicar</button>
+                <a class="btn btn-outline-secondary btn-soft px-4" href="inventario_sims_resumen.php"><i class="bi bi-arrow-counterclockwise me-1"></i>Limpiar</a>
+                <button class="btn btn-success btn-soft px-4" type="submit" name="export" value="1"><i class="bi bi-filetype-csv me-1"></i>Exportar CSV</button>
+              </div>
+            </form>
+          </div>
         </div>
+
       </div>
     </div>
   </div>
@@ -358,7 +485,7 @@ require_once __DIR__ . '/navbar.php';
         <div class="card-body">
           <div class="kpi-sub text-secondary">SIMs disponibles</div>
           <div class="kpi-value"><?= number_format($kpis['total']); ?></div>
-          <div class="small text-secondary">Inventario actual según filtros</div>
+          <div class="small text-secondary">Según filtros (incluye caja si aplicó)</div>
         </div>
       </div>
     </div>
@@ -382,11 +509,63 @@ require_once __DIR__ . '/navbar.php';
     </div>
   </div>
 
+  <?php if ($scope==='global' && $selSucursal===0 && $useCajaLike): ?>
+    <!-- Localizador de Caja (Global: muestra en qué sucursal(es) está la caja buscada) -->
+    <?php
+      $p = $params; $t = $types;
+      $sqlLoc = "SELECT s.nombre AS sucursal, TRIM(i.$CAJA_COL) AS caja_val, COUNT(*) AS piezas
+                 FROM inventario_sims i
+                 LEFT JOIN sucursales s ON s.id = i.id_sucursal
+                 $whereSql AND TRIM(i.$CAJA_COL) LIKE ?
+                 GROUP BY s.id, TRIM(i.$CAJA_COL)
+                 HAVING piezas > 0
+                 ORDER BY s.nombre, caja_val";
+      $p[] = "%$caja_q%"; $t .= 's';
+      $st = $conn->prepare($sqlLoc);
+      if ($p){ $st->bind_param($t, ...$p); }
+      $st->execute();
+      $loc = $st->get_result()->fetch_all(MYSQLI_ASSOC);
+      $st->close();
+    ?>
+    <div class="card border-0 shadow-sm rounded-4 mb-3">
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+          <h5 class="mb-0">Localizador de caja: “<?= h($caja_q); ?>”</h5>
+          <span class="text-secondary small">Resultados por sucursal</span>
+        </div>
+        <?php if (!$loc): ?>
+          <div class="text-secondary">No se encontraron coincidencias.</div>
+        <?php else: ?>
+          <div class="table-responsive">
+            <table class="table table-sm align-middle mb-0">
+              <thead>
+                <tr>
+                  <th>Sucursal</th>
+                  <th>Caja</th>
+                  <th class="text-end">Piezas</th>
+                </tr>
+              </thead>
+              <tbody>
+                <?php foreach ($loc as $L): ?>
+                  <tr>
+                    <td><?= h($L['sucursal']); ?></td>
+                    <td><?= h($L['caja_val']); ?></td>
+                    <td class="text-end"><?= (int)$L['piezas']; ?></td>
+                  </tr>
+                <?php endforeach; ?>
+              </tbody>
+            </table>
+          </div>
+        <?php endif; ?>
+      </div>
+    </div>
+  <?php endif; ?>
+
   <?php if ($scope==='global'): ?>
     <!-- Cards por sucursal -->
     <div class="grid mb-5">
       <?php if (!$cards): ?>
-        <div class="text-center text-secondary py-5">No hay SIMs disponibles que coincidan con los filtros.</div>
+        <div class="text-center text-secondary py-5">No hay SIMs que coincidan con los filtros.</div>
       <?php else: foreach($cards as $c): ?>
         <div class="card suc-card">
           <div class="card-body">
@@ -407,7 +586,6 @@ require_once __DIR__ . '/navbar.php';
                  ]))); ?>">
                 Ver detalle
               </a>
-              <!-- Export rápido desde tarjeta -->
               <button class="btn btn-sm btn-outline-success" type="submit" form="filtros" name="export" value="1"
                 onclick="(function(f){
                   const sel = f.querySelector('select[name=sucursal]');
@@ -424,7 +602,7 @@ require_once __DIR__ . '/navbar.php';
     </div>
 
   <?php else: ?>
-    <!-- Detalle de sucursal -->
+    <!-- Detalle por sucursal -->
     <div class="card border-0 shadow-sm rounded-4">
       <div class="card-body">
         <div class="d-flex justify-content-between align-items-center flex-wrap mb-3">
@@ -473,7 +651,7 @@ require_once __DIR__ . '/navbar.php';
         </div>
 
         <div class="d-flex gap-2 mt-3">
-          <button class="btn btn-success" type="submit" form="filtros" name="export" value="1">Exportar CSV</button>
+          <button class="btn btn-success btn-soft" type="submit" form="filtros" name="export" value="1"><i class="bi bi-filetype-csv me-1"></i>Exportar CSV</button>
         </div>
       </div>
     </div>
