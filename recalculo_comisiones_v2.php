@@ -189,6 +189,12 @@ try {
   $updTC_Eje = $hasTC   ? $conn->prepare("UPDATE ventas_payjoy_tc SET comision=? WHERE id=?")      : null;
   $updTC_Ger = $hasTC   ? $conn->prepare("UPDATE ventas_payjoy_tc SET comision_gerente=? WHERE id=?"): null;
 
+  /* ====== Constantes para bind_param (por referencia) ====== */
+  $ROL_EJE = 'Ejecutivo';
+  $ROL_GER = 'Gerente';
+  $COMP_COMI = 'comision';
+  $COMP_COMI_GER = 'comision_gerente';
+
   /* ========== PROCESO POR USUARIO ========== */
   $stats = ['equipos'=>0,'sims'=>0,'pospago'=>0,'tc'=>0];
 
@@ -196,6 +202,8 @@ try {
     $uid=(int)$u['id'];
     $sid=(int)$u['id_sucursal'];
     $rolUsuario=(string)$u['rol'];
+    $isGerenteVendedor = (strcasecmp($rolUsuario,'Gerente')===0);
+
     $aplicaEje = !empty($cumpleUnidades[$uid]);
     $aplicaGer = !empty($cumpleMonto[$sid]);
 
@@ -221,30 +229,38 @@ try {
       $idDet=(int)$row['id'];
       $precioRef=(float)$row['precio_ref'];
 
+      // Comisión propia (Ejecutivo por cuota)
       if ($aplicaEje) {
-        $selEquipo->bind_param('ssssidd','Ejecutivo','comision',$fin,$fin,$sid,$precioRef,$precioRef);
+        $rolTmp = $ROL_EJE; $compTmp = $COMP_COMI;
+        $selEquipo->bind_param('ssssidd',$rolTmp,$compTmp,$fin,$fin,$sid,$precioRef,$precioRef);
         $selEquipo->execute(); $re=$selEquipo->get_result()->fetch_assoc();
         if ($re && $re['monto_fijo']!==null) {
           $v=(float)$re['monto_fijo']; $updDV_Eje->bind_param('di',$v,$idDet); $updDV_Eje->execute();
           $stats['equipos']++;
         }
       }
-      if ($aplicaGer) {
-        // comisión_gerente (sobre ventas del equipo)
-        $selEquipo->bind_param('ssssidd','Gerente','comision_gerente',$fin,$fin,$sid,$precioRef,$precioRef);
+      // Si el vendedor es Gerente, su propia comisión usa el esquema de Gerente
+      if ($isGerenteVendedor) {
+        $rolTmp = $ROL_GER; $compTmp = $COMP_COMI;
+        $selEquipo->bind_param('ssssidd',$rolTmp,$compTmp,$fin,$fin,$sid,$precioRef,$precioRef);
+        $selEquipo->execute(); $rOwn=$selEquipo->get_result()->fetch_assoc();
+        if ($rOwn && $rOwn['monto_fijo']!==null) {
+          $v=(float)$rOwn['monto_fijo']; $updDV_Eje->bind_param('di',$v,$idDet); $updDV_Eje->execute();
+          $stats['equipos']++;
+        }
+      }
+
+      // Comisión Gerente sobre la venta:
+      if ($isGerenteVendedor) {
+        // Ventas hechas por Gerente NO generan comision_gerente
+        if ($updDV_Ger) { $v=0.0; $updDV_Ger->bind_param('di',$v,$idDet); $updDV_Ger->execute(); }
+      } else if ($aplicaGer) {
+        $rolTmp = $ROL_GER; $compTmp = $COMP_COMI_GER;
+        $selEquipo->bind_param('ssssidd',$rolTmp,$compTmp,$fin,$fin,$sid,$precioRef,$precioRef);
         $selEquipo->execute(); $rg=$selEquipo->get_result()->fetch_assoc();
         if ($rg && $rg['monto_fijo']!==null) {
           $v=(float)$rg['monto_fijo']; $updDV_Ger->bind_param('di',$v,$idDet); $updDV_Ger->execute();
           $stats['equipos']++;
-        }
-        // si el vendedor es Gerente, su comisión de equipo (componente comision rol Gerente)
-        if (strcasecmp($rolUsuario,'Gerente')===0) {
-          $selEquipo->bind_param('ssssidd','Gerente','comision',$fin,$fin,$sid,$precioRef,$precioRef);
-          $selEquipo->execute(); $rOwn=$selEquipo->get_result()->fetch_assoc();
-          if ($rOwn && $rOwn['monto_fijo']!==null) {
-            $v=(float)$rOwn['monto_fijo']; $updDV_Eje->bind_param('di',$v,$idDet); $updDV_Eje->execute();
-            $stats['equipos']++;
-          }
         }
       }
     }
@@ -270,16 +286,23 @@ try {
         $isPos = (stripos($tipo,'posp')!==false);
         $sub = $isPos ? 'Pospago' : (stripos($tipo,'port')!==false ? 'Portabilidad' : 'Nueva');
 
+        // Comisión propia
         if ($aplicaEje && $updVS_Eje) {
-          $selSIM->bind_param('ssssssi','Ejecutivo','comision',$sub,$op,$fin,$fin,$sid);
+          $rolTmp = $ROL_EJE; $compTmp = $COMP_COMI;
+          $selSIM->bind_param('ssssssi',$rolTmp,$compTmp,$sub,$op,$fin,$fin,$sid);
           $selSIM->execute(); $re=$selSIM->get_result()->fetch_assoc();
           if ($re && $re['monto_fijo']!==null) {
             $v=(float)$re['monto_fijo']; $updVS_Eje->bind_param('di',$v,$idS); $updVS_Eje->execute();
             $isPos ? $stats['pospago']++ : $stats['sims']++;
           }
         }
-        if ($aplicaGer && $updVS_Ger) {
-          $selSIM->bind_param('ssssssi','Gerente','comision_gerente',$sub,$op,$fin,$fin,$sid);
+        // Si la vendió un Gerente, forzar comision_gerente=0
+        if ($isGerenteVendedor && $updVS_Ger) {
+          $v=0.0; $updVS_Ger->bind_param('di',$v,$idS); $updVS_Ger->execute();
+        } else if ($aplicaGer && $updVS_Ger) {
+          // Solo si NO es venta de Gerente
+          $rolTmp = $ROL_GER; $compTmp = $COMP_COMI_GER;
+          $selSIM->bind_param('ssssssi',$rolTmp,$compTmp,$sub,$op,$fin,$fin,$sid);
           $selSIM->execute(); $rg=$selSIM->get_result()->fetch_assoc();
           if ($rg && $rg['monto_fijo']!==null) {
             $v=(float)$rg['monto_fijo']; $updVS_Ger->bind_param('di',$v,$idS); $updVS_Ger->execute();
@@ -298,16 +321,23 @@ try {
       while($t=$rsTC->fetch_assoc()){
         $idT=(int)$t['id'];
 
+        // Comisión propia
         if ($aplicaEje && $updTC_Eje) {
-          $selTC->bind_param('ssssi','Ejecutivo','comision',$fin,$fin,$sid);
+          $rolTmp = $ROL_EJE; $compTmp = $COMP_COMI;
+          $selTC->bind_param('ssssi',$rolTmp,$compTmp,$fin,$fin,$sid);
           $selTC->execute(); $re=$selTC->get_result()->fetch_assoc();
           if ($re && $re['monto_fijo']!==null) {
             $v=(float)$re['monto_fijo']; $updTC_Eje->bind_param('di',$v,$idT); $updTC_Eje->execute();
             $stats['tc']++;
           }
         }
-        if ($aplicaGer && $updTC_Ger) {
-          $selTC->bind_param('ssssi','Gerente','comision_gerente',$fin,$fin,$sid);
+        // Si la vendió un Gerente, comision_gerente=0
+        if ($isGerenteVendedor && $updTC_Ger) {
+          $v=0.0; $updTC_Ger->bind_param('di',$v,$idT); $updTC_Ger->execute();
+        } else if ($aplicaGer && $updTC_Ger) {
+          // Solo si NO es venta de Gerente
+          $rolTmp = $ROL_GER; $compTmp = $COMP_COMI_GER;
+          $selTC->bind_param('ssssi',$rolTmp,$compTmp,$fin,$fin,$sid);
           $selTC->execute(); $rg=$selTC->get_result()->fetch_assoc();
           if ($rg && $rg['monto_fijo']!==null) {
             $v=(float)$rg['monto_fijo']; $updTC_Ger->bind_param('di',$v,$idT); $updTC_Ger->execute();

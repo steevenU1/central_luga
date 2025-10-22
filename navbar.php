@@ -228,7 +228,7 @@ $grpOperacion  = [
   'nomina_mi_semana.php',
   'panel_operador.php', // ✅ NUEVO: para resaltar el parent
 ];
-$grpRH         = ['reporte_nomina.php', 'reporte_nomina_gerentes_zona.php', 'admin_expedientes.php', 'admin_asistencias.php', 'productividad_ejecutivo.php'];
+$grpRH         = ['reporte_nomina_v2.php', 'reporte_nomina_gerentes_zona.php', 'admin_expedientes.php', 'admin_asistencias.php', 'productividad_ejecutivo.php'];
 /* ✅ Incluimos tareas.php al grupo Operativos para resaltar activo */
 $grpOperativos = [
   'tareas.php', // NEW
@@ -958,7 +958,7 @@ function item_active(string $f, string $c): string
               <i class="bi bi-people"></i>RH
             </a>
             <ul class="dropdown-menu">
-              <li><a class="dropdown-item <?= item_active('reporte_nomina.php', $current) ?>" href="reporte_nomina.php">Reporte semanal</a></li>
+              <li><a class="dropdown-item <?= item_active('reporte_nomina_v2.php', $current) ?>" href="reporte_nomina_v2.php">Reporte Nomina</a></li>
               <li><a class="dropdown-item <?= item_active('reporte_nomina_gerentes_zona.php', $current) ?>" href="reporte_nomina_gerentes_zona.php">Gerentes zona</a></li>
               <li><a class="dropdown-item <?= item_active('admin_asistencias.php', $current) ?>" href="admin_asistencias.php">Asistencias (Admin)</a></li>
               <li>

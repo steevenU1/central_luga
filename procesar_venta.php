@@ -8,9 +8,9 @@
  *     Combo: 75 fijo
  * - GERENTE (campo `comision`):
  *     Tabla Gerente: [1–3499]=25, [3500–5499]=75, [5500+]=100, Módem=25
- *     (Combo usa tabla Gerente para `comision`; si lo quieres 75 fijo también aquí, se ajusta fácil)
- * - `comision_gerente` SIEMPRE:
- *     No combo → tabla Gerente; Combo → 75 fijo (ajuste solicitado)
+ * - `comision_gerente`:
+ *     Normal: No combo → tabla Gerente; Combo → 75 fijo.
+ *     ⚠️ Ajuste solicitado: SI el vendedor es GERENTE, entonces `comision_gerente = 0`.
  * - `comision_especial` se suma SOLO a `comision`, no a `comision_gerente`.
  */
 
@@ -132,7 +132,7 @@ function calcularComisionBaseParaCampoComision(
 }
 
 /** Comisión para `comision_gerente`:
- *  - Combo: 75 fijo (ajuste solicitado)
+ *  - Combo: 75 fijo
  *  - No combo: tabla de Gerente por precio / módem
  */
 function calcularComisionGerenteParaCampo(
@@ -140,7 +140,7 @@ function calcularComisionGerenteParaCampo(
   bool $esModem,
   float $precioLista
 ): float {
-  if ($esCombo) return 75.0; // NUEVO: combo siempre 75 en comision_gerente
+  if ($esCombo) return 75.0;
   return comisionTramoGerente($precioLista, $esModem);
 }
 
@@ -234,6 +234,11 @@ function venderEquipo(
   // 2) Calcular comisiones base
   $comisionBase        = calcularComisionBaseParaCampoComision($rolVendedor, $esCombo, $esModem, $precioL);
   $comisionGerenteBase = calcularComisionGerenteParaCampo($esCombo, $esModem, $precioL);
+
+  // ⚠️ AJUSTE CLAVE: si vende GERENTE, forzar comision_gerente = 0
+  if ($rolVendedor === 'Gerente') {
+    $comisionGerenteBase = 0.0;
+  }
 
   // 3) Comisión especial (solo suma a `comision`)
   $comEsp = obtenerComisionEspecial((int)$row['id_producto'], $conn, $colTipoProd);
