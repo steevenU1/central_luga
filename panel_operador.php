@@ -76,6 +76,14 @@ $TOOLS = [
     'icon'       => 'bi-box-arrow-up', // 📤 Caja saliendo = retiro
     'roles'      => ['Logistica'],
   ],
+  [
+    'key'        => 'crear_codigo',
+    'title'      => 'Crear Código Logística',
+    'desc'       => 'Creación de códigos de productos.',
+    'href'       => 'catalogo_modelos_admin.php',
+    'icon'       => 'bi-upc-scan', // 📤 Caja saliendo = retiro
+    'roles'      => ['Logistica'],
+  ],
 
   // ==== Ejemplos para futuro (déjalos como referencia) ====
   // [
