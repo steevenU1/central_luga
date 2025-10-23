@@ -2,6 +2,8 @@
 // catalogo_modelos_admin.php — SOLO Importación CSV (estilo claro + navbar)
 // Roles permitidos: Admin / Logística
 //
+// UPSERT: si existe por (marca+modelo+color+capacidad) → UPDATE; si no → INSERT
+//
 // Reglas CSV:
 // - 'categoria' -> tipo_producto: Accesorios→Accesorio, Modem→Modem Tables, Teléfonos/Celulares→Equipo,
 //   Chips/SIM → IGNORAR fila.
@@ -10,7 +12,6 @@
 // - Columnas en cualquier orden, delimitador , o ;, UTF-8/UTF-8-BOM
 // - fecha_lanzamiento: yyyy-mm-dd o dd/mm/yyyy
 // - resurtible: si/sí/yes/1/true → 'Sí'; otros → 'No'
-// - Duplicado básico: (marca, modelo, color, capacidad) → se salta
 
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 if (!isset($_SESSION['id_usuario'])) { header("Location: index.php"); exit(); }
@@ -35,9 +36,9 @@ function normNumero($v){
   $t = trim((string)$v);
   if ($t === '') return null;
   if (strpos($t, ',') !== false && strpos($t, '.') !== false){
-    $t = str_replace(',', '', $t);
+    $t = str_replace(',', '', $t);       // "3,999.00" -> "3999.00"
   } else {
-    $t = str_replace(',', '.', $t);
+    $t = str_replace(',', '.', $t);      // "3999,00"  -> "3999.00"
   }
   return is_numeric($t) ? (float)$t : null;
 }
@@ -70,16 +71,19 @@ function detectarDelimitador($path){
   return (substr_count($line,';') > substr_count($line,',')) ? ';' : ',';
 }
 
-// Duplicado básico (marca, modelo, color, capacidad)
-function existeModelo($conn, $marca, $modelo, $color, $capacidad){
+// Devuelve ID si existe por clave (marca, modelo, color, capacidad); si no, null
+function getModeloId($conn, $marca, $modelo, $color, $capacidad){
   $sql = "SELECT id FROM catalogo_modelos 
           WHERE marca=? AND modelo=? AND IFNULL(color,'')=IFNULL(?, '') AND IFNULL(capacidad,'')=IFNULL(?, '')
           LIMIT 1";
   $st = $conn->prepare($sql);
   $st->bind_param('ssss',$marca,$modelo,$color,$capacidad);
-  $st->execute(); $st->store_result();
-  $ok = $st->num_rows > 0; $st->close();
-  return $ok;
+  $st->execute();
+  $st->bind_result($id);
+  $idEncontrado = null;
+  if ($st->fetch()) $idEncontrado = (int)$id;
+  $st->close();
+  return $idEncontrado;
 }
 
 /* ============ Descarga de plantilla ============ */
@@ -102,7 +106,7 @@ if (isset($_GET['plantilla'])) {
   fclose($out); exit();
 }
 
-/* ============ Importación CSV ============ */
+/* ============ Importación CSV con UPSERT ============ */
 $resImport = null;
 if (($_POST['accion'] ?? '') === 'import_csv' && isset($_FILES['csv'])) {
   $file = $_FILES['csv'];
@@ -148,12 +152,20 @@ if (($_POST['accion'] ?? '') === 'import_csv' && isset($_FILES['csv'])) {
         }
       }
 
-      $insertados=0; $saltados=0; $ignorados=0; $errores=0; $detalles=[];
+      $insertados=0; $actualizados=0; $ignorados=0; $errores=0; $detalles=[];
+      // Preparados para INSERT y UPDATE (mismo set de columnas)
       $sqlIns = "INSERT INTO catalogo_modelos
         (marca,modelo,color,ram,capacidad,codigo_producto,descripcion,nombre_comercial,compania,financiera,
          fecha_lanzamiento,precio_lista,tipo_producto,subtipo,gama,ciclo_vida,abc,operador,resurtible,activo)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
-      $st = $conn->prepare($sqlIns);
+      $stIns = $conn->prepare($sqlIns);
+
+      $sqlUpd = "UPDATE catalogo_modelos SET
+          marca=?, modelo=?, color=?, ram=?, capacidad=?, codigo_producto=?, descripcion=?, nombre_comercial=?, 
+          compania=?, financiera=?, fecha_lanzamiento=?, precio_lista=?, tipo_producto=?, subtipo=?, gama=?, 
+          ciclo_vida=?, abc=?, operador=?, resurtible=?, activo=?
+        WHERE id=?";
+      $stUpd = $conn->prepare($sqlUpd);
 
       $linea=2;
       while (($row = fgetcsv($f, 0, $delim)) !== false) {
@@ -164,55 +176,68 @@ if (($_POST['accion'] ?? '') === 'import_csv' && isset($_FILES['csv'])) {
           return is_string($v) ? trim($v) : $v;
         };
 
-        $marca  = (string)$get('marca');
-        $modelo = (string)$get('modelo');
+        $marca  = (string)($get('marca') ?? '');
+        $modelo = (string)($get('modelo') ?? '');
         if ($marca==='' || $modelo===''){ $errores++; $detalles[]="L$linea: Falta marca/modelo."; $linea++; continue; }
 
         $cat = normCategoria($get('tipo_producto'));
         if ($cat['ignore']){ $ignorados++; $detalles[]="L$linea: Categoria CHIP/SIM → ignorada."; $linea++; continue; }
         $tipo  = $cat['valor'];
 
-        $color = (string)$get('color');
-        $ram   = (string)$get('ram');
-        $cap   = (string)$get('capacidad'); // viene de 'almacenamiento'
-        $cod   = (string)$get('codigo_producto');
-        $desc  = (string)$get('descripcion');
-        $ncom  = (string)$get('nombre_comercial');
-        $compa = (string)$get('compania');
-        $fin   = (string)$get('financiera');
-        $gama  = (string)$get('gama');
-        $cvida = (string)$get('ciclo_vida');
-        $abc   = (string)$get('abc');
-        $oper  = (string)$get('operador');
-        $subt  = (string)$get('subtipo');
+        $color = (string)($get('color') ?? '');
+        $ram   = (string)($get('ram') ?? '');
+        $cap   = (string)($get('capacidad') ?? ''); // viene de 'almacenamiento'
+        $cod   = (string)($get('codigo_producto') ?? '');
+        $desc  = (string)($get('descripcion') ?? '');
+        $ncom  = (string)($get('nombre_comercial') ?? '');
+        $compa = (string)($get('compania') ?? '');
+        $fin   = (string)($get('financiera') ?? '');
+        $gama  = (string)($get('gama') ?? '');
+        $cvida = (string)($get('ciclo_vida') ?? '');
+        $abc   = (string)($get('abc') ?? '');
+        $oper  = (string)($get('operador') ?? '');
+        $subt  = (string)($get('subtipo') ?? '');
 
-        $precio = normNumero($get('precio_lista'));
-        $fechaL = normFecha($get('fecha_lanzamiento'));
-        $resu   = normBoolSiNo($get('resurtible') ?? 'Sí');
-        $activo = ((int)($get('activo') ?? 1)) ? 1 : 0;
+        $precio = normNumero($get('precio_lista'));            // float|null
+        $precio = is_null($precio) ? null : (float)$precio;    // permite NULL
+        $fechaL = normFecha($get('fecha_lanzamiento'));        // 'Y-m-d'|NULL
+        $resu   = normBoolSiNo($get('resurtible') ?? 'Sí');    // 'Sí'/'No'
+        $activo = ((int)($get('activo') ?? 1)) ? 1 : 0;        // 0/1
 
-        if (existeModelo($conn,$marca,$modelo,$color,$cap)){
-          $saltados++; $detalles[]="L$linea: Duplicado (marca/modelo/color/capacidad) → saltado."; $linea++; continue;
-        }
+        // ¿Existe? -> UPDATE, si no -> INSERT
+        $idExistente = getModeloId($conn,$marca,$modelo,$color,$cap);
 
         try{
-          $st->bind_param(
-            'sssssssssssisssssssi',
-            $marca,$modelo,$color,$ram,$cap,$cod,$desc,$ncom,$compa,$fin,
-            $fechaL,$precio,$tipo,$subt,$gama,$cvida,$abc,$oper,$resu,$activo
-          );
-          $st->execute();
-          $insertados++;
+          if ($idExistente) {
+            // UPDATE (21 valores: 20 campos + id)
+            $stUpd->bind_param(
+              'sssssssssssdsssssssii',
+              $marca,$modelo,$color,$ram,$cap,$cod,$desc,$ncom,$compa,$fin,
+              $fechaL,$precio,$tipo,$subt,$gama,$cvida,$abc,$oper,$resu,$activo,
+              $idExistente
+            );
+            $stUpd->execute();
+            $actualizados++;
+          } else {
+            // INSERT (20 valores)
+            $stIns->bind_param(
+              'sssssssssssdsssssssi',
+              $marca,$modelo,$color,$ram,$cap,$cod,$desc,$ncom,$compa,$fin,
+              $fechaL,$precio,$tipo,$subt,$gama,$cvida,$abc,$oper,$resu,$activo
+            );
+            $stIns->execute();
+            $insertados++;
+          }
         } catch(Throwable $e){
           $errores++; $detalles[]="L$linea: Error DB: ".$e->getMessage();
         }
         $linea++;
       }
-      fclose($f); $st->close();
+      fclose($f); $stIns->close(); $stUpd->close();
 
       $resImport = [
-        'ok'=>true,'msg'=>"Importación finalizada.",
-        'insertados'=>$insertados,'saltados'=>$saltados,'ignorados'=>$ignorados,'errores'=>$errores,
+        'ok'=>true,'msg'=>"Importación finalizada (UPSERT).",
+        'insertados'=>$insertados,'actualizados'=>$actualizados,'ignorados'=>$ignorados,'errores'=>$errores,
         'detalles'=>$detalles
       ];
     }
@@ -268,11 +293,9 @@ small.muted{color:var(--muted)}
       <div><strong>Reglas rápidas</strong></div>
     </div>
     <ul class="detalles">
-      <!-- <li><b>categoria</b> → tipo_producto: Accesorios→<b>Accesorio</b>, Modem→<b>Modem Tables</b>,
-          Teléfonos/Celulares→<b>Equipo</b>, Chips/SIM → <b>ignorar fila</b>.</li>
-      <li><b>subcategoria</b> → subtipo; <b>almacenamiento</b> → capacidad. Columnas en <b>cualquier orden</b>.</li> -->
       <li>Delimitador <code>,</code> o <code>;</code>. UTF-8/UTF-8-BOM. Fechas <code>yyyy-mm-dd</code> o <code>dd/mm/yyyy</code>.</li>
       <li>Números: 3999.00 (también se acepta <code>3,999.00</code>).</li>
+      <li>Si ya existe por <b>marca+modelo+color+capacidad</b>, se <b>actualiza</b>; si no existe, se <b>inserta</b>.</li>
     </ul>
 
     <div style="margin:12px 0">
@@ -291,7 +314,7 @@ small.muted{color:var(--muted)}
         <?php if ($resImport['ok']): ?>
           <div class="row" style="gap:8px;margin-top:8px">
             <div class="kpi">Insertados: <?= (int)$resImport['insertados'] ?></div>
-            <div class="kpi">Saltados (duplicados): <?= (int)$resImport['saltados'] ?></div>
+            <div class="kpi">Actualizados: <?= (int)$resImport['actualizados'] ?></div>
             <div class="kpi">Ignorados (chips/SIM): <?= (int)$resImport['ignorados'] ?></div>
             <div class="kpi">Errores: <?= (int)$resImport['errores'] ?></div>
           </div>
