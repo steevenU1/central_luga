@@ -1,10 +1,11 @@
 <?php
-// inventario_sims_resumen.php — Central 2.0 (UI buscador PRO + Búsqueda global por caja + Localizador)
+// inventario_sims_resumen.php — Central 2.0 (UI buscador PRO + Búsqueda global por caja + Localizador FIX)
 // - Caja (select) = coincidencia exacta (requiere sucursal concreta).
 // - Caja (texto, caja_q) = coincidencia parcial por LIKE y funciona también en Global sin elegir sucursal.
-// - Si caja_q tiene valor, ignora el select "caja".
-// - KPIs, Cards, Localizador y Export CSV respetan caja_q en Global y Sucursal.
-// - Admin: Global o Por sucursal; otros roles: solo su sucursal.
+// - Localizador GLOBAL (cuando admin no elige sucursal y escribe caja_q):
+//     * IGNORA estatus, operador, plan y q; busca únicamente por caja y te dice en QUÉ SUCURSAL está.
+//     * Coincidencia EXACTA si caja_q es “limpia” ([A-Za-z0-9_-]+); si no, LIKE.
+// - KPIs/Cards/Detalle/Export se mantienen como estaban (filtran por estatus='Disponible').
 
 session_start();
 if (!isset($_SESSION['id_usuario'])) { header("Location: index.php"); exit(); }
@@ -67,7 +68,7 @@ $CAJA_COL = detectarColCaja($conn);
 $CAJA_TR  = "TRIM(i.$CAJA_COL)";
 $haySucursalConcreta = ($scope==='sucursal') || ($scope==='global' && $selSucursal>0);
 
-/* ===== WHERE base ===== */
+/* ===== WHERE base (para módulos que sí filtran por Disponible) ===== */
 $where = ["i.estatus='Disponible'"];
 $params=[]; $types='';
 
@@ -135,12 +136,10 @@ function kpis(mysqli $conn, $whereSql, $params, $types, $scope, $selSucursal, $u
         $p[]=$caja; $t.='s';
       }
     } else {
-      // Global sin sucursal: si hay caja_q, filtra en TODAS
-      if ($useCajaLike) {
+      if ($useCajaLike){
         $extra .= ($whereSql ? " AND " : "WHERE ")."$CAJA_TR LIKE ?";
         $p[]="%$caja_q%"; $t.='s';
       }
-      // Nota: el select "caja" no aplica globalmente sin sucursal.
     }
   }
 
@@ -172,7 +171,6 @@ if ($scope==='global'){
       $p[]=$caja; $t.='s';
     }
   } else {
-    // GLOBAL sin sucursal seleccionada: permitir filtrar por caja_q en todas
     if ($useCajaLike){
       $extra .= ($whereSql ? " AND " : "WHERE ")."$CAJA_TR LIKE ?";
       $p[]="%$caja_q%"; $t.='s';
@@ -253,7 +251,6 @@ if (isset($_GET['export']) && $_GET['export']==='1') {
         $p[]=$caja; $t.='s';
       }
     } else {
-      // Export global por caja_q (todas las sucursales)
       if ($useCajaLike){
         $extraWhere .= ($whereSql ? " AND " : "WHERE ")."$CAJA_TR LIKE ?";
         $p[]="%$caja_q%"; $t.='s';
@@ -331,7 +328,6 @@ require_once __DIR__ . '/navbar.php';
       grid-template-columns: repeat(12, 1fr);
       align-items:end;
     }
-    /* Layout en desktop (≥992px) */
     @media (min-width: 992px){
       .g-ambito   { grid-column: span 2; }
       .g-sucursal { grid-column: span 5; }
@@ -342,15 +338,11 @@ require_once __DIR__ . '/navbar.php';
       .g-buscar   { grid-column: span 4; }
       .g-actions  { grid-column: span 4; justify-self:end; }
     }
-    /* Layout en móviles */
     @media (max-width: 991.98px){
       .g-ambito,.g-sucursal,.g-caja-sel,.g-caja-txt,.g-operador,.g-plan,.g-buscar,.g-actions{ grid-column: 1 / -1; }
     }
     .hint{ font-size:.86rem; color: var(--bs-secondary-color); }
-    .btn-soft{
-      border-radius: .75rem;
-      box-shadow: 0 6px 16px rgba(2,8,20,.08);
-    }
+    .btn-soft{ border-radius: .75rem; box-shadow: 0 6px 16px rgba(2,8,20,.08); }
   </style>
 </head>
 <body class="bg-body-tertiary">
@@ -399,7 +391,6 @@ require_once __DIR__ . '/navbar.php';
                   <?php if ($scope!=='global'): ?>
                     <input type="hidden" name="sucursal" value="<?= (int)$selSucursal; ?>">
                   <?php endif; ?>
-                  <!-- <div class="hint mt-1">Elige sucursal para usar el select de “Caja”, o escribe la caja en el campo de texto.</div> -->
                 </div>
 
                 <div class="g-caja-sel">
@@ -434,7 +425,6 @@ require_once __DIR__ . '/navbar.php';
                   <input type="text" class="form-control" name="caja_q"
                          value="<?= h($caja_q); ?>" placeholder="Ej: 12 / A-01">
                 </div>
-                <!-- <div class="hint mt-1">En Global sin sucursal, busca en todas. Si escribes algo aquí, ignora el select.</div> -->
               </div>
 
               <div class="g-operador">
@@ -446,16 +436,6 @@ require_once __DIR__ . '/navbar.php';
                   </select>
                 </div>
               </div>
-
-              <!-- <div class="g-plan">
-                <div class="label-lite">Tipo plan</div>
-                <div class="input-icon input-pill">
-                  <i class="bi bi-card-checklist"></i>
-                  <select name="tipo_plan" class="form-select">
-                    <?= selectOptions(['ALL'=>'Todos','Prepago'=>'Prepago','Pospago'=>'Pospago'], $tipoPlan); ?>
-                  </select>
-                </div>
-              </div> -->
 
               <div class="g-buscar">
                 <div class="label-lite">Buscar ICCID / DN</div>
@@ -510,19 +490,25 @@ require_once __DIR__ . '/navbar.php';
   </div>
 
   <?php if ($scope==='global' && $selSucursal===0 && $useCajaLike): ?>
-    <!-- Localizador de Caja (Global: muestra en qué sucursal(es) está la caja buscada) -->
+    <!-- Localizador de Caja (Global absoluto: ignora estatus/operador/plan/q; SOLO caja) -->
     <?php
-      $p = $params; $t = $types;
-      $sqlLoc = "SELECT s.nombre AS sucursal, TRIM(i.$CAJA_COL) AS caja_val, COUNT(*) AS piezas
-                 FROM inventario_sims i
-                 LEFT JOIN sucursales s ON s.id = i.id_sucursal
-                 $whereSql AND TRIM(i.$CAJA_COL) LIKE ?
-                 GROUP BY s.id, TRIM(i.$CAJA_COL)
-                 HAVING piezas > 0
-                 ORDER BY s.nombre, caja_val";
-      $p[] = "%$caja_q%"; $t .= 's';
+      // Coincidencia EXACTA si es "limpia" (alfa-num/guión/guión_bajo), de lo contrario LIKE.
+      $isExact = (bool)preg_match('/^[A-Za-z0-9_-]+$/', $caja_q);
+      $sqlLoc = "SELECT
+                  s.id   AS id_suc,
+                  s.nombre AS sucursal,
+                  TRIM(i.$CAJA_COL) AS caja_val,
+                  COUNT(*) AS piezas,
+                  SUM(i.estatus='Disponible') AS disponibles
+                FROM inventario_sims i
+                LEFT JOIN sucursales s ON s.id = i.id_sucursal
+                WHERE ".condCajaNoVacia("i.$CAJA_COL")." AND ".($isExact ? "$CAJA_TR = ?" : "$CAJA_TR LIKE ?")."
+                GROUP BY s.id, TRIM(i.$CAJA_COL)
+                HAVING piezas > 0
+                ORDER BY s.nombre, caja_val";
+      $param = $isExact ? $caja_q : ("%$caja_q%");
       $st = $conn->prepare($sqlLoc);
-      if ($p){ $st->bind_param($t, ...$p); }
+      $st->bind_param('s', $param);
       $st->execute();
       $loc = $st->get_result()->fetch_all(MYSQLI_ASSOC);
       $st->close();
@@ -531,7 +517,7 @@ require_once __DIR__ . '/navbar.php';
       <div class="card-body">
         <div class="d-flex justify-content-between align-items-center mb-2">
           <h5 class="mb-0">Localizador de caja: “<?= h($caja_q); ?>”</h5>
-          <span class="text-secondary small">Resultados por sucursal</span>
+          <span class="text-secondary small">Búsqueda global (todos los estatus)</span>
         </div>
         <?php if (!$loc): ?>
           <div class="text-secondary">No se encontraron coincidencias.</div>
@@ -543,6 +529,7 @@ require_once __DIR__ . '/navbar.php';
                   <th>Sucursal</th>
                   <th>Caja</th>
                   <th class="text-end">Piezas</th>
+                  <th class="text-end">Disponibles</th>
                 </tr>
               </thead>
               <tbody>
@@ -551,6 +538,7 @@ require_once __DIR__ . '/navbar.php';
                     <td><?= h($L['sucursal']); ?></td>
                     <td><?= h($L['caja_val']); ?></td>
                     <td class="text-end"><?= (int)$L['piezas']; ?></td>
+                    <td class="text-end"><?= (int)$L['disponibles']; ?></td>
                   </tr>
                 <?php endforeach; ?>
               </tbody>
