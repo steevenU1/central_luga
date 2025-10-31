@@ -1,8 +1,8 @@
 <?php
-// inventario_sims_resumen.php — Central 2.0 (UI buscador PRO + Búsqueda global por caja + Localizador FIX)
+// inventario_sims_resumen.php — Central 2.0 (UI buscador PRO + Búsqueda global por caja + Localizador FIX + Logística con alcance global)
 // - Caja (select) = coincidencia exacta (requiere sucursal concreta).
 // - Caja (texto, caja_q) = coincidencia parcial por LIKE y funciona también en Global sin elegir sucursal.
-// - Localizador GLOBAL (cuando admin no elige sucursal y escribe caja_q):
+// - Localizador GLOBAL (cuando Admin/Logistica no eligen sucursal y escriben caja_q):
 //     * IGNORA estatus, operador, plan y q; busca únicamente por caja y te dice en QUÉ SUCURSAL está.
 //     * Coincidencia EXACTA si caja_q es “limpia” ([A-Za-z0-9_-]+); si no, LIKE.
 // - KPIs/Cards/Detalle/Export se mantienen como estaban (filtran por estatus='Disponible').
@@ -25,7 +25,9 @@ function selectOptions(array $opts, $sel){
     $html.='<option value="'.h($val).'"'.$selAttr.'>'.h($txt).'</option>';
   } return $html;
 }
-function isAdmin($rol){ return $rol === 'Admin'; }
+
+/* 🔐 Privilegios: Admin o Logistica tienen alcance “global” */
+function isPrivileged($rol){ return in_array($rol, ['Admin','Logistica'], true); }
 
 /** Detecta la columna real usada para “caja” en inventario_sims. */
 function detectarColCaja(mysqli $conn): string {
@@ -46,8 +48,8 @@ function condCajaNoVacia(string $expr): string {
 }
 
 /* ===== Parámetros / filtros ===== */
-$scope        = isAdmin($ROL) ? ($_GET['scope'] ?? 'global') : 'sucursal';
-$selSucursal  = isAdmin($ROL) ? (int)($_GET['sucursal'] ?? 0) : $ID_SUCURSAL; // 0 = todas
+$scope        = isPrivileged($ROL) ? ($_GET['scope'] ?? 'global') : 'sucursal';
+$selSucursal  = isPrivileged($ROL) ? (int)($_GET['sucursal'] ?? 0) : $ID_SUCURSAL; // 0 = todas (solo Admin/Logistica)
 $operador     = $_GET['operador']  ?? 'ALL';
 $tipoPlan     = $_GET['tipo_plan'] ?? 'ALL';
 $q            = trim((string)($_GET['q'] ?? ''));
@@ -61,7 +63,8 @@ if ($caja === '') $caja = '0';
 $caja_q = trim((string)($_GET['caja_q'] ?? ''));
 $useCajaLike = ($caja_q !== '');
 
-if (!isAdmin($ROL)) { $scope='sucursal'; $selSucursal=$ID_SUCURSAL; }
+/* Forzar reglas de alcance para quienes NO son Admin/Logistica */
+if (!isPrivileged($ROL)) { $scope='sucursal'; $selSucursal=$ID_SUCURSAL; }
 if ($scope!=='global') { $scope='sucursal'; }
 
 $CAJA_COL = detectarColCaja($conn);
@@ -80,9 +83,9 @@ if ($q!==''){
 }
 $whereSql = $where ? 'WHERE '.implode(' AND ',$where) : '';
 
-/* ===== Sucursales (Admin) ===== */
+/* ===== Sucursales (Admin/Logistica) ===== */
 $sucursales=[];
-if (isAdmin($ROL)) {
+if (isPrivileged($ROL)) {
   $rs = $conn->query("SELECT id, nombre FROM sucursales ORDER BY nombre");
   $sucursales = $rs->fetch_all(MYSQLI_ASSOC);
 }
@@ -363,7 +366,7 @@ require_once __DIR__ . '/navbar.php';
 
           <div class="col-lg-9">
             <form id="filtros" class="filter-grid" method="get">
-              <?php if (isAdmin($ROL)): ?>
+              <?php if (isPrivileged($ROL)): ?>
                 <div class="g-ambito">
                   <div class="label-lite">Ámbito</div>
                   <div class="input-icon input-pill">
@@ -580,7 +583,7 @@ require_once __DIR__ . '/navbar.php';
                   if (sel) sel.value='<?= (int)$c['id_suc']; ?>';
                   const hid = f.querySelector('input[type=hidden][name=sucursal]');
                   if (hid) hid.value='<?= (int)$c['id_suc']; ?>';
-                })(document.getElementById('filtros'));">
+                })(document.getElementById('filtros')); ">
                 Exportar CSV
               </button>
             </div>
@@ -598,7 +601,7 @@ require_once __DIR__ . '/navbar.php';
             <h4 class="mb-0">Sucursal: <?= h($sucursalNombre ?: ('#'.$selSucursal)); ?></h4>
             <div class="text-secondary small">Listado de SIMs disponibles</div>
           </div>
-          <?php if (isAdmin($ROL)): ?>
+          <?php if (isPrivileged($ROL)): ?>
             <a class="btn btn-outline-secondary btn-sm"
                href="?<?= h(http_build_query(array_merge($_GET, ['scope'=>'global','sucursal'=>0]))); ?>">
               Volver a Global

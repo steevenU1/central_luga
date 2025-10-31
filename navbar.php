@@ -695,6 +695,7 @@ function item_active(string $f, string $c): string
             <?php if ($rolUsuario === 'Logistica'): ?>
               <li><a class="dropdown-item <?= item_active('inventario_global.php', $current) ?>" href="inventario_global.php">Inventario global</a></li>
               <li><a class="dropdown-item <?= item_active('inventario_historico.php', $current) ?>" href="inventario_historico.php">Inventario histórico</a></li>
+              <li><a class="dropdown-item <?= item_active('inventario_sims_resumen.php', $current) ?>" href="inventario_sims_resumen.php">Inventario SIMs</a></li>
             <?php else: ?>
               <?php if (in_array($rolUsuario, ['Ejecutivo', 'Gerente'])): ?>
                 <li><a class="dropdown-item <?= item_active('panel.php', $current) ?>" href="panel.php">Inventario sucursal</a></li>
@@ -706,10 +707,11 @@ function item_active(string $f, string $c): string
                 <li><a class="dropdown-item <?= item_active('inventario_global.php', $current) ?>" href="inventario_global.php">Inventario global</a></li>
               <?php endif; ?>
 
-              <!-- ✅ NUEVO: SIMs (Resumen) SOLO para Gerente y Admin -->
-              <?php if (in_array($rolUsuario, ['Gerente', 'Admin'], true)): ?>
-                <li><a class="dropdown-item <?= item_active('inventario_resumen_sim.php', $current) ?>" href="inventario_sims_resumen.php">Invenario SIMs</a></li>
+              <!-- ✅ SIMs (Resumen) para Gerente, Admin y Logistica -->
+              <?php if (in_array($rolUsuario, ['Gerente', 'Admin', 'Logistica'], true)): ?>
+                <li><a class="dropdown-item <?= item_active('inventario_sims_resumen.php', $current) ?>" href="inventario_sims_resumen.php">Inventario SIMs</a></li>
               <?php endif; ?>
+
 
               <?php if ($rolUsuario === 'GerenteZona'): ?>
                 <li>
