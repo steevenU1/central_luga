@@ -5,11 +5,11 @@ if (!isset($_SESSION['id_usuario']) || $_SESSION['rol'] != 'Admin') {
     exit();
 }
 
-include 'db.php';
-include 'navbar.php';
+require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/navbar.php';
 
 /* =======================
-   Auto-migración segura
+   Helpers
    ======================= */
 function hasColumn(mysqli $conn, string $table, string $column): bool {
     $t = $conn->real_escape_string($table);
@@ -22,16 +22,244 @@ function hasColumn(mysqli $conn, string $table, string $column): bool {
     $res = $conn->query($sql);
     return $res && $res->num_rows > 0;
 }
+function csv_escape($v){
+    $v = (string)$v;
+    $v = str_replace(["\r","\n"], [' ',' '], $v);
+    $needs = strpbrk($v, ",\"\t") !== false;
+    return $needs ? '"' . str_replace('"','""',$v) . '"' : $v;
+}
+function renderDetalleCorteHTML(mysqli $conn, int $idCorte): string {
+    // Cobros
+    $qc = $conn->prepare("
+      SELECT cb.id, cb.motivo, cb.tipo_pago, cb.monto_total, cb.monto_efectivo, cb.monto_tarjeta,
+             cb.comision_especial, cb.fecha_cobro, u.nombre AS ejecutivo
+      FROM cobros cb
+      LEFT JOIN usuarios u ON u.id = cb.id_usuario
+      WHERE cb.id_corte = ?
+      ORDER BY cb.fecha_cobro ASC, cb.id ASC
+    ");
+    $qc->bind_param('i', $idCorte);
+    $qc->execute();
+    $rowsCobros = $qc->get_result()->fetch_all(MYSQLI_ASSOC);
+    $qc->close();
+
+    // Depósitos
+    $qd = $conn->prepare("
+      SELECT ds.id, ds.monto_depositado, ds.banco, ds.referencia, ds.estado, ds.fecha_deposito,
+             ds.comprobante_archivo, ds.comentario_admin, s.nombre AS sucursal
+      FROM depositos_sucursal ds
+      INNER JOIN sucursales s ON s.id = ds.id_sucursal
+      WHERE ds.id_corte = ?
+      ORDER BY ds.id ASC
+    ");
+    $qd->bind_param('i', $idCorte);
+    $qd->execute();
+    $rowsDep = $qd->get_result()->fetch_all(MYSQLI_ASSOC);
+    $qd->close();
+
+    ob_start(); ?>
+    <div class="d-flex justify-content-between align-items-center mb-2">
+      <h5 class="mb-0"><i class="bi bi-list-ul me-1"></i> Detalle del corte #<?= (int)$idCorte ?></h5>
+      <a class="btn btn-outline-success btn-sm" href="?export=csv_corte&id=<?= (int)$idCorte ?>" target="_blank">
+        <i class="bi bi-filetype-csv me-1"></i> Exportar CSV
+      </a>
+    </div>
+
+    <div class="row g-3">
+      <div class="col-lg-7">
+        <div class="fw-semibold mb-2"><i class="bi bi-receipt"></i> Cobros del corte</div>
+        <div class="table-responsive">
+          <table class="table table-sm table-striped mb-0">
+            <thead>
+              <tr>
+                <th>ID Cobro</th>
+                <th>Fecha/Hora</th>
+                <th>Ejecutivo</th>
+                <th>Motivo</th>
+                <th>Tipo pago</th>
+                <th class="text-end">Total</th>
+                <th class="text-end">Efectivo</th>
+                <th class="text-end">Tarjeta</th>
+                <th class="text-end">Com. Esp.</th>
+              </tr>
+            </thead>
+            <tbody>
+              <?php foreach ($rowsCobros as $r): ?>
+              <tr>
+                <td><?= (int)$r['id'] ?></td>
+                <td><?= htmlspecialchars($r['fecha_cobro']) ?></td>
+                <td><?= htmlspecialchars($r['ejecutivo'] ?? 'N/D') ?></td>
+                <td><?= htmlspecialchars($r['motivo']) ?></td>
+                <td><?= htmlspecialchars($r['tipo_pago']) ?></td>
+                <td class="text-end">$<?= number_format($r['monto_total'],2) ?></td>
+                <td class="text-end">$<?= number_format($r['monto_efectivo'],2) ?></td>
+                <td class="text-end">$<?= number_format($r['monto_tarjeta'],2) ?></td>
+                <td class="text-end">$<?= number_format($r['comision_especial'],2) ?></td>
+              </tr>
+              <?php endforeach; if(!$rowsCobros): ?>
+              <tr><td colspan="9" class="text-muted">Sin cobros ligados a este corte.</td></tr>
+              <?php endif; ?>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="col-lg-5">
+        <div class="fw-semibold mb-2"><i class="bi bi-bank"></i> Depósitos del corte</div>
+        <div class="table-responsive">
+          <table class="table table-sm table-striped mb-0">
+            <thead>
+              <tr>
+                <th>ID Dep.</th>
+                <th>Sucursal</th>
+                <th class="text-end">Monto</th>
+                <th>Banco</th>
+                <th>Ref</th>
+                <th>Estado</th>
+                <th>Comp.</th>
+                <th class="text-center">Acción</th>
+              </tr>
+            </thead>
+            <tbody>
+              <?php foreach ($rowsDep as $d): ?>
+              <tr class="<?= $d['estado']==='Validado'?'table-success':'' ?>">
+                <td><?= (int)$d['id'] ?></td>
+                <td><?= htmlspecialchars($d['sucursal']) ?></td>
+                <td class="text-end">$<?= number_format($d['monto_depositado'],2) ?></td>
+                <td><?= htmlspecialchars($d['banco']) ?></td>
+                <td><code><?= htmlspecialchars($d['referencia']) ?></code></td>
+                <td><span class="badge <?= $d['estado']==='Validado'?'bg-success':'bg-warning text-dark' ?>"><?= htmlspecialchars($d['estado']) ?></span></td>
+                <td>
+                  <?php if (!empty($d['comprobante_archivo'])): ?>
+                    <button class="btn btn-outline-primary btn-sm js-ver"
+                            data-src="deposito_comprobante.php?id=<?= (int)$d['id'] ?>"
+                            data-bs-toggle="modal" data-bs-target="#visorModal">
+                      Ver
+                    </button>
+                  <?php else: ?><span class="text-muted">—</span><?php endif; ?>
+                </td>
+                <td class="text-center">
+                  <?php if ($d['estado'] !== 'Validado'): ?>
+                    <form method="POST" class="d-inline" onsubmit="return confirmarValidacion(<?= (int)$d['id'] ?>, '<?= htmlspecialchars($d['sucursal'],ENT_QUOTES) ?>', '<?= number_format($d['monto_depositado'],2) ?>');">
+                      <input type="hidden" name="id_deposito" value="<?= (int)$d['id'] ?>">
+                      <button name="accion" value="Validar" class="btn btn-success btn-sm">
+                        Validar
+                      </button>
+                    </form>
+                  <?php else: ?>
+                    <span class="text-muted">—</span>
+                  <?php endif; ?>
+                </td>
+              </tr>
+              <?php endforeach; if(!$rowsDep): ?>
+              <tr><td colspan="8" class="text-muted">Sin depósitos ligados a este corte.</td></tr>
+              <?php endif; ?>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <?php
+    return ob_get_clean();
+}
+
+/* =======================
+   Auto-migración segura
+   ======================= */
 if (!hasColumn($conn, 'depositos_sucursal', 'comentario_admin')) {
     @$conn->query("ALTER TABLE depositos_sucursal
                    ADD COLUMN comentario_admin TEXT NULL AFTER referencia");
 }
 
-$msg = '';
+/* =======================
+   AJAX detalle de corte
+   ======================= */
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'detalle_corte') {
+    $id = (int)($_GET['id'] ?? 0);
+    header('Content-Type: text/html; charset=UTF-8');
+    if ($id > 0) {
+        echo renderDetalleCorteHTML($conn, $id);
+    } else {
+        echo '<div class="alert alert-warning mb-0">Corte inválido.</div>';
+    }
+    exit;
+}
 
 /* =======================
-   1) Acciones POST
+   Export CSV del corte
    ======================= */
+if (isset($_GET['export']) && $_GET['export'] === 'csv_corte') {
+    $id = (int)($_GET['id'] ?? 0);
+    if ($id <= 0) {
+        die('Corte inválido');
+    }
+    $meta = $conn->query("
+      SELECT cc.id, s.nombre AS sucursal, cc.fecha_operacion, cc.fecha_corte, cc.total_efectivo, cc.total_tarjeta, cc.total_comision_especial, cc.total_general
+      FROM cortes_caja cc
+      INNER JOIN sucursales s ON s.id = cc.id_sucursal
+      WHERE cc.id = {$id}
+      LIMIT 1
+    ")->fetch_assoc();
+
+    $qc = $conn->prepare("
+      SELECT cb.id, cb.fecha_cobro, u.nombre AS ejecutivo, cb.motivo, cb.tipo_pago,
+             cb.monto_total, cb.monto_efectivo, cb.monto_tarjeta, cb.comision_especial
+      FROM cobros cb
+      LEFT JOIN usuarios u ON u.id = cb.id_usuario
+      WHERE cb.id_corte = ?
+      ORDER BY cb.fecha_cobro ASC, cb.id ASC
+    ");
+    $qc->bind_param('i', $id);
+    $qc->execute();
+    $rowsCobros = $qc->get_result()->fetch_all(MYSQLI_ASSOC);
+    $qc->close();
+
+    $qd = $conn->prepare("
+      SELECT ds.id, s.nombre AS sucursal, ds.monto_depositado, ds.banco, ds.referencia,
+             ds.estado, ds.fecha_deposito
+      FROM depositos_sucursal ds
+      INNER JOIN sucursales s ON s.id = ds.id_sucursal
+      WHERE ds.id_corte = ?
+      ORDER BY ds.id ASC
+    ");
+    $qd->bind_param('i', $id);
+    $qd->execute();
+    $rowsDep = $qd->get_result()->fetch_all(MYSQLI_ASSOC);
+    $qd->close();
+
+    header('Content-Type: text/csv; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="corte_'.$id.'_detalle.csv"');
+    $out = fopen('php://output', 'w');
+
+    if ($meta) {
+        fputs($out, "Corte,".csv_escape($meta['id']).",Sucursal,".csv_escape($meta['sucursal']).",Fecha Operación,".csv_escape($meta['fecha_operacion']).",Fecha Corte,".csv_escape($meta['fecha_corte'])."\r\n");
+        fputs($out, "Total Efectivo,".csv_escape($meta['total_efectivo']).",Total Tarjeta,".csv_escape($meta['total_tarjeta']).",Com. Esp.,".csv_escape($meta['total_comision_especial']).",Total General,".csv_escape($meta['total_general'])."\r\n\r\n");
+    }
+
+    fputs($out, "Sección,Cobros\r\n");
+    fputcsv($out, ['ID Cobro','Fecha/Hora','Ejecutivo','Motivo','Tipo pago','Total','Efectivo','Tarjeta','Com. Esp.']);
+    foreach ($rowsCobros as $r) {
+        fputcsv($out, [
+            $r['id'],$r['fecha_cobro'],$r['ejecutivo'],$r['motivo'],$r['tipo_pago'],
+            $r['monto_total'],$r['monto_efectivo'],$r['monto_tarjeta'],$r['comision_especial']
+        ]);
+    }
+    fputs($out, "\r\n");
+
+    fputs($out, "Sección,Depósitos\r\n");
+    fputcsv($out, ['ID Depósito','Sucursal','Monto','Banco','Referencia','Estado','Fecha Depósito']);
+    foreach ($rowsDep as $d) {
+        fputcsv($out, [
+            $d['id'],$d['sucursal'],$d['monto_depositado'],$d['banco'],$d['referencia'],$d['estado'],$d['fecha_deposito']
+        ]);
+    }
+    fclose($out);
+    exit;
+}
+
+/* =======================
+   POST acciones
+   ======================= */
+$msg = '';
 $esAjax = !empty($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['id_deposito'], $_POST['accion'])) {
@@ -39,7 +267,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['id_deposito'], $_POST
     $accion     = $_POST['accion'];
 
     if ($accion === 'Validar') {
-        // Validar depósito (lógica original)
         $stmt = $conn->prepare("
             UPDATE depositos_sucursal
             SET estado='Validado', id_admin_valida=?, actualizado_en=NOW()
@@ -48,7 +275,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['id_deposito'], $_POST
         $stmt->bind_param("ii", $_SESSION['id_usuario'], $idDeposito);
         $stmt->execute();
 
-        // Cierra corte si ya se cubrió
+        // Cierre de corte si procede
         $sqlCorte = "
             SELECT ds.id_corte, cc.total_efectivo,
                    IFNULL(SUM(ds2.monto_depositado),0) AS suma_depositos
@@ -76,7 +303,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['id_deposito'], $_POST
         $msg = "<div class='alert alert-success mb-3'>✅ Depósito validado correctamente.</div>";
 
     } elseif ($accion === 'GuardarComentario') {
-        // Guardar/actualizar comentario del admin
         $comentario = trim($_POST['comentario_admin'] ?? '');
         $stmt = $conn->prepare("
             UPDATE depositos_sucursal
@@ -97,7 +323,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['id_deposito'], $_POST
 }
 
 /* =======================
-   2) Depósitos pendientes
+   Consultas principales
    ======================= */
 $sqlPendientes = "
     SELECT ds.id AS id_deposito,
@@ -119,17 +345,13 @@ $sqlPendientes = "
 ";
 $pendientes = $conn->query($sqlPendientes)->fetch_all(MYSQLI_ASSOC);
 
-/* =======================
-   3) Filtros para Historial
-   ======================= */
 $sucursales = $conn->query("SELECT id, nombre FROM sucursales ORDER BY nombre")->fetch_all(MYSQLI_ASSOC);
 
 $sucursal_id = isset($_GET['sucursal_id']) ? (int)$_GET['sucursal_id'] : 0;
 $desde       = trim($_GET['desde'] ?? '');
 $hasta       = trim($_GET['hasta'] ?? '');
-$semana      = trim($_GET['semana'] ?? ''); // YYYY-Www
+$semana      = trim($_GET['semana'] ?? '');
 
-// Semana ISO → lunes a domingo
 if ($semana && preg_match('/^(\d{4})-W(\d{2})$/', $semana, $m)) {
     $yr = (int)$m[1]; $wk = (int)$m[2];
     $dt = new DateTime();
@@ -139,9 +361,6 @@ if ($semana && preg_match('/^(\d{4})-W(\d{2})$/', $semana, $m)) {
     $hasta = $dt->format('Y-m-d');
 }
 
-/* =======================
-   3b) Historial con filtros
-   ======================= */
 $sqlHistorial = "
     SELECT ds.id AS id_deposito,
            s.nombre AS sucursal,
@@ -159,8 +378,7 @@ $sqlHistorial = "
     INNER JOIN sucursales s ON s.id = ds.id_sucursal
     WHERE 1=1
 ";
-$types = '';
-$params = [];
+$types = ''; $params = [];
 if ($sucursal_id > 0) { $sqlHistorial .= " AND s.id = ? "; $types .= 'i'; $params[] = $sucursal_id; }
 if ($desde !== '')    { $sqlHistorial .= " AND DATE(ds.fecha_deposito) >= ? "; $types .= 's'; $params[] = $desde; }
 if ($hasta !== '')    { $sqlHistorial .= " AND DATE(ds.fecha_deposito) <= ? "; $types .= 's'; $params[] = $hasta; }
@@ -171,30 +389,6 @@ $stmtH->execute();
 $historial = $stmtH->get_result()->fetch_all(MYSQLI_ASSOC);
 $stmtH->close();
 
-/* =======================
-   4) Saldos por sucursal
-   ======================= */
-$sqlSaldos = "
-    SELECT 
-        s.id,
-        s.nombre AS sucursal,
-        IFNULL(SUM(c.monto_efectivo),0) AS total_efectivo,
-        IFNULL((SELECT SUM(d.monto_depositado) FROM depositos_sucursal d WHERE d.id_sucursal = s.id AND d.estado='Validado'),0) AS total_depositado,
-        GREATEST(
-            IFNULL(SUM(c.monto_efectivo),0) - IFNULL((SELECT SUM(d.monto_depositado) FROM depositos_sucursal d WHERE d.id_sucursal = s.id AND d.estado='Validado'),0),
-        0) AS saldo_pendiente
-    FROM sucursales s
-    LEFT JOIN cobros c 
-        ON c.id_sucursal = s.id 
-       AND c.corte_generado = 1
-    GROUP BY s.id
-    ORDER BY saldo_pendiente DESC
-";
-$saldos = $conn->query($sqlSaldos)->fetch_all(MYSQLI_ASSOC);
-
-/* =======================
-   5) Cortes de caja
-   ======================= */
 $c_sucursal_id = isset($_GET['c_sucursal_id']) ? (int)$_GET['c_sucursal_id'] : 0;
 $c_desde       = trim($_GET['c_desde'] ?? '');
 $c_hasta       = trim($_GET['c_hasta'] ?? '');
@@ -216,29 +410,11 @@ $sqlCortes = "
   INNER JOIN sucursales s ON s.id = cc.id_sucursal
   WHERE 1=1
 ";
-
-$typesC = '';
-$paramsC = [];
-
-if ($c_sucursal_id > 0) { 
-    $sqlCortes .= " AND cc.id_sucursal = ? "; 
-    $typesC .= 'i'; 
-    $paramsC[] = $c_sucursal_id; 
-}
-if ($c_desde !== '') { 
-    $sqlCortes .= " AND cc.fecha_operacion >= ? "; 
-    $typesC .= 's'; 
-    $paramsC[] = $c_desde; 
-}
-if ($c_hasta !== '') { 
-    $sqlCortes .= " AND cc.fecha_operacion <= ? "; 
-    $typesC .= 's'; 
-    $paramsC[] = $c_hasta; 
-}
-
-// 🔹 aquí estaba el error: antes decía `$sqlCortes += ...`
+$typesC = ''; $paramsC = [];
+if ($c_sucursal_id > 0) { $sqlCortes .= " AND cc.id_sucursal = ? "; $typesC .= 'i'; $paramsC[] = $c_sucursal_id; }
+if ($c_desde !== '')    { $sqlCortes .= " AND cc.fecha_operacion >= ? "; $typesC .= 's'; $paramsC[] = $c_desde; }
+if ($c_hasta !== '')    { $sqlCortes .= " AND cc.fecha_operacion <= ? "; $typesC .= 's'; $paramsC[] = $c_hasta; }
 $sqlCortes .= " ORDER BY cc.fecha_operacion DESC, cc.id DESC";
-
 $stmtC = $conn->prepare($sqlCortes);
 if ($typesC) { $stmtC->bind_param($typesC, ...$paramsC); }
 $stmtC->execute();
@@ -290,6 +466,41 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
     @media (max-width: 992px){
       .comment-cell textarea{ min-width: 160px; }
     }
+    /* Overlay de carga */
+    .loading-backdrop{
+      position: fixed; inset:0; background: rgba(15,23,42,.35);
+      display:none; align-items:center; justify-content:center; z-index: 2000;
+    }
+    .loading-card{
+      background:#fff; border-radius: .75rem; padding: 1.25rem 1.5rem; box-shadow: 0 10px 24px rgba(15,23,42,.18);
+      display:flex; align-items:center; gap:.75rem;
+    }
+    .spinner{
+      width: 26px; height: 26px; border:3px solid #e5e7eb; border-top-color: var(--brand);
+      border-radius: 50%; animation: spin 1s linear infinite;
+    }
+    @keyframes spin{ to { transform: rotate(360deg);} }
+
+    /* Spinner en visor de comprobante */
+    #visorWrap{ position: relative; }
+    #visorSpinner{
+      position:absolute; inset:0; display:none; align-items:center; justify-content:center; background: rgba(255,255,255,.65);
+      z-index: 5;
+    }
+
+    /* === Modal Detalle de Corte: 80% viewport === */
+    #detalleCorteModal .modal-dialog { max-width: 80vw; }
+    #detalleCorteModal .modal-content { height: 80vh; }
+    #detalleCorteModal .modal-body { overflow: auto; }
+
+    /* Ocultar cualquier navbar que se cuele en el contenido inyectado del modal */
+    #detalleCorteModal .navbar,
+    #detalleCorteBody .navbar { display:none !important; height:0 !important; overflow:hidden !important; }
+
+    /* Cabeceras fijas dentro del modal */
+    #detalleCorteModal table thead th{
+      position: sticky; top: 0; background:#0f172a; color:#fff; z-index: 2;
+    }
   </style>
 </head>
 <body>
@@ -302,47 +513,6 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
       <div class="help-text">Administra <b>pendientes</b>, consulta <b>historial</b>, revisa <b>cortes</b> y <b>saldos</b>.</div>
     </div>
     <?php if(!empty($msg)) echo $msg; ?>
-  </div>
-
-  <!-- RESUMEN -->
-  <div class="row g-3 mb-4">
-    <div class="col-sm-6 col-lg-3">
-      <div class="card card-elev">
-        <div class="card-body stat">
-          <div class="ico"><i class="bi bi-hourglass-split"></i></div>
-          <div><div class="text-muted">Pendientes</div><div class="h4 mb-0"><?= (int)$pendCount ?></div></div>
-        </div>
-      </div>
-    </div>
-    <div class="col-sm-6 col-lg-3">
-      <div class="card card-elev">
-        <div class="card-body stat">
-          <div class="ico" style="background:#e6fff3"><i class="bi bi-cash-coin"></i></div>
-          <div><div class="text-muted">Monto pendiente</div><div class="h4 mb-0">$<?= number_format($pendMonto,2) ?></div></div>
-        </div>
-      </div>
-    </div>
-    <div class="col-sm-6 col-lg-3">
-      <div class="card card-elev">
-        <div class="card-body stat">
-          <div class="ico" style="background:#fff4e6"><i class="bi bi-receipt"></i></div>
-          <div><div class="text-muted">Cortes cargados</div><div class="h4 mb-0"><?= count($cortes) ?></div></div>
-        </div>
-      </div>
-    </div>
-    <div class="col-sm-6 col-lg-3">
-      <div class="card card-elev">
-        <div class="card-body stat">
-          <div class="ico" style="background:#f1e8ff"><i class="bi bi-building"></i></div>
-          <div>
-            <div class="text-muted">Sucursales con saldo</div>
-            <div class="h4 mb-0">
-              <?php $conSaldo=0; foreach($saldos as $s){ if((float)$s['saldo_pendiente']>0) $conSaldo++; } echo $conSaldo; ?>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
   </div>
 
   <!-- EXPORTAR POR DÍA -->
@@ -367,33 +537,33 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
     </div>
   </div>
 
-  <!-- PESTAÑAS -->
+  <!-- TABS -->
   <ul class="nav nav-tabs mb-3" id="depTabs" role="tablist">
     <li class="nav-item" role="presentation">
-      <button class="nav-link active" id="pend-tab" data-bs-toggle="tab" data-bs-target="#pend" type="button" role="tab" aria-controls="pend" aria-selected="true">
+      <button class="nav-link active" id="pend-tab" data-bs-toggle="tab" data-bs-target="#pend" type="button" role="tab">
         <i class="bi bi-inbox me-1"></i>Pendientes
       </button>
     </li>
     <li class="nav-item" role="presentation">
-      <button class="nav-link" id="hist-tab" data-bs-toggle="tab" data-bs-target="#hist" type="button" role="tab" aria-controls="hist" aria-selected="false">
+      <button class="nav-link" id="hist-tab" data-bs-toggle="tab" data-bs-target="#hist" type="button" role="tab">
         <i class="bi bi-clock-history me-1"></i>Historial
       </button>
     </li>
     <li class="nav-item" role="presentation">
-      <button class="nav-link" id="cortes-tab" data-bs-toggle="tab" data-bs-target="#cortes" type="button" role="tab" aria-controls="cortes" aria-selected="false">
+      <button class="nav-link" id="cortes-tab" data-bs-toggle="tab" data-bs-target="#cortes" type="button" role="tab">
         <i class="bi bi-clipboard-data me-1"></i>Cortes
       </button>
     </li>
     <li class="nav-item" role="presentation">
-      <button class="nav-link" id="saldos-tab" data-bs-toggle="tab" data-bs-target="#saldos" type="button" role="tab" aria-controls="saldos" aria-selected="false">
+      <button class="nav-link" id="saldos-tab" data-bs-toggle="tab" data-bs-target="#saldos" type="button" role="tab">
         <i class="bi bi-graph-up me-1"></i>Saldos
       </button>
     </li>
   </ul>
 
   <div class="tab-content" id="depTabsContent">
-    <!-- TAB: PENDIENTES -->
-    <div class="tab-pane fade show active" id="pend" role="tabpanel" aria-labelledby="pend-tab" tabindex="0">
+    <!-- PENDIENTES -->
+    <div class="tab-pane fade show active" id="pend" role="tabpanel" tabindex="0">
       <div class="card card-elev mb-4">
         <div class="card-header d-flex align-items-center justify-content-between">
           <div class="section-title mb-0"><i class="bi bi-inbox"></i> Depósitos pendientes de validación</div>
@@ -430,6 +600,9 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
                         <span class="text-primary"><?= htmlspecialchars($p['sucursal']) ?></span>
                         <span class="ms-2 text-muted">Fecha: <?= htmlspecialchars($p['fecha_corte']) ?></span>
                         <span class="ms-2 badge rounded-pill bg-light text-dark">Efectivo corte: $<?= number_format($p['total_efectivo'],2) ?></span>
+                        <button class="btn btn-sm btn-outline-primary ms-2 js-corte-modal" data-id="<?= (int)$p['id_corte'] ?>">
+                          <i class="bi bi-list-ul me-1"></i> Ver detalle
+                        </button>
                       </td>
                     </tr>
                   <?php endif; ?>
@@ -451,7 +624,6 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
                       <?php else: ?><span class="text-muted">—</span><?php endif; ?>
                     </td>
 
-                    <!-- Comentario admin (editable con AJAX) -->
                     <td class="comment-cell">
                       <form method="POST" class="d-flex gap-2 align-items-start js-comment-form">
                         <input type="hidden" name="id_deposito" value="<?= (int)$p['id_deposito'] ?>">
@@ -462,7 +634,6 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
                       </form>
                     </td>
 
-                    <!-- Acciones -->
                     <td class="text-center">
                       <form method="POST" class="d-inline" onsubmit="return confirmarValidacion(<?= (int)$p['id_deposito'] ?>, '<?= htmlspecialchars($p['sucursal'],ENT_QUOTES) ?>', '<?= number_format($p['monto_depositado'],2) ?>');">
                         <input type="hidden" name="id_deposito" value="<?= (int)$p['id_deposito'] ?>">
@@ -481,8 +652,8 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
       </div>
     </div>
 
-    <!-- TAB: HISTORIAL -->
-    <div class="tab-pane fade" id="hist" role="tabpanel" aria-labelledby="hist-tab" tabindex="0">
+    <!-- HISTORIAL -->
+    <div class="tab-pane fade" id="hist" role="tabpanel" tabindex="0">
       <div class="card card-elev mb-4">
         <div class="card-header">
           <div class="section-title mb-0"><i class="bi bi-clock-history"></i> Historial de depósitos</div>
@@ -503,15 +674,15 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
             </div>
             <div class="col-md-4 col-lg-3">
               <label class="form-label mb-0">Desde</label>
-              <input type="date" name="desde" class="form-control form-control-sm" value="<?= htmlspecialchars($desde) ?>" <?= $semana ? 'disabled' : '' ?>>
+              <input type="date" name="desde" class="form-control form-select-sm" value="<?= htmlspecialchars($desde) ?>" <?= $semana ? 'disabled' : '' ?>>
             </div>
             <div class="col-md-4 col-lg-3">
               <label class="form-label mb-0">Hasta</label>
-              <input type="date" name="hasta" class="form-control form-control-sm" value="<?= htmlspecialchars($hasta) ?>" <?= $semana ? 'disabled' : '' ?>>
+              <input type="date" name="hasta" class="form-control form-select-sm" value="<?= htmlspecialchars($hasta) ?>" <?= $semana ? 'disabled' : '' ?>>
             </div>
             <div class="col-md-4 col-lg-3">
               <label class="form-label mb-0">Semana (ISO)</label>
-              <input type="week" name="semana" class="form-control form-control-sm" value="<?= htmlspecialchars($semana) ?>">
+              <input type="week" name="semana" class="form-control form-select-sm" value="<?= htmlspecialchars($semana) ?>">
             </div>
             <div class="col-12 d-flex gap-2">
               <button class="btn btn-primary btn-sm"><i class="bi bi-funnel me-1"></i> Aplicar filtros</button>
@@ -534,17 +705,23 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
                   <th>Comprobante</th>
                   <th>Estado</th>
                   <th>Comentario admin</th>
+                  <th class="text-center">Acciones</th>
                 </tr>
               </thead>
               <tbody>
                 <?php if (!$historial): ?>
-                  <tr><td colspan="11" class="text-muted">Sin resultados con los filtros actuales.</td></tr>
+                  <tr><td colspan="12" class="text-muted">Sin resultados con los filtros actuales.</td></tr>
                 <?php endif; ?>
                 <?php foreach ($historial as $h): ?>
                   <tr class="<?= $h['estado']=='Validado'?'table-success':'' ?>">
                     <td>#<?= (int)$h['id_deposito'] ?></td>
                     <td><?= htmlspecialchars($h['sucursal']) ?></td>
-                    <td><?= (int)$h['id_corte'] ?></td>
+                    <td>
+                      <?= (int)$h['id_corte'] ?>
+                      <button class="btn btn-outline-primary btn-xs btn-sm ms-1 js-corte-modal" data-id="<?= (int)$h['id_corte'] ?>">
+                        <i class="bi bi-list-ul"></i>
+                      </button>
+                    </td>
                     <td><?= htmlspecialchars($h['fecha_corte']) ?></td>
                     <td><?= htmlspecialchars($h['fecha_deposito']) ?></td>
                     <td class="text-end">$<?= number_format($h['monto_depositado'],2) ?></td>
@@ -565,6 +742,18 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
                     <td style="max-width:360px;">
                       <div class="text-break"><?= nl2br(htmlspecialchars($h['comentario_admin'] ?? '')) ?></div>
                     </td>
+                    <td class="text-center">
+                      <?php if ($h['estado'] !== 'Validado'): ?>
+                        <form method="POST" class="d-inline" onsubmit="return confirmarValidacion(<?= (int)$h['id_deposito'] ?>, '<?= htmlspecialchars($h['sucursal'],ENT_QUOTES) ?>', '<?= number_format($h['monto_depositado'],2) ?>');">
+                          <input type="hidden" name="id_deposito" value="<?= (int)$h['id_deposito'] ?>">
+                          <button name="accion" value="Validar" class="btn btn-success btn-sm">
+                            <i class="bi bi-check2-circle me-1"></i> Validar
+                          </button>
+                        </form>
+                      <?php else: ?>
+                        <span class="text-muted">—</span>
+                      <?php endif; ?>
+                    </td>
                   </tr>
                 <?php endforeach; ?>
               </tbody>
@@ -575,12 +764,12 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
       </div>
     </div>
 
-    <!-- TAB: CORTES -->
-    <div class="tab-pane fade" id="cortes" role="tabpanel" aria-labelledby="cortes-tab" tabindex="0">
+    <!-- CORTES -->
+    <div class="tab-pane fade" id="cortes" role="tabpanel" tabindex="0">
       <div class="card card-elev mb-4">
         <div class="card-header">
           <div class="section-title mb-0"><i class="bi bi-clipboard-data"></i> Cortes de caja</div>
-          <div class="help-text">Filtra por sucursal y fechas; despliega cobros por corte.</div>
+          <div class="help-text">Filtra por sucursal y fechas; despliega cobros y depósitos por corte.</div>
         </div>
         <div class="card-body">
           <form class="row g-2 align-items-end mb-3" method="get">
@@ -597,11 +786,11 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
             </div>
             <div class="col-md-4 col-lg-3">
               <label class="form-label mb-0">Desde</label>
-              <input type="date" name="c_desde" class="form-control form-control-sm" value="<?= htmlspecialchars($c_desde) ?>">
+              <input type="date" name="c_desde" class="form-control form-select-sm" value="<?= htmlspecialchars($c_desde) ?>">
             </div>
             <div class="col-md-4 col-lg-3">
               <label class="form-label mb-0">Hasta</label>
-              <input type="date" name="c_hasta" class="form-control form-control-sm" value="<?= htmlspecialchars($c_hasta) ?>">
+              <input type="date" name="c_hasta" class="form-control form-select-sm" value="<?= htmlspecialchars($c_hasta) ?>">
             </div>
             <div class="col-12 d-flex gap-2">
               <button class="btn btn-primary btn-sm"><i class="bi bi-funnel me-1"></i> Filtrar cortes</button>
@@ -642,61 +831,9 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
                     <td><?= $c['depositado'] ? ('$'.number_format($c['monto_depositado'],2)) : '<span class="text-muted">No</span>' ?></td>
                     <td><span class="badge <?= $c['estado']==='Cerrado'?'bg-success':'bg-warning text-dark' ?>"><?= htmlspecialchars($c['estado']) ?></span></td>
                     <td>
-                      <button class="btn btn-sm btn-outline-primary" type="button" data-bs-toggle="collapse" data-bs-target="#det<?= $c['id'] ?>">
-                        <i class="bi bi-list-ul me-1"></i> Ver cobros (<?= (int)$c['num_cobros'] ?>)
+                      <button class="btn btn-sm btn-outline-primary js-corte-modal" data-id="<?= (int)$c['id'] ?>">
+                        <i class="bi bi-list-ul me-1"></i> Ver detalle
                       </button>
-                    </td>
-                  </tr>
-                  <tr class="collapse" id="det<?= $c['id'] ?>">
-                    <td colspan="11" class="bg-light">
-                      <?php
-                        $qc = $conn->prepare("
-                          SELECT cb.id, cb.motivo, cb.tipo_pago, cb.monto_total, cb.monto_efectivo, cb.monto_tarjeta,
-                                 cb.comision_especial, cb.fecha_cobro, u.nombre AS ejecutivo
-                          FROM cobros cb
-                          LEFT JOIN usuarios u ON u.id = cb.id_usuario
-                          WHERE cb.id_corte = ?
-                          ORDER BY cb.fecha_cobro ASC, cb.id ASC
-                        ");
-                        $qc->bind_param('i', $c['id']);
-                        $qc->execute();
-                        $rows = $qc->get_result()->fetch_all(MYSQLI_ASSOC);
-                        $qc->close();
-                      ?>
-                      <div class="table-responsive">
-                        <table class="table table-sm table-striped mb-0">
-                          <thead>
-                            <tr>
-                              <th>ID Cobro</th>
-                              <th>Fecha/Hora</th>
-                              <th>Ejecutivo</th>
-                              <th>Motivo</th>
-                              <th>Tipo pago</th>
-                              <th class="text-end">Total</th>
-                              <th class="text-end">Efectivo</th>
-                              <th class="text-end">Tarjeta</th>
-                              <th class="text-end">Com. Especial</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                          <?php foreach ($rows as $r): ?>
-                            <tr>
-                              <td><?= (int)$r['id'] ?></td>
-                              <td><?= htmlspecialchars($r['fecha_cobro']) ?></td>
-                              <td><?= htmlspecialchars($r['ejecutivo'] ?? 'N/D') ?></td>
-                              <td><?= htmlspecialchars($r['motivo']) ?></td>
-                              <td><?= htmlspecialchars($r['tipo_pago']) ?></td>
-                              <td class="text-end">$<?= number_format($r['monto_total'],2) ?></td>
-                              <td class="text-end">$<?= number_format($r['monto_efectivo'],2) ?></td>
-                              <td class="text-end">$<?= number_format($r['monto_tarjeta'],2) ?></td>
-                              <td class="text-end">$<?= number_format($r['comision_especial'],2) ?></td>
-                            </tr>
-                          <?php endforeach; if(!$rows): ?>
-                            <tr><td colspan="9" class="text-muted">Sin cobros ligados a este corte.</td></tr>
-                          <?php endif; ?>
-                          </tbody>
-                        </table>
-                      </div>
                     </td>
                   </tr>
                 <?php endforeach; endif; ?>
@@ -708,8 +845,8 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
       </div>
     </div>
 
-    <!-- TAB: SALDOS -->
-    <div class="tab-pane fade" id="saldos" role="tabpanel" aria-labelledby="saldos-tab" tabindex="0">
+    <!-- SALDOS -->
+    <div class="tab-pane fade" id="saldos" role="tabpanel" tabindex="0">
       <div class="card card-elev mb-4">
         <div class="card-header d-flex align-items-center justify-content-between">
           <div class="section-title mb-0"><i class="bi bi-graph-up"></i> Saldos por sucursal</div>
@@ -727,7 +864,25 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
                 </tr>
               </thead>
               <tbody>
-                <?php foreach($saldos as $s): ?>
+                <?php
+                  $sqlSaldos = "
+                    SELECT 
+                        s.id,
+                        s.nombre AS sucursal,
+                        IFNULL(SUM(c.monto_efectivo),0) AS total_efectivo,
+                        IFNULL((SELECT SUM(d.monto_depositado) FROM depositos_sucursal d WHERE d.id_sucursal = s.id AND d.estado='Validado'),0) AS total_depositado,
+                        GREATEST(
+                            IFNULL(SUM(c.monto_efectivo),0) - IFNULL((SELECT SUM(d.monto_depositado) FROM depositos_sucursal d WHERE d.id_sucursal = s.id AND d.estado='Validado'),0),
+                        0) AS saldo_pendiente
+                    FROM sucursales s
+                    LEFT JOIN cobros c 
+                        ON c.id_sucursal = s.id 
+                       AND c.corte_generado = 1
+                    GROUP BY s.id
+                    ORDER BY saldo_pendiente DESC
+                  ";
+                  $saldos = $conn->query($sqlSaldos)->fetch_all(MYSQLI_ASSOC);
+                  foreach($saldos as $s): ?>
                 <tr class="<?= $s['saldo_pendiente']>0?'table-warning':'' ?>">
                   <td><?= htmlspecialchars($s['sucursal']) ?></td>
                   <td class="text-end">$<?= number_format($s['total_efectivo'],2) ?></td>
@@ -748,7 +903,7 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
 
 </div>
 
-<!-- Modal visor (comprobante) -->
+<!-- Modal visor (comprobante) con spinner -->
 <div class="modal fade" id="visorModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-xl modal-dialog-centered">
     <div class="modal-content">
@@ -756,12 +911,31 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
         <h5 class="modal-title"><i class="bi bi-file-earmark-image me-1"></i> Comprobante de depósito</h5>
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
       </div>
-      <div class="modal-body p-0">
+      <div class="modal-body p-0" id="visorWrap">
+        <div id="visorSpinner"><div class="spinner"></div></div>
         <iframe id="visorFrame" src="" style="width:100%;height:80vh;border:0;"></iframe>
       </div>
       <div class="modal-footer">
         <a id="btnAbrirNueva" href="#" target="_blank" class="btn btn-outline-secondary">Abrir en nueva pestaña</a>
         <button type="button" class="btn btn-primary" data-bs-dismiss="modal">Listo</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Modal Detalle de Corte (80% viewport, sin navbar) -->
+<div class="modal fade" id="detalleCorteModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable"><!-- tamaño controlado por CSS -->
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-list-ul me-1"></i> Detalle del corte</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+      </div>
+      <div class="modal-body" id="detalleCorteBody">
+        <!-- contenido por AJAX -->
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline-secondary" data-bs-dismiss="modal">Cerrar</button>
       </div>
     </div>
   </div>
@@ -779,7 +953,15 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
   </div>
 </div>
 
-<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
+<!-- Overlay de carga general -->
+<div class="loading-backdrop" id="loadingBackdrop">
+  <div class="loading-card">
+    <div class="spinner"></div>
+    <div class="fw-semibold">Cargando detalle…</div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
   // Historial: toggle fechas cuando se selecciona semana
   const semanaInput = document.querySelector('input[name="semana"]');
@@ -796,13 +978,15 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
     });
   }
 
-  // Visor modal
+  // Visor modal con spinner
   const visorModal  = document.getElementById('visorModal');
   const visorFrame  = document.getElementById('visorFrame');
   const btnAbrir    = document.getElementById('btnAbrirNueva');
+  const visorSpinner= document.getElementById('visorSpinner');
   document.querySelectorAll('.js-ver').forEach(btn => {
     btn.addEventListener('click', () => {
       const src = btn.getAttribute('data-src');
+      if (visorSpinner) visorSpinner.style.display = 'flex';
       visorFrame.src = src;
       btnAbrir.href  = src;
     });
@@ -811,6 +995,12 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
     visorModal.addEventListener('hidden.bs.modal', () => {
       visorFrame.src = '';
       btnAbrir.href  = '#';
+      if (visorSpinner) visorSpinner.style.display = 'none';
+    });
+  }
+  if (visorFrame) {
+    visorFrame.addEventListener('load', () => {
+      if (visorSpinner) visorSpinner.style.display = 'none';
     });
   }
 
@@ -820,9 +1010,9 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
   }
   window.confirmarValidacion = confirmarValidacion;
 
-  // === Guardar comentario por AJAX con modal rápido ===
+  // Guardar comentario por AJAX (modal rápido)
   const okModalEl = document.getElementById('comentarioOkModal');
-  const okModal = okModalEl ? new bootstrap.Modal(okModalEl, {backdrop: 'static', keyboard: false}) : null;
+  const okModal = (window.bootstrap && okModalEl) ? new bootstrap.Modal(okModalEl, {backdrop: 'static', keyboard: false}) : null;
 
   document.querySelectorAll('.js-comment-form').forEach(form => {
     form.addEventListener('submit', async (ev) => {
@@ -837,17 +1027,10 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
           body: fd
         });
         let ok = false;
-        try {
-          const data = await resp.json();
-          ok = !!data.ok;
-        } catch (e) {
-          ok = resp.ok; // fallback
-        }
+        try { ok = !!(await resp.json()).ok; } catch(e) { ok = resp.ok; }
         if (ok) {
-          if (okModal) {
-            okModal.show();
-            setTimeout(() => okModal.hide(), 1200);
-          }
+          if (okModal) { okModal.show(); setTimeout(() => okModal.hide(), 1200); }
+          else { alert('Comentario guardado'); }
         } else {
           alert('No se pudo guardar el comentario. Intenta de nuevo.');
         }
@@ -856,6 +1039,49 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
         alert('Error de red al guardar comentario.');
       }
     }, {passive:false});
+  });
+
+  // Modal Detalle de Corte (AJAX) + Overlay Cargando
+  const detalleModalEl = document.getElementById('detalleCorteModal');
+  const detalleBody = document.getElementById('detalleCorteBody');
+  const loadingBackdrop = document.getElementById('loadingBackdrop');
+  const detalleModal = (window.bootstrap && detalleModalEl) ? new bootstrap.Modal(detalleModalEl) : null;
+
+  function showLoading(show){ if (loadingBackdrop) loadingBackdrop.style.display = show ? 'flex' : 'none'; }
+
+  async function cargarDetalleCorte(idCorte){
+    showLoading(true);
+    try{
+      const resp = await fetch(`?ajax=detalle_corte&id=${encodeURIComponent(idCorte)}`, {headers:{'X-Requested-With':'XMLHttpRequest'}});
+      const html = await resp.text();
+      // Por si el servidor devuelve accidentalmente un navbar, queda oculto por CSS
+      detalleBody.innerHTML = html;
+      if (detalleModal) detalleModal.show();
+
+      // Re-wire botones "Ver" del HTML inyectado
+      detalleBody.querySelectorAll('.js-ver').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const src = btn.getAttribute('data-src');
+          if (document.getElementById('visorSpinner')) document.getElementById('visorSpinner').style.display = 'flex';
+          document.getElementById('visorFrame').src = src;
+          document.getElementById('btnAbrirNueva').href  = src;
+          new bootstrap.Modal(document.getElementById('visorModal')).show();
+        });
+      });
+    }catch(err){
+      console.error(err);
+      detalleBody.innerHTML = '<div class="alert alert-danger">No se pudo cargar el detalle del corte.</div>';
+      if (detalleModal) detalleModal.show();
+    }finally{
+      showLoading(false);
+    }
+  }
+
+  document.querySelectorAll('.js-corte-modal').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const id = btn.getAttribute('data-id');
+      cargarDetalleCorte(id);
+    });
   });
 </script>
 </body>

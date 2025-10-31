@@ -84,6 +84,15 @@ $TOOLS = [
     'icon'       => 'bi-upc-scan', // 📤 Caja saliendo = retiro
     'roles'      => ['Logistica'],
   ],
+  [
+    'key'        => 'corregir_codigo',
+    'title'      => 'Corregir código',
+    'desc'       => 'Corrección de códigos de productos por imei.',
+    'href'       => 'productos_corregir_codigo.php',
+    'icon'       => 'bi-upc-scan', // 📤 Caja saliendo = retiro
+    'roles'      => ['Logistica', 'Admin'],
+  ],
+
 
   // ==== Ejemplos para futuro (déjalos como referencia) ====
   // [

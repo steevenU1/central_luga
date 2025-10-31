@@ -77,16 +77,20 @@ $color       = $_POST['color'] ?? [];             // [idx] => str
 $ram         = $_POST['ram'] ?? [];               // [idx] => str
 $capacidad   = $_POST['capacidad'] ?? [];         // [idx] => str
 $cantidad    = $_POST['cantidad'] ?? [];          // [idx] => int
-$precio      = $_POST['precio_unitario'] ?? [];   // [idx] => float
+$precio      = $_POST['precio_unitario'] ?? [];   // [idx] => float (sin IVA)
 $iva_pct     = $_POST['iva_porcentaje'] ?? [];    // [idx] => float
 $requiereMap = $_POST['requiere_imei'] ?? [];     // [idx] => "0" | "1"
 
+// Descuento por renglón (vienen de compras_nueva.php, modal DTO)
+$costo_dto     = $_POST['costo_dto']     ?? [];   // [idx] => float | '' (nullable)
+$costo_dto_iva = $_POST['costo_dto_iva'] ?? [];   // [idx] => float | '' (nullable)
+
 if (empty($id_modelo)) { die("Debes incluir al menos un renglón."); }
 
-// ---------- Otros cargos (NUEVO) ----------
-$extra_desc = $_POST['extra_desc'] ?? [];                    // [i] => str
-$extra_monto = $_POST['extra_monto'] ?? [];                  // [i] => float (base sin IVA)
-$extra_iva_porcentaje = $_POST['extra_iva_porcentaje'] ?? [];// [i] => float
+// ---------- Otros cargos (opcional) ----------
+$extra_desc            = $_POST['extra_desc']            ?? []; // [i] => str
+$extra_monto           = $_POST['extra_monto']           ?? []; // [i] => float (base sin IVA)
+$extra_iva_porcentaje  = $_POST['extra_iva_porcentaje']  ?? []; // [i] => float
 
 $subtotal = 0.0; $iva = 0.0; $total = 0.0;
 $rows = [];
@@ -105,15 +109,26 @@ foreach ($id_modelo as $idx => $idmRaw) {
   if (!$ok) continue;
 
   $col = substr(trim($color[$idx] ?? ''), 0, 40);
-  $ramv= substr(trim($ram[$idx] ?? ''),    0, 40);
+  $ramv= substr(trim($ram[$idx] ?? ''),    0, 50);
   $cap = substr(trim($capacidad[$idx] ?? ''), 0, 40);
   $qty = max(0, (int)($cantidad[$idx] ?? 0));
-  $pu  = max(0, (float)($precio[$idx] ?? 0));
-  $ivp = max(0, (float)($iva_pct[$idx] ?? 0));
-  $req = (int)($requiereMap[$idx] ?? 1); // default 1
+  $pu  = max(0, (float)($precio[$idx] ?? 0));     // sin IVA
+  $ivp = max(0, (float)($iva_pct[$idx] ?? 0));    // %
+  $req = (int)($requiereMap[$idx] ?? 1) === 1 ? 1 : 0;
 
-  if ($marca==='' || $modelo==='' || $col==='' || $cap==='' || $qty<=0) continue;
+  if ($marca==='' || $modelo==='' || $col==='' || $cap==='' || $qty<=0 || $pu<=0) continue;
 
+  // Normalización de DTOs (ambos son por unidad)
+  $dto    = isset($costo_dto[$idx])     && $costo_dto[$idx]     !== '' ? (float)$costo_dto[$idx]     : null;
+  $dtoIva = isset($costo_dto_iva[$idx]) && $costo_dto_iva[$idx] !== '' ? (float)$costo_dto_iva[$idx] : null;
+
+  if ($dto !== null && ($dtoIva === null || $dtoIva <= 0)) {
+    $dtoIva = round($dto * (1 + ($ivp/100)), 2);
+  } elseif (($dto === null || $dto <= 0) && $dtoIva !== null && $dtoIva > 0) {
+    $dto = round($dtoIva / (1 + ($ivp/100)), 2);
+  }
+
+  // Cálculos estándar del renglón (sin considerar DTO para totales contables)
   $rsub = $qty * $pu;
   $riva = $rsub * ($ivp/100.0);
   $rtot = $rsub + $riva;
@@ -121,18 +136,28 @@ foreach ($id_modelo as $idx => $idmRaw) {
   $subtotal += $rsub; $iva += $riva; $total += $rtot;
 
   $rows[] = [
-    'id_modelo'=>$idm, 'marca'=>$marca, 'modelo'=>$modelo,
-    'color'=>$col, 'ram'=>$ramv, 'capacidad'=>$cap,
-    'cantidad'=>$qty, 'precio_unitario'=>$pu, 'iva_porcentaje'=>$ivp,
-    'subtotal'=>$rsub, 'iva'=>$riva, 'total'=>$rtot,
-    'requiere_imei'=>$req,
-    'codigo_producto'=>$codigoCat
+    'id_modelo'       => $idm,
+    'marca'           => $marca,
+    'modelo'          => $modelo,
+    'color'           => $col,
+    'ram'             => $ramv,
+    'capacidad'       => $cap,
+    'cantidad'        => $qty,
+    'precio_unitario' => $pu,
+    'iva_porcentaje'  => $ivp,
+    'subtotal'        => $rsub,
+    'iva'             => $riva,
+    'total'           => $rtot,
+    'requiere_imei'   => $req,
+    'codigo_producto' => $codigoCat,
+    'costo_dto'       => $dto,       // pueden ir NULL
+    'costo_dto_iva'   => $dtoIva
   ];
 }
 
 if (empty($rows)) { die("Debes incluir al menos un renglón válido."); }
 
-// ====== Calcular extras y sumarlos a los totales (NUEVO) ======
+// ====== Calcular extras y sumarlos a los totales ======
 $extraSub = 0.0; $extraIVA = 0.0;
 if (!empty($extra_desc) && is_array($extra_desc)) {
   foreach ($extra_desc as $i => $descRaw) {
@@ -180,17 +205,23 @@ try {
   $id_compra = $stmtC->insert_id;
   $stmtC->close();
 
-  // Detalle (incluye RAM)
+  // Detalle (incluye RAM y los DTOs)
   $sqlD = "INSERT INTO compras_detalle
             (id_compra, id_modelo, marca, modelo, color, ram, capacidad, requiere_imei, descripcion,
-             cantidad, precio_unitario, iva_porcentaje, subtotal, iva, total)
+             cantidad, precio_unitario, iva_porcentaje, subtotal, iva, total, costo_dto, costo_dto_iva)
            VALUES
-            (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)";
+            (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)";
   $stmtD = $conn->prepare($sqlD);
   if (!$stmtD) { throw new Exception("Prepare detalle: ".$conn->error); }
 
-  $stmtD_types = 'iisssssiiddddd';
+  // Tipos: 2i + 5s + i + i + 7d  = 16 params
+  $stmtD_types = 'iisssssiiddddddd';
+
   foreach ($rows as $r) {
+    // Permite NULL en dto/dto_iva
+    $dto    = $r['costo_dto'];       // null|float
+    $dtoIva = $r['costo_dto_iva'];   // null|float
+
     $stmtD->bind_param(
       $stmtD_types,
       $id_compra,                  // i
@@ -206,14 +237,17 @@ try {
       $r['iva_porcentaje'],        // d
       $r['subtotal'],              // d
       $r['iva'],                   // d
-      $r['total']                  // d
+      $r['total'],                 // d
+      $dto,                        // d (nullable)
+      $dtoIva                      // d (nullable)
     );
     if (!$stmtD->execute()) { throw new Exception("Insert detalle: ".$stmtD->error); }
   }
   $stmtD->close();
 
-  // ====== Guardar otros cargos (NUEVO) ======
-  if (!empty($extra_desc) && is_array($extra_desc)) {
+  // ====== Guardar otros cargos (si existe la tabla) ======
+  if (!empty($extra_desc) && is_array($extra_desc) &&
+      $conn->query("SHOW TABLES LIKE 'compras_cargos'")->num_rows) {
     $sqlX = "INSERT INTO compras_cargos
               (id_compra, descripcion, monto, iva_porcentaje, iva_monto, total, afecta_costo)
              VALUES (?,?,?,?,?,?,?)";

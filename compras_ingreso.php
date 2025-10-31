@@ -5,11 +5,11 @@
 // financiera, fecha_lanzamiento, tipo_producto, gama, ciclo_vida, abc, operador, resurtible, subtipo)
 // y muestra datos del catálogo en la UI.
 //
-// Mejora UX (sept-2025):
+// UX:
 // - Validación en vivo de IMEI: formato, Luhn, duplicado en formulario y duplicado en BD (AJAX).
 // - Si hay error al guardar, se conserva lo capturado y se indica IMEI y fila exacta del problema.
-// - [Cambio solicitado] Quitar modificación manual de subtipo (se asigna automático).
-// - [Cambio solicitado] Precio sugerido: primero inventario actual del mismo código (Disponible / En tránsito).
+// - Subtipo se asigna automático (histórico por código > catálogo).
+// - Precio sugerido: inventario vigente por código > catálogo > último por modelo > costo+IVA.
 
 session_start();
 if (!isset($_SESSION['id_usuario'])) { header("Location: index.php"); exit(); }
@@ -98,13 +98,13 @@ function parse_money($s) {
 }
 
 /** Sugerir precio de lista
- *  Prioridad nueva:
+ *  Prioridad:
  *    1) Inventario actual del mismo código (Disponible/En tránsito).
  *    2) Catálogo de modelos.
  *    3) Último producto por marca+modelo+RAM+capacidad.
- *    4) costo+IVA.
+ *    4) costo+IVA (o costo_dto_iva si existe).
  */
-function sugerirPrecioLista(mysqli $conn, ?string $codigoProd, string $marca, string $modelo, string $ram, string $capacidad, float $costoConIva, ?float $precioCat) {
+function sugerirPrecioLista(mysqli $conn, ?string $codigoProd, string $marca, string $modelo, string $ram, string $capacidad, float $costoBaseIva, ?float $precioCat) {
   if ($codigoProd) {
     $qInv = $conn->prepare("
       SELECT p.precio_lista
@@ -135,7 +135,7 @@ function sugerirPrecioLista(mysqli $conn, ?string $codigoProd, string $marca, st
   if ($q2->fetch()) { $q2->close(); return ['precio'=>(float)$pl2, 'fuente'=>'último por modelo (RAM/cap)']; }
   $q2->close();
 
-  return ['precio'=>$costoConIva, 'fuente'=>'costo + IVA'];
+  return ['precio'=>$costoBaseIva, 'fuente'=>'costo + IVA'];
 }
 
 /** Último subtipo usado (auto) */
@@ -190,7 +190,7 @@ $enc = $conn->query("
   WHERE c.id=$compraId
 ")->fetch_assoc();
 
-// Detalle de compra
+// Detalle de compra (incluye posibles columnas costo_dto/costo_dto_iva)
 $det = $conn->query("
   SELECT d.*
        , (SELECT COUNT(*) FROM compras_detalle_ingresos x WHERE x.id_detalle=d.id) AS ingresadas
@@ -231,17 +231,19 @@ if (!empty($det['id_modelo'])) {
     $cat['abc'], $cat['operador'], $cat['resurtible'],
     $cat['subtipo']
   );
-  if ($stm->fetch()) {
-    $codigoCat = $cat['codigo_producto'];
-  }
+  if ($stm->fetch()) { $codigoCat = $cat['codigo_producto']; }
   $stm->close();
 }
 
-// Costos del detalle
+// Costos del detalle (base)
 $costo       = (float)$det['precio_unitario']; // sin IVA
 $ivaPct      = (float)$det['iva_porcentaje'];  // %
 $startupIva  = 1 + ($ivaPct/100);
 $costoConIva = round($costo * $startupIva, 2);
+
+// Descuentos del detalle (si existen)
+$costoDto    = array_key_exists('costo_dto', $det)      && $det['costo_dto']      !== null ? (float)$det['costo_dto']      : null; // sin IVA
+$costoDtoIva = array_key_exists('costo_dto_iva', $det)  && $det['costo_dto_iva']  !== null ? (float)$det['costo_dto_iva']  : null; // con IVA
 
 // Datos del detalle
 $marcaDet  = (string)$det['marca'];
@@ -250,9 +252,10 @@ $ramDet    = (string)($det['ram'] ?? '');
 $capDet    = (string)$det['capacidad'];
 $colorDet  = (string)$det['color'];
 
-// Sugerencias
+// Sugerencias (si hay descuento con IVA úsalo como base para sugerencia)
 $precioCat = isset($cat['precio_lista']) && $cat['precio_lista'] !== null ? (float)$cat['precio_lista'] : null;
-$sugerencia = sugerirPrecioLista($conn, $codigoCat, $marcaDet, $modeloDet, $ramDet, $capDet, $costoConIva, $precioCat);
+$baseIvaParaSugerencia = ($costoDtoIva !== null && $costoDtoIva > 0) ? $costoDtoIva : $costoConIva;
+$sugerencia = sugerirPrecioLista($conn, $codigoCat, $marcaDet, $modeloDet, $ramDet, $capDet, $baseIvaParaSugerencia, $precioCat);
 $precioSugerido = $sugerencia['precio'];
 $fuenteSugerido = $sugerencia['fuente'];
 
@@ -281,8 +284,6 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
     $errorMsg = "Precio de lista inválido. Usa números, ejemplo: 3999.00";
   }
 
-  // Subtipo NO editable: usamos el calculado (último/catálogo), ya está en $subtipoForm.
-
   // Normalizamos arrays y guardamos para repoblar si hay error
   for ($i=0; $i<$n; $i++) {
     $oldImei1[$i] = preg_replace('/\D+/', '', (string)($_POST['imei1'][$i] ?? ''));
@@ -305,15 +306,11 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
       }
     }
     foreach ($seen as $val => $rows) {
-      if (count($rows) > 1) {
-        $dupsForm[$val] = $rows;
-      }
+      if (count($rows) > 1) { $dupsForm[$val] = $rows; }
     }
     if (!empty($dupsForm)) {
       $msg = "Se detectaron IMEI duplicados en el formulario:\n";
-      foreach ($dupsForm as $val => $rows) {
-        $msg .= " - $val repetido en filas ".implode(', ', $rows)."\n";
-      }
+      foreach ($dupsForm as $val => $rows) { $msg .= " - $val repetido en filas ".implode(', ', $rows)."\n"; }
       $errorMsg = nl2br(esc($msg));
     }
   }
@@ -326,20 +323,15 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
         $val = preg_replace('/\D+/', '', $raw);
         if ($val === '') continue; // opcional para IMEI2 o no requerido
         if (!preg_match('/^\d{15}$/', $val)) {
-          $errorMsg = $spec['label']." inválido en la fila ".($i+1)." (deben ser 15 dígitos).";
-          break;
+          $errorMsg = $spec['label']." inválido en la fila ".($i+1)." (deben ser 15 dígitos)."; break;
         }
         if (!luhn_ok($val)) {
-          $errorMsg = $spec['label']." inválido (Luhn) en la fila ".($i+1).".";
-          break;
+          $errorMsg = $spec['label']." inválido (Luhn) en la fila ".($i+1)."."; break;
         }
         $st = $conn->prepare("SELECT COUNT(*) c FROM productos WHERE imei1=? OR imei2=?");
         $st->bind_param("ss", $val, $val);
         $st->execute(); $st->bind_result($cdup); $st->fetch(); $st->close();
-        if ($cdup > 0) {
-          $errorMsg = $spec['label']." duplicado en BD en la fila ".($i+1).": $val";
-          break;
-        }
+        if ($cdup > 0) { $errorMsg = $spec['label']." duplicado en BD en la fila ".($i+1).": $val"; break; }
       }
     }
   }
@@ -402,22 +394,30 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
         $operador         = $cat['operador'] ?? null;
         $resurtible       = $cat['resurtible'] ?? null;
 
-        // Crear producto (una unidad)
-        $stmtP = $conn->prepare("
+        // ===== INSERT en productos (con costo_dto y costo_dto_iva) =====
+        $sql = "
           INSERT INTO productos (
             codigo_producto, marca, modelo, color, ram, capacidad,
-            imei1, imei2, costo, costo_con_iva, proveedor, precio_lista,
+            imei1, imei2, costo, costo_con_iva, costo_dto, costo_dto_iva,
+            proveedor, precio_lista,
             descripcion, nombre_comercial, compania, financiera, fecha_lanzamiento,
             tipo_producto, subtipo, gama, ciclo_vida, abc, operador, resurtible
-          ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        ");
+          )
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ";
+        $stmtP = $conn->prepare($sql);
+        if (!$stmtP) { throw new Exception('Prepare productos (con dto): '.$conn->error); }
+
         $marca = $marcaDet; $modelo = $modeloDet; $color = $colorDet; $ram = $ramDet; $cap = $capDet;
         $prov  = ($proveedorCompra !== '') ? $proveedorCompra : null;
 
+        // Tipos: 8 s + 4 d + 1 s + 1 d + 12 s = 26
         $stmtP->bind_param(
-          "ssssssssddsdssssssssssss",
+          "ssssssssddddsdssssssssssss",
           $codigoCat, $marca, $modelo, $color, $ram, $cap,
-          $imei1, $imei2, $costo, $costoConIva, $prov, $precioListaCapturado,
+          $imei1, $imei2,
+          $costo, $costoConIva, $costoDto, $costoDtoIva,
+          $prov, $precioListaCapturado,
           $descripcion, $nombreComercial, $compania, $financiera, $fechaLanzamiento,
           $tipoProducto, $subtipoForm, $gama, $cicloVida, $abc, $operador, $resurtible
         );
@@ -529,7 +529,6 @@ include 'navbar.php';
           <input type="hidden" name="n" value="<?= $pendientes ?>">
 
           <div class="row g-3 mb-3">
-            <!-- Subtipo eliminado del formulario (solo informativo) -->
             <div class="col-md-4">
               <label class="form-label">Subtipo (asignación automática)</label>
               <input type="text" class="form-control" value="<?= esc($subtipoForm ?? '—') ?>" disabled>
@@ -538,7 +537,6 @@ include 'navbar.php';
               </small>
             </div>
 
-            <!-- Precio de lista por modelo -->
             <div class="col-md-4">
               <label class="form-label">Precio de lista (por modelo)</label>
               <input
@@ -637,11 +635,7 @@ include 'navbar.php';
   form.addEventListener('submit', (e)=>{
     if (form.dataset.busy === '1') { e.preventDefault(); e.stopPropagation(); return; }
     const anyDup = form.querySelector('.dup-bad');
-    if (anyDup) {
-      e.preventDefault();
-      alert('Hay IMEI duplicados. Corrige los campos marcados en rojo.');
-      return;
-    }
+    if (anyDup) { e.preventDefault(); alert('Hay IMEI duplicados. Corrige los campos marcados en rojo.'); return; }
     form.dataset.busy = '1';
     if (btnSubmit){ btnSubmit.disabled = true; btnSubmit.textContent = 'Ingresando...'; }
   }, { capture: true });
@@ -664,9 +658,7 @@ include 'navbar.php';
   }
 
   // Debounce sencillo
-  function debounce(fn, ms) {
-    let t; return (...args)=>{ clearTimeout(t); t = setTimeout(()=>fn(...args), ms); };
-  }
+  function debounce(fn, ms) { let t; return (...args)=>{ clearTimeout(t); t = setTimeout(()=>fn(...args), ms); }; }
 
   // Pinta/limpia estado de duplicado
   function markDup(el, msg, isBad=true) {
@@ -694,9 +686,7 @@ include 'navbar.php';
       }
     });
     inputs.forEach(el=> markDup(el, '', false));
-    map.forEach((arr, imei)=>{
-      if (arr.length > 1) arr.forEach(el=> markDup(el, `Duplicado en formulario: ${imei}`, true));
-    });
+    map.forEach((arr, imei)=>{ if (arr.length > 1) arr.forEach(el=> markDup(el, `Duplicado en formulario: ${imei}`, true)); });
   }
 
   const checkRemote = debounce(async (el)=>{
@@ -708,16 +698,13 @@ include 'navbar.php';
       const r = await fetch(url, { headers: { 'Accept': 'application/json' }});
       const data = await r.json();
       el.dataset.loading = '';
-
       if (data && data.ok) {
         if (data.exists) markDup(el, `Duplicado en BD (${data.field}): ${v}`, true);
         else markDup(el, '', false);
       } else {
         el.classList.add('is-invalid');
       }
-    } catch(e) {
-      el.dataset.loading = '';
-    }
+    } catch(e) { el.dataset.loading = ''; }
   }, 220);
 
   const inputs = Array.from(document.querySelectorAll('.imei-input'));
@@ -725,34 +712,16 @@ include 'navbar.php';
     el.addEventListener('input', ()=>{
       const v = normalize15(el);
       markDup(el, '', false);
-
       if (v.length === 15) {
-        if (!imeiLuhnOk(v)) {
-          el.classList.add('is-invalid');
-          el.setCustomValidity('IMEI inválido (Luhn).');
-        } else {
-          el.classList.remove('is-invalid');
-          el.setCustomValidity('');
-          checkLocalDuplicates();
-          checkRemote(el);
-        }
-      } else {
-        el.classList.remove('is-invalid');
-        el.setCustomValidity('');
-        checkLocalDuplicates();
-      }
+        if (!imeiLuhnOk(v)) { el.classList.add('is-invalid'); el.setCustomValidity('IMEI inválido (Luhn).'); }
+        else { el.classList.remove('is-invalid'); el.setCustomValidity(''); checkLocalDuplicates(); checkRemote(el); }
+      } else { el.classList.remove('is-invalid'); el.setCustomValidity(''); checkLocalDuplicates(); }
     });
-
     el.addEventListener('blur', ()=>{
       const v = (el.value||'').replace(/\D+/g,'');
       if (v && v.length === 15) {
-        if (!imeiLuhnOk(v)) {
-          el.classList.add('is-invalid');
-          el.setCustomValidity('IMEI inválido (Luhn).');
-        } else {
-          checkLocalDuplicates();
-          checkRemote(el);
-        }
+        if (!imeiLuhnOk(v)) { el.classList.add('is-invalid'); el.setCustomValidity('IMEI inválido (Luhn).'); }
+        else { checkLocalDuplicates(); checkRemote(el); }
       }
     });
   });
@@ -764,7 +733,6 @@ include 'navbar.php';
     if (!t.matches('.imei-input, input[name="precio_lista"]')) return;
     if (e.ctrlKey || e.metaKey) { return; }
     e.preventDefault();
-
     const idx = parseInt(t.dataset.index || '0', 10);
     if (t.classList.contains('imei1')) {
       const next = document.getElementById('imei2-' + idx);

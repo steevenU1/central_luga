@@ -1,7 +1,6 @@
 <?php
-// compras_nueva.php — Central 2.0
-// Captura de factura de compra por renglones de MODELO (catálogo formal) + Otros cargos
-
+// compras_nueva.php — Central 2.0 (con Descuento por renglón)
+// Captura de factura de compra por renglones de MODELO + Otros cargos
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 if (!isset($_SESSION['id_usuario'])) { header("Location: index.php"); exit(); }
 
@@ -13,9 +12,7 @@ $ID_USUARIO  = (int)($_SESSION['id_usuario'] ?? 0);
 $ID_SUCURSAL = (int)($_SESSION['id_sucursal'] ?? 0);
 
 // Permisos
-if (!in_array($ROL, ['Admin','Logistica'])) {
-  header("Location: 403.php"); exit();
-}
+if (!in_array($ROL, ['Admin','Logistica'])) { header("Location: 403.php"); exit(); }
 
 // Helper seguro
 if (!function_exists('h')) { function h($s){ return htmlspecialchars($s ?? '', ENT_QUOTES, 'UTF-8'); } }
@@ -30,7 +27,7 @@ $sucursales = [];
 $res2 = $conn->query("SELECT id, nombre FROM sucursales ORDER BY nombre");
 while ($row = $res2->fetch_assoc()) { $sucursales[] = $row; }
 
-// Catálogo de modelos
+// Catálogo de modelos (solo activos)
 $modelos = [];
 $res3 = $conn->query("
   SELECT id, marca, modelo, codigo_producto, color, ram, capacidad
@@ -74,6 +71,7 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
     #tablaDetalle .col-iva{ width: 120px; }
     #tablaDetalle .col-tot{ width: 140px; }
     #tablaDetalle .col-req{ width: 120px; text-align:center; }
+    #tablaDetalle .col-dto{ width: 110px; text-align:center; }
     #tablaDetalle .col-acc{ width: 64px; }
     #tablaDetalle .form-control{ padding:.35rem .55rem; }
     #tablaDetalle input.num{ text-align:right; }
@@ -90,6 +88,7 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
     .summary .total{ font-size:1.35rem; font-weight:800; }
 
     .hint{ font-size:.8rem; color:#6b7280; }
+    .badge-dto{ font-size:.65rem; }
   </style>
 </head>
 <body>
@@ -203,6 +202,7 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
                     <th class="col-iva">IVA</th>
                     <th class="col-tot">Total</th>
                     <th class="col-req">Requiere IMEI</th>
+                    <th class="col-dto">Desc.</th>
                     <th class="col-acc"></th>
                   </tr>
                 </thead>
@@ -211,7 +211,8 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
             </div>
 
             <div class="hint mt-2">
-              Tip: marca/desmarca “Requiere IMEI” si el modelo lo amerita (p. ej. accesorios).
+              Tip: marca/desmarca “Requiere IMEI” si el modelo lo amerita (p. ej. accesorios). Activa “Desc.” para capturar
+              <em>Costo Descuento</em> y <em>Costo Descuento c/IVA</em> del renglón.
             </div>
           </div>
         </div>
@@ -375,7 +376,37 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
   </div>
 </div>
 
+<!-- Modal de Descuento por renglón -->
+<div class="modal fade" id="modalDto" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Descuento de renglón</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-2 small text-muted" id="mdDtoInfo">Renglón: —</div>
+        <div class="row g-3">
+          <div class="col-6">
+            <label class="form-label">Costo Descuento</label>
+            <input type="number" step="0.01" min="0" id="mdDtoCosto" class="form-control" placeholder="ej. 1000.00">
+          </div>
+          <div class="col-6">
+            <label class="form-label">Costo Descuento c/IVA</label>
+            <input type="number" step="0.01" min="0" id="mdDtoCostoIva" class="form-control" placeholder="ej. 1160.00">
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal" id="btnCancelarDto">Cancelar</button>
+        <button type="button" class="btn btn-primary" id="btnGuardarDto">Guardar descuento</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- JS -->
+<!-- Si no cargas Bootstrap JS en el navbar, descomenta esta línea: -->
 <!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" crossorigin="anonymous"></script> -->
 
 <script>
@@ -412,6 +443,15 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
   const pagoFechaEl = document.getElementById('pagoFecha');
   const pagoNotaEl  = document.getElementById('pagoNota');
 
+  // Modal Descuento
+  const modalDto = new bootstrap.Modal(document.getElementById('modalDto'));
+  const mdDtoInfo = document.getElementById('mdDtoInfo');
+  const mdDtoCosto = document.getElementById('mdDtoCosto');
+  const mdDtoCostoIva = document.getElementById('mdDtoCostoIva');
+  const btnGuardarDto = document.getElementById('btnGuardarDto');
+  const btnCancelarDto = document.getElementById('btnCancelarDto');
+
+  let currentDtoRow = null; // <tr> activo para descuento
   let rowIdx = 0;
   let cargoIdx = 0;
   let forceSubmit = false; // evita loop al reenviar
@@ -456,29 +496,49 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
     document.getElementById('inpTotal').value    = tot.toFixed(2);
   }
 
-  // Mapas para localizar por código o etiqueta
-  function etiqueta(m){ return (m.marca + ' ' + m.modelo + (m.codigo_producto ? (' · ' + m.codigo_producto) : '')).trim(); }
-  const byCodigo = {}; const byEtiqueta = {};
+  /* ===========================
+     Mapeo robusto de modelos
+     =========================== */
+  function norm(s){
+    return String(s||'')
+      .trim()
+      .toUpperCase()
+      .replace(/\s+/g,'')
+      .replace(/[-_.]/g,'');
+  }
+  function etiqueta(m){
+    return (m.marca + ' ' + m.modelo + (m.codigo_producto ? (' · ' + m.codigo_producto) : '')).trim();
+  }
+
+  const byCodigo = {};
+  const byCodigoNorm = {};
+  const byEtiqueta = {};
+  const byEtiquetaNorm = {};
+
   modelos.forEach(m => {
-    if (m.codigo_producto) byCodigo[m.codigo_producto] = m;
-    byEtiqueta[etiqueta(m).toLowerCase()] = m;
+    if (m.codigo_producto) {
+      byCodigo[m.codigo_producto] = m;
+      byCodigoNorm[norm(m.codigo_producto)] = m;
+    }
+    const et = etiqueta(m);
+    byEtiqueta[et.toLowerCase()] = m;
+    byEtiquetaNorm[norm(et)] = m;
   });
 
   function aplicarModeloEnRenglon(m, tr){
     tr.querySelector('.mm-id').value     = m.id;
-    tr.querySelector('.color').value     = m.color || '';
-    tr.querySelector('.ram').value       = m.ram || '';
-    tr.querySelector('.capacidad').value = m.capacidad || '';
+    tr.querySelector('.color').value     = m.color || '—';
+    tr.querySelector('.ram').value       = m.ram || '—';
+    tr.querySelector('.capacidad').value = m.capacidad || '—';
     const mm = tr.querySelector('.mm-buscar');
     mm.classList.remove('is-invalid');
     mm.setCustomValidity('');
   }
 
-  // Validación de PU: deja capturar 0 pero NO deja enviar si queda en 0 o negativo.
+  // Validación de PU
   function wirePrecioUnitarioValidation(inputPU){
-    inputPU.min = '0';        // permite 0 mientras capturas
+    inputPU.min = '0';
     inputPU.step = '0.01';
-
     const validatePU = () => {
       const v = parseFloat(inputPU.value);
       if (!isFinite(v) || v <= 0) {
@@ -489,8 +549,6 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
         inputPU.setCustomValidity('');
       }
     };
-
-    // Validamos cuando terminas de editar
     inputPU.addEventListener('blur', validatePU);
     inputPU.addEventListener('change', validatePU);
   }
@@ -520,7 +578,18 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
       <td class="col-sub rsub">$0.00</td>
       <td class="col-iva riva">$0.00</td>
       <td class="col-tot rtot">$0.00</td>
-      <td class="col-req"><input type="hidden" name="requiere_imei[${idx}]" value="0"><input type="checkbox" class="form-check-input reqi" name="requiere_imei[${idx}]" value="1" checked></td>
+      <td class="col-req">
+        <input type="hidden" name="requiere_imei[${idx}]" value="0">
+        <input type="checkbox" class="form-check-input reqi" name="requiere_imei[${idx}]" value="1" checked>
+      </td>
+      <td class="col-dto">
+        <div class="d-flex align-items-center justify-content-center gap-2">
+          <input type="checkbox" class="form-check-input chk-dto" title="Aplicar descuento">
+          <span class="badge bg-warning text-dark badge-dto d-none">DTO</span>
+        </div>
+        <input type="hidden" name="costo_dto[${idx}]" class="hdto">
+        <input type="hidden" name="costo_dto_iva[${idx}]" class="hdtoiva">
+      </td>
       <td class="col-acc"><button type="button" class="btn btn-sm btn-outline-danger rounded-pill btnQuitar" title="Quitar">&times;</button></td>
     `;
     tbody.appendChild(tr);
@@ -529,31 +598,93 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
     tr.querySelector('.btnQuitar').addEventListener('click', () => { tr.remove(); calcTotales(); });
 
     const input  = tr.querySelector('.mm-buscar');
-    const hidden = tr.querySelector('.mm-id');
     const pu     = tr.querySelector('.pu');
+    const ivpEl  = tr.querySelector('.ivp');
+    const chkDto = tr.querySelector('.chk-dto');
+    const badge  = tr.querySelector('.badge-dto');
+    const hdto   = tr.querySelector('.hdto');
+    const hdtoiva= tr.querySelector('.hdtoiva');
 
-    // candado PU (pero dejando default 0)
     wirePrecioUnitarioValidation(pu);
 
     function handleTryApply() {
       const raw = (input.value || '').trim();
-      const m = byCodigo[raw] || byEtiqueta[raw.toLowerCase()];
-      if (m) {
-        aplicarModeloEnRenglon(m, tr);
-      } else {
-        hidden.value = '';
-        input.classList.remove('is-invalid');
-        input.setCustomValidity('');
-      }
+      const rawNorm = norm(raw);
+      let m = null;
+      if (!m) m = byCodigo[raw];
+      if (!m) m = byCodigoNorm[rawNorm];
+      if (!m) m = byEtiqueta[raw.toLowerCase()];
+      if (!m) m = byEtiquetaNorm[rawNorm];
+      if (m) aplicarModeloEnRenglon(m, tr);
     }
 
-    // Robustez para datalist/pegado + guardar
     input.addEventListener('input', handleTryApply);
     input.addEventListener('change', handleTryApply);
     input.addEventListener('blur', handleTryApply);
 
+    // ===== Descuento por renglón =====
+    chkDto.addEventListener('change', () => {
+      if (chkDto.checked) {
+        currentDtoRow = tr;
+        // Prefills: costo_dto = PU ; costo_dto_iva = PU * (1+IVA%)
+        const puVal  = parseFloat(pu.value || '0') || 0;
+        const ivpVal = parseFloat(ivpEl.value || '0') || 0;
+        const preDto = puVal.toFixed(2);
+        const preDtoIva = (puVal * (1 + ivpVal/100)).toFixed(2);
+
+        mdDtoCosto.value    = (hdto.value && !isNaN(parseFloat(hdto.value)))    ? parseFloat(hdto.value).toFixed(2)    : preDto;
+        mdDtoCostoIva.value = (hdtoiva.value && !isNaN(parseFloat(hdtoiva.value))) ? parseFloat(hdtoiva.value).toFixed(2) : preDtoIva;
+
+        const codTxt = input.value || '';
+        mdDtoInfo.textContent = 'Renglón: ' + (codTxt || '—');
+
+        // Mostrar modal y asegurar listeners activos
+        modalDto.show();
+        syncDtoIva(); // primer cálculo por si cambiaste IVA o base antes
+
+      } else {
+        // limpiar
+        hdto.value = '';
+        hdtoiva.value = '';
+        badge.classList.add('d-none');
+      }
+    });
+
+    // Si cambia el IVA del renglón mientras el modal está abierto sobre este tr, recalculamos c/IVA
+    const ivpReactive = () => {
+      const modalShown = document.getElementById('modalDto').classList.contains('show');
+      if (modalShown && currentDtoRow === tr) { syncDtoIva(); }
+    };
+    ivpEl.addEventListener('input', ivpReactive);
+    ivpEl.addEventListener('change', ivpReactive);
+
     calcTotales();
   }
+
+  // Guardar valores del modal de descuento
+  btnGuardarDto.addEventListener('click', () => {
+    const v1 = parseFloat(mdDtoCosto.value || '0');
+    const v2 = parseFloat(mdDtoCostoIva.value || '0');
+    if (!isFinite(v1) || v1 <= 0) { alert('Costo Descuento inválido'); return; }
+    if (!isFinite(v2) || v2 <= 0) { alert('Costo Descuento c/IVA inválido'); return; }
+    if (!currentDtoRow) return;
+
+    currentDtoRow.querySelector('.hdto').value = v1.toFixed(2);
+    currentDtoRow.querySelector('.hdtoiva').value = v2.toFixed(2);
+    currentDtoRow.querySelector('.badge-dto').classList.remove('d-none');
+    modalDto.hide();
+  });
+
+  // Si cancelan el modal, desactiva el check (para evitar “Desc.” sin valores)
+  document.getElementById('modalDto').addEventListener('hidden.bs.modal', () => {
+    if (!currentDtoRow) return;
+    const hdto   = currentDtoRow.querySelector('.hdto').value;
+    const hdtoiva= currentDtoRow.querySelector('.hdtoiva').value;
+    const chk    = currentDtoRow.querySelector('.chk-dto');
+    const badge  = currentDtoRow.querySelector('.badge-dto');
+    if (!hdto || !hdtoiva) { chk.checked = false; badge.classList.add('d-none'); }
+    currentDtoRow = null;
+  });
 
   function agregarCargo(){
     const idx = cargoIdx++;
@@ -568,7 +699,7 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
         <input type="number" class="form-control num importe" name="extra_monto[${idx}]"
                step="0.01" min="0" value="0" required>
       </td>
-        <td>
+      <td>
         <input type="number" class="form-control num ivp" name="extra_iva_porcentaje[${idx}]"
                step="0.01" min="0" value="${ivaDefault.value || 16}">
       </td>
@@ -604,13 +735,13 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
       e.preventDefault(); alert('Agrega al menos un renglón'); return;
     }
 
-    // Pre-aplicar por seguridad (por si no hubo blur/change)
+    // Pre-aplicar por seguridad
     document.querySelectorAll('#tablaDetalle tbody tr.renglon .mm-buscar')
       .forEach(inp => {
         const tr = inp.closest('tr');
-        const hidden = tr.querySelector('.mm-id');
         const raw = (inp.value || '').trim();
-        const m = byCodigo[raw] || byEtiqueta[raw.toLowerCase()];
+        const rawNorm = norm(raw);
+        let m = byCodigo[raw] || byCodigoNorm[rawNorm] || byEtiqueta[raw.toLowerCase()] || byEtiquetaNorm[rawNorm];
         if (m) aplicarModeloEnRenglon(m, tr);
       });
 
@@ -629,6 +760,14 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
         ok = false; msg = 'Hay precios unitarios en 0 o inválidos.';
         puEl.classList.add('is-invalid'); puEl.setCustomValidity('El precio unitario debe ser mayor a 0.');
       }
+
+      // Si el check de descuento está activo, asegúrate de que existan valores
+      const chk = tr.querySelector('.chk-dto');
+      if (chk && chk.checked) {
+        const v1 = tr.querySelector('.hdto').value;
+        const v2 = tr.querySelector('.hdtoiva').value;
+        if (!v1 || !v2) { ok = false; msg = 'Hay renglones con “Desc.” activo sin capturar costos de descuento.'; }
+      }
     });
 
     if (!ok) { e.preventDefault(); alert(msg); return; }
@@ -645,10 +784,10 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
       const trHtml = `
         <tr>
           <td>${idx+1}</td>
-          <td>${codTxt ? htmlesc(codTxt) : '-'}</td>
-          <td>${color ? htmlesc(color) : '-'}</td>
-          <td>${ram ? htmlesc(ram) : '-'}</td>
-          <td>${cap ? htmlesc(cap) : '-'}</td>
+          <td>${htmlesc(codTxt || '-')}</td>
+          <td>${htmlesc(color || '-')}</td>
+          <td>${htmlesc(ram || '-')}</td>
+          <td>${htmlesc(cap || '-')}</td>
           <td class="text-end">${qty}</td>
           <td class="text-end">$${formato(pu)}</td>
         </tr>
@@ -754,6 +893,21 @@ while ($row = $res3->fetch_assoc()) { $modelos[] = $row; }
       .replaceAll('"','&quot;')
       .replaceAll("'",'&#039;');
   }
+
+  // === Dinámico: Costo Descuento c/IVA = base * (1 + IVA% del renglón) ===
+  function syncDtoIva() {
+    const base = parseFloat(mdDtoCosto.value || '0');
+    if (!isFinite(base) || base <= 0) { mdDtoCostoIva.value = ''; return; }
+    // Toma el IVA del renglón actualmente seleccionado en el modal
+    const ivp = currentDtoRow
+      ? (parseFloat(currentDtoRow.querySelector('.ivp')?.value || '16') || 16)
+      : 16;
+    mdDtoCostoIva.value = (base * (1 + ivp/100)).toFixed(2);
+  }
+  // Recalcular cuando el usuario edite el costo de descuento
+  mdDtoCosto.addEventListener('input',  syncDtoIva);
+  mdDtoCosto.addEventListener('change', syncDtoIva);
+
 </script>
 </body>
 </html>
