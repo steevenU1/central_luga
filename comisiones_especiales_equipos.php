@@ -1,7 +1,7 @@
 <?php
 // comisiones_especiales.php
 session_start();
-if (!isset($_SESSION['id_usuario']) || !in_array($_SESSION['rol'], ['Admin', 'GerenteZona'])) {
+if (!isset($_SESSION['id_usuario']) || !in_array($_SESSION['rol'], ['Admin', 'GerenteZona', 'Logistica'])) {
   header("Location: 403.php");
   exit();
 }

@@ -92,6 +92,14 @@ $TOOLS = [
     'icon'       => 'bi-upc-scan', // 📤 Caja saliendo = retiro
     'roles'      => ['Logistica', 'Admin'],
   ],
+  [
+    'key'        => 'comisiones_especiales',
+    'title'      => 'Ajustar incentivos',
+    'desc'       => 'Ajustar comisiones especiales por modelos.',
+    'href'       => 'comisiones_especiales_equipos.php',
+    'icon'       => 'bi-cash-stack', // 💵 Pila de dinero, representa caja o corte
+    'roles'      => ['Admin', 'Logistica'],
+  ],
 
 
   // ==== Ejemplos para futuro (déjalos como referencia) ====
