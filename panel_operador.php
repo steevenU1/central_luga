@@ -100,6 +100,14 @@ $TOOLS = [
     'icon'       => 'bi-cash-stack', // 💵 Pila de dinero, representa caja o corte
     'roles'      => ['Admin', 'Logistica'],
   ],
+  [
+    'key'        => 'accesorios_regalo',
+    'title'      => 'Accesorios de regalo',
+    'desc'       => 'Accesorios aprobados para ser ingresados como regalo.',
+    'href'       => 'accesorios_regalo_admin.php',
+    'icon'       => 'bi-box-seam', // 📦 Producto físico
+    'roles'      => ['Admin','Logistica'],
+  ],
 
 
   // ==== Ejemplos para futuro (déjalos como referencia) ====
