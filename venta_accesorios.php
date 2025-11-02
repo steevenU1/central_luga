@@ -1,6 +1,8 @@
 <?php
-// venta_accesorios.php — Venta de Accesorios
-// UI mejorada + ticket en modal + nombre real de sucursal + selector rápido (typeahead) con portal al <body>
+// venta_accesorios.php — Venta de Accesorios (con modo REGALO)
+// - Checkbox "Venta con regalo": fuerza totales y pagos a $0 y oculta SOLO los campos de pago.
+// - El botón Guardar SIEMPRE visible.
+// - Whitelist de modelos regalables desde accesorios_regalo_modelos(id_producto, activo).
 
 session_start();
 if (!isset($_SESSION['id_usuario'])) { header('Location: index.php'); exit(); }
@@ -32,6 +34,15 @@ if ($sucursalNombre === '' && $ID_SUCURSAL > 0) {
   }
 }
 if ($sucursalNombre === '') $sucursalNombre = 'Sucursal #'.$ID_SUCURSAL;
+
+/* -------- Whitelist de modelos regalables -------- */
+$regaloPermitidos = [];
+$tblCheck = $conn->query("SHOW TABLES LIKE 'accesorios_regalo_modelos'");
+if ($tblCheck && $tblCheck->num_rows > 0) {
+  $rs = $conn->query("SELECT id_producto FROM accesorios_regalo_modelos WHERE activo=1");
+  if ($rs) while ($r = $rs->fetch_assoc()) $regaloPermitidos[] = (int)$r['id_producto'];
+}
+$regaloPermitidos = array_values(array_unique(array_filter($regaloPermitidos)));
 
 /* -------- Catálogo de accesorios con stock por sucursal -------- */
 $soloSucursal = !in_array($ROL, ['Admin','Logistica','GerenteZona'], true);
@@ -92,6 +103,12 @@ $accesorios = $res ? $res->fetch_all(MYSQLI_ASSOC) : [];
     }
     .fast-item{padding:.45rem .6rem; cursor:pointer}
     .fast-item:hover,.fast-item.active{background:#0d6efd10}
+    .fast-item.muted{color:#6c757d}
+    .fast-item .tag{font-size:.75rem; padding:.1rem .3rem; border:1px solid #dee2e6; border-radius:.35rem; margin-left:.4rem}
+    .fast-item.blocked{opacity:.5; cursor:not-allowed}
+    .fast-item.blocked:hover{background:transparent}
+
+    .hidden-fields{display:none !important} /* solo para ocultar campos de pago */
   </style>
 </head>
 <body>
@@ -106,9 +123,10 @@ $accesorios = $res ? $res->fetch_all(MYSQLI_ASSOC) : [];
 
   <form id="frmVenta" action="procesar_venta_accesorios.php" method="post" class="card card-ghost p-3">
     <input type="hidden" name="id_sucursal" value="<?= (int)$ID_SUCURSAL ?>">
+    <input type="hidden" name="es_regalo" id="es_regalo" value="0"><!-- backend guard -->
 
     <!-- Encabezado -->
-    <div class="row g-3">
+    <div class="row g-3 align-items-end">
       <div class="col-md-3">
         <label class="form-label section-title">TAG</label>
         <input type="text" name="tag" class="form-control" maxlength="50" required>
@@ -124,6 +142,17 @@ $accesorios = $res ? $res->fetch_all(MYSQLI_ASSOC) : [];
       <div class="col-md-2">
         <label class="form-label section-title">Sucursal</label>
         <input type="text" class="form-control" value="<?=h($sucursalNombre)?>" readonly>
+      </div>
+      <div class="col-12">
+        <div class="form-check mt-2">
+          <input class="form-check-input" type="checkbox" id="chkRegalo">
+          <label class="form-check-label" for="chkRegalo">
+            Venta con <strong>regalo</strong> (solo modelos elegibles; total y pagos en $0)
+          </label>
+        </div>
+        <div id="ayudaRegalo" class="form-text">
+          Modelos elegibles configurados por Admin/Logística.
+        </div>
       </div>
     </div>
 
@@ -163,8 +192,8 @@ $accesorios = $res ? $res->fetch_all(MYSQLI_ASSOC) : [];
 
     <hr class="my-3">
 
-    <!-- Pagos -->
-    <div class="row g-3">
+    <!-- Campos de pago (se ocultan en REGALO) -->
+    <div id="pagosCampos" class="row g-3">
       <div class="col-md-3">
         <label class="form-label section-title">Forma de pago</label>
         <select class="form-select" name="forma_pago" id="formaPago" required>
@@ -181,7 +210,11 @@ $accesorios = $res ? $res->fetch_all(MYSQLI_ASSOC) : [];
         <label class="form-label section-title">Tarjeta</label>
         <input type="number" step="0.01" min="0" name="tarjeta" id="inpTarjeta" class="form-control" value="0">
       </div>
-      <div class="col-md-3 d-flex align-items-end">
+    </div>
+
+    <!-- Acciones (botón SIEMPRE visible) -->
+    <div id="accionesVenta" class="row g-3 mt-1">
+      <div class="col-md-3 ms-auto d-flex align-items-end">
         <button class="btn btn-success w-100" type="submit">Guardar venta</button>
       </div>
     </div>
@@ -209,18 +242,24 @@ $accesorios = $res ? $res->fetch_all(MYSQLI_ASSOC) : [];
 
 <script>
 const accesorios = <?php echo json_encode($accesorios, JSON_UNESCAPED_UNICODE); ?>;
-const tbody = document.querySelector('#tblLineas tbody');
-const lblTotal = document.getElementById('lblTotal');
-const formaPago = document.getElementById('formaPago');
-const inpEf = document.getElementById('inpEfectivo');
-const inpTa = document.getElementById('inpTarjeta');
+const REGALO_PERMITIDOS = new Set(<?php echo json_encode($regaloPermitidos, JSON_UNESCAPED_UNICODE); ?>);
+
+const tbody        = document.querySelector('#tblLineas tbody');
+const lblTotal     = document.getElementById('lblTotal');
+const formaPago    = document.getElementById('formaPago');
+const inpEf        = document.getElementById('inpEfectivo');
+const inpTa        = document.getElementById('inpTarjeta');
+const pagosCampos  = document.getElementById('pagosCampos'); // ← solo esto se oculta
+const chkRegalo    = document.getElementById('chkRegalo');
+const esRegaloInp  = document.getElementById('es_regalo');
 
 function money(n){ return new Intl.NumberFormat('es-MX',{style:'currency',currency:'MXN'}).format(Number(n||0)); }
+function isRegalo(){ return chkRegalo.checked === true; }
 
 /* ---------- Selector rápido con PORTAL al <body> ---------- */
 let FAST_PORTAL = null;
-let FAST_OWNER  = null;   // input que abrió el portal
-let FAST_SELECT = null;   // select oculto asociado
+let FAST_OWNER  = null;
+let FAST_SELECT = null;
 
 function ensurePortal(){
   if (!FAST_PORTAL){
@@ -228,7 +267,6 @@ function ensurePortal(){
     FAST_PORTAL.className = 'fast-portal';
     FAST_PORTAL.style.display = 'none';
     document.body.appendChild(FAST_PORTAL);
-    // cerrar al click externo
     document.addEventListener('click', (e)=>{
       if (FAST_PORTAL.style.display==='none') return;
       if (FAST_OWNER && (e.target===FAST_OWNER || FAST_PORTAL.contains(e.target))) return;
@@ -246,10 +284,7 @@ function openPortal(forInput, selectEl){
   repositionPortal();
   FAST_PORTAL.style.display = 'block';
 }
-function closePortal(){
-  if (FAST_PORTAL) FAST_PORTAL.style.display='none';
-  FAST_OWNER = FAST_SELECT = null;
-}
+function closePortal(){ if (FAST_PORTAL) FAST_PORTAL.style.display='none'; FAST_OWNER = FAST_SELECT = null; }
 function repositionPortal(){
   if (!FAST_PORTAL || !FAST_OWNER) return;
   const r = FAST_OWNER.getBoundingClientRect();
@@ -260,12 +295,17 @@ function repositionPortal(){
 function renderPortal(q){
   if (!FAST_PORTAL) return;
   const term = (q||'').trim().toLowerCase();
-  const rows = accesorios.filter(a => term==='' || a.nombre.toLowerCase().includes(term)).slice(0,100);
+  const rows = accesorios.filter(a => term==='' || a.nombre.toLowerCase().includes(term)).slice(0,150);
   FAST_PORTAL.innerHTML = rows.length
-    ? rows.map(a => `
-        <div class="fast-item" data-id="${a.id_producto}" data-precio="${a.precio_sugerido}" data-stock="${a.stock_disp}">
-          ${a.nombre}
-        </div>`).join('')
+    ? rows.map(a => {
+        const elig = REGALO_PERMITIDOS.has(Number(a.id_producto));
+        const bloqueado = isRegalo() && !elig;
+        const tag = isRegalo() ? (elig ? '<span class="tag">Elegible</span>' : '<span class="tag">No elegible (regalo)</span>') : '';
+        return `
+          <div class="fast-item ${bloqueado?'blocked':''}" data-id="${a.id_producto}" data-precio="${a.precio_sugerido}" data-stock="${a.stock_disp}" data-elig="${elig?1:0}">
+            ${a.nombre} ${tag}
+          </div>`;
+      }).join('')
     : `<div class="fast-item text-muted">Sin coincidencias</div>`;
 }
 function buildFastSelector(td, selectEl){
@@ -300,18 +340,23 @@ function buildFastSelector(td, selectEl){
     if (FAST_PORTAL.style.display!=='block') return;
     const it = e.target.closest('.fast-item[data-id]');
     if (!it) return;
+    if (isRegalo() && it.classList.contains('blocked')) return;
+
     const id     = it.dataset.id;
     const precio = Number(it.dataset.precio||0);
     const stock  = Number(it.dataset.stock||0);
-    // setear select real (para POST)
+    const eleg   = Number(it.dataset.elig||0) === 1;
+
     selectEl.value = id;
-    // actualizar UI de la fila
     const tr = selectEl.closest('tr');
     tr.querySelector('.stock').textContent = stock;
+
     const priceInput = tr.querySelector('.money');
-    if (precio>0) priceInput.value = precio;
-    // mostrar texto en el input
-    fast.value = it.textContent.trim();
+    if (!isRegalo() && precio>0) priceInput.value = precio;
+
+    fast.value = it.textContent.replace(/Elegible|No elegible \(regalo\)/g,'').trim();
+    tr.dataset.elegible = eleg ? '1' : '0';
+
     closePortal(); recalc();
   });
 }
@@ -321,7 +366,6 @@ function addRow(){
   const tr = document.createElement('tr');
   tr.innerHTML = `
     <td>
-      <!-- select "oficial" para POST, oculto: lo llena el selector rápido -->
       <select name="linea_id_producto[]" class="form-select selProducto d-none" tabindex="-1" aria-hidden="true">
         <option value="">—</option>
         ${accesorios.map(a=>`<option value="${a.id_producto}" data-precio="${a.precio_sugerido}" data-stock="${a.stock_disp}">${a.nombre}</option>`).join('')}
@@ -335,10 +379,10 @@ function addRow(){
   `;
   tbody.appendChild(tr);
 
-  // montar selector rápido ligado al select oculto
   const tdAcc = tr.children[0];
   const sel = tdAcc.querySelector('select.selProducto');
   buildFastSelector(tdAcc, sel);
+  updateRowForRegalo(tr);
 }
 document.getElementById('btnAdd').addEventListener('click', addRow);
 
@@ -346,12 +390,21 @@ document.getElementById('btnAdd').addEventListener('click', addRow);
 function recalc(){
   let total = 0;
   tbody.querySelectorAll('tr').forEach(tr=>{
-    const cant = Number(tr.querySelector('.cant').value||0);
-    const price = Number(tr.querySelector('.money').value||0);
+    const cant  = Number(tr.querySelector('.cant').value||0);
+    let priceEl = tr.querySelector('.money');
+    let price   = Number(priceEl.value||0);
+
+    if (isRegalo()){
+      price = 0;
+      priceEl.value = '0.00';
+    }
+
     const sub = cant * price;
     total += sub;
     tr.querySelector('.subtotal').textContent = money(sub);
   });
+
+  if (isRegalo()) total = 0;
   lblTotal.textContent = money(total);
   syncPagos();
 }
@@ -368,6 +421,20 @@ tbody.addEventListener('click', e=>{
 /* ---------- Pagos ---------- */
 function syncPagos(){
   const total = Number(lblTotal.textContent.replace(/[^0-9.]/g,'')) || 0;
+
+  if (isRegalo()){
+    // Ocultar SOLO los campos de pago
+    pagosCampos.classList.add('hidden-fields');
+    formaPago.value = 'Efectivo';
+    inpEf.value = '0.00';
+    inpTa.value = '0.00';
+    inpEf.readOnly = true;
+    inpTa.readOnly = true;
+    return;
+  }
+
+  pagosCampos.classList.remove('hidden-fields');
+
   switch(formaPago.value){
     case 'Efectivo':
       inpEf.value = total.toFixed(2); inpTa.value = '0.00';
@@ -381,26 +448,62 @@ function syncPagos(){
 }
 formaPago.addEventListener('change', syncPagos);
 
+/* ---------- Modo REGALO ---------- */
+function updateRowForRegalo(tr){
+  const priceInput = tr.querySelector('.money');
+  if (isRegalo()){
+    priceInput.value = '0.00';
+    priceInput.readOnly = true;
+  } else {
+    priceInput.readOnly = false;
+  }
+}
+function applyRegaloModeToAllRows(){
+  tbody.querySelectorAll('tr').forEach(tr=>updateRowForRegalo(tr));
+}
+chkRegalo.addEventListener('change', ()=>{
+  esRegaloInp.value = isRegalo() ? '1' : '0';
+  applyRegaloModeToAllRows();
+  recalc();
+});
+
 /* ---------- Validaciones ---------- */
 function validarLineas(){
   if (tbody.children.length === 0){ alert('Agrega al menos una línea.'); return false; }
+
   let ok = true;
+  let msg = '';
+
   tbody.querySelectorAll('tr').forEach((tr)=>{
-    const sel = tr.querySelector('.selProducto');
+    const sel   = tr.querySelector('.selProducto');
     const stock = Number(tr.querySelector('.stock').textContent||0);
-    const cant = Number(tr.querySelector('.cant').value||0);
+    const cant  = Number(tr.querySelector('.cant').value||0);
     const price = Number(tr.querySelector('.money').value||-1);
-    if (!sel.value || cant < 1 || cant > stock || price < 0){ ok = false; }
+    const eleg  = tr.dataset.elegible === '1';
+
+    if (!sel.value){ ok=false; msg='Selecciona el accesorio en todas las filas.'; return; }
+    if (cant < 1 || cant > stock){ ok=false; msg='Cantidad inválida o mayor al stock.'; return; }
+
+    if (isRegalo()){
+      if (!eleg){ ok=false; msg='Incluiste un modelo no elegible para regalo.'; return; }
+      if (price !== 0){ ok=false; msg='En regalo, todos los precios deben ser $0.'; return; }
+    } else {
+      if (price < 0){ ok=false; msg='Precio inválido.'; return; }
+    }
   });
-  if (!ok){ alert('Revisa accesorio, cantidad (≤ stock) y precio en todas las filas.'); return false; }
-  const total = Number(lblTotal.textContent.replace(/[^0-9.]/g,'')) || 0;
-  const ef = Number(inpEf.value||0), ta = Number(inpTa.value||0);
-  if (formaPago.value === 'Mixto'){
-    if ((ef+ta).toFixed(2) !== total.toFixed(2)){ alert('En pago Mixto, Efectivo + Tarjeta debe igualar el Total.'); return false; }
-  } else if (formaPago.value === 'Efectivo' && ef.toFixed(2) !== total.toFixed(2)){
-    alert('Efectivo debe igualar el Total.'); return false;
-  } else if (formaPago.value === 'Tarjeta' && ta.toFixed(2) !== total.toFixed(2)){
-    alert('Tarjeta debe igualar el Total.'); return false;
+
+  if (!ok){ alert(msg || 'Revisa las líneas.'); return false; }
+
+  if (!isRegalo()){
+    const total = Number(lblTotal.textContent.replace(/[^0-9.]/g,'')) || 0;
+    const ef = Number(inpEf.value||0), ta = Number(inpTa.value||0);
+    if (formaPago.value === 'Mixto'){
+      if ((ef+ta).toFixed(2) !== total.toFixed(2)){ alert('En pago Mixto, Efectivo + Tarjeta debe igualar el Total.'); return false; }
+    } else if (formaPago.value === 'Efectivo' && ef.toFixed(2) !== total.toFixed(2)){
+      alert('Efectivo debe igualar el Total.'); return false;
+    } else if (formaPago.value === 'Tarjeta' && ta.toFixed(2) !== total.toFixed(2)){
+      alert('Tarjeta debe igualar el Total.'); return false;
+    }
   }
   return true;
 }
@@ -424,8 +527,8 @@ frm.addEventListener('submit', async (ev)=>{
       frame.src = finalURL;
       const modal = new bootstrap.Modal(document.getElementById('ticketModal'));
       modal.show();
-      // Reset para siguiente venta
       frm.reset(); tbody.innerHTML = ''; addRow(); recalc();
+      esRegaloInp.value = '0';
     } else {
       const txt = await resp.text();
       alert('No se pudo completar la venta:\n' + txt);
