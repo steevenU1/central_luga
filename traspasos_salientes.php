@@ -21,17 +21,24 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 function n0($v){ return number_format((float)$v,0); }
 function n1($v){ return number_format((float)$v,1); }
 
-// Utilidad: detectar si existe una columna (para usar bitácoras si existen)
+// Utilidades DB
 function hasColumn(mysqli $conn, string $table, string $column): bool {
     $table  = $conn->real_escape_string($table);
     $column = $conn->real_escape_string($column);
     $rs = $conn->query("SHOW COLUMNS FROM `$table` LIKE '$column'");
     return $rs && $rs->num_rows > 0;
 }
+function table_exists(mysqli $conn, string $table): bool {
+    $t = $conn->real_escape_string($table);
+    $rs = $conn->query("SHOW TABLES LIKE '{$t}'");
+    return $rs && $rs->num_rows > 0;
+}
+
 $hasDT_Resultado       = hasColumn($conn, 'detalle_traspaso', 'resultado');
 $hasDT_FechaResultado  = hasColumn($conn, 'detalle_traspaso', 'fecha_resultado');
 $hasT_FechaRecep       = hasColumn($conn, 'traspasos', 'fecha_recepcion');
 $hasT_UsuarioRecibio   = hasColumn($conn, 'traspasos', 'usuario_recibio');
+$hasDTA                = table_exists($conn, 'detalle_traspaso_acc'); // accesorios por cantidad
 
 /* =========================================================
    PENDIENTES (salientes de la SUCURSAL, no por usuario)
@@ -50,23 +57,39 @@ $stmtPend->execute();
 $resPend = $stmtPend->get_result();
 $stmtPend->close();
 
-// Guardamos los pendientes en arreglo para poder usarlos varias veces
 $pendRows = [];
 while($r = $resPend->fetch_assoc()) { $pendRows[] = $r; }
 
 /* ===================== KPIs (cards arriba) ===================== */
-// 1) Piezas en tránsito (suma de detalles de todos los pendientes)
-$stmtPzas = $conn->prepare("
+// 1) Piezas en tránsito (equipos + accesorios)
+$kpi_piezas_eq = 0;
+$stmtPzasEq = $conn->prepare("
   SELECT COUNT(*) AS piezas
   FROM detalle_traspaso dt
   INNER JOIN traspasos t ON t.id = dt.id_traspaso
   WHERE t.id_sucursal_origen=? AND t.estatus='Pendiente'
 ");
-$stmtPzas->bind_param("i", $idSucursalUsuario);
-$stmtPzas->execute();
-$rowPzas = $stmtPzas->get_result()->fetch_assoc();
-$stmtPzas->close();
-$kpi_piezas = (int)($rowPzas['piezas'] ?? 0);
+$stmtPzasEq->bind_param("i", $idSucursalUsuario);
+$stmtPzasEq->execute();
+$rowPzasEq = $stmtPzasEq->get_result()->fetch_assoc();
+$stmtPzasEq->close();
+$kpi_piezas_eq = (int)($rowPzasEq['piezas'] ?? 0);
+
+$kpi_piezas_acc = 0;
+if ($hasDTA) {
+  $stmtPzasAcc = $conn->prepare("
+    SELECT COALESCE(SUM(dta.cantidad),0) AS piezas
+    FROM detalle_traspaso_acc dta
+    INNER JOIN traspasos t ON t.id = dta.id_traspaso
+    WHERE t.id_sucursal_origen=? AND t.estatus='Pendiente'
+  ");
+  $stmtPzasAcc->bind_param("i", $idSucursalUsuario);
+  $stmtPzasAcc->execute();
+  $rowPzasAcc = $stmtPzasAcc->get_result()->fetch_assoc();
+  $stmtPzasAcc->close();
+  $kpi_piezas_acc = (int)($rowPzasAcc['piezas'] ?? 0);
+}
+$kpi_piezas = $kpi_piezas_eq + $kpi_piezas_acc;
 
 // 2) Antigüedad promedio / máxima y pendientes >= 3 días
 $stmtAges = $conn->prepare("
@@ -112,7 +135,7 @@ $rowMTD = $stmtMTD->get_result()->fetch_assoc();
 $stmtMTD->close();
 $kpi_mtd = (int)($rowMTD['mtd'] ?? 0);
 
-// 5) Tasa de rechazo (mes): por detalle si existe; si no, por estatus del traspaso
+// 5) Tasa de rechazo (mes) — sigue basada en detalle_traspaso (equipos) si existe columna resultado
 if ($hasDT_Resultado) {
   $stmtRej = $conn->prepare("
     SELECT 
@@ -314,7 +337,7 @@ $stmtHist->close();
       <div class="kpi">
         <div class="label">Piezas en tránsito</div>
         <div class="value"><?= n0($kpi_piezas) ?></div>
-        <div class="hint">Equipos dentro de pendientes</div>
+        <div class="hint">Equipos + accesorios</div>
       </div>
     </div>
     <div class="col-6 col-md-3">
@@ -356,7 +379,7 @@ $stmtHist->close();
       <div class="kpi">
         <div class="label">Tasa de rechazo (mes)</div>
         <div class="value"><?= h($rej_text) ?></div>
-        <div class="hint">De piezas procesadas</div>
+        <div class="hint">De piezas (equipos)</div>
       </div>
     </div>
   </div>
@@ -379,19 +402,30 @@ $stmtHist->close();
           <?php
           $idTraspaso = (int)$traspaso['id'];
 
-          // Resumen compacto por modelo/color/capacidad
-          $resumen = $conn->query("
+          // --- Resumen equipos (count *)
+          $resumenEq = $conn->query("
             SELECT p.marca, p.modelo, p.color, COALESCE(p.capacidad,'') AS capacidad, COUNT(*) AS piezas
             FROM detalle_traspaso dt
             INNER JOIN inventario i ON i.id = dt.id_inventario
             INNER JOIN productos  p ON p.id = i.id_producto
             WHERE dt.id_traspaso = $idTraspaso
             GROUP BY p.marca, p.modelo, p.color, p.capacidad
-            ORDER BY p.marca, p.modelo, p.color, p.capacidad
           ");
 
-          // Detalle completo (se muestra colapsado)
-          $detalles = $conn->query("
+          // --- Resumen accesorios (sum cantidad)
+          $resumenAcc = null;
+          if ($hasDTA) {
+            $resumenAcc = $conn->query("
+              SELECT p.marca, p.modelo, p.color, COALESCE(p.capacidad,'') AS capacidad, SUM(dta.cantidad) AS piezas
+              FROM detalle_traspaso_acc dta
+              INNER JOIN productos p ON p.id = dta.id_producto
+              WHERE dta.id_traspaso = $idTraspaso
+              GROUP BY p.marca, p.modelo, p.color, p.capacidad
+            ");
+          }
+
+          // --- Detalle equipos
+          $detallesEq = $conn->query("
               SELECT i.id, p.marca, p.modelo, p.color, p.capacidad, p.imei1, p.imei2
               FROM detalle_traspaso dt
               INNER JOIN inventario i ON i.id = dt.id_inventario
@@ -400,10 +434,35 @@ $stmtHist->close();
               ORDER BY p.marca, p.modelo, i.id
           ");
 
-          // Total piezas (rápido usando resumen)
+          // --- Detalle accesorios
+          $detallesAcc = null;
+          if ($hasDTA) {
+            $detallesAcc = $conn->query("
+              SELECT dta.id_inventario_origen AS id_inventario, p.marca, p.modelo, p.color, COALESCE(p.capacidad,'') AS capacidad,
+                     dta.cantidad
+              FROM detalle_traspaso_acc dta
+              INNER JOIN productos p ON p.id = dta.id_producto
+              WHERE dta.id_traspaso = $idTraspaso
+              ORDER BY p.marca, p.modelo, dta.id_inventario_origen
+            ");
+          }
+
+          // --- Total piezas = equipos + accesorios
           $totalPzas = 0;
           $resumenRows = [];
-          while($rx = $resumen->fetch_assoc()){ $totalPzas += (int)$rx['piezas']; $resumenRows[]=$rx; }
+
+          while($rx = $resumenEq->fetch_assoc()){
+            $totalPzas += (int)$rx['piezas'];
+            $rx['_tipo'] = 'eq';
+            $resumenRows[] = $rx;
+          }
+          if ($resumenAcc) {
+            while($ra = $resumenAcc->fetch_assoc()){
+              $totalPzas += (int)$ra['piezas'];
+              $ra['_tipo'] = 'acc';
+              $resumenRows[] = $ra;
+            }
+          }
 
           $collapseId = "det_pend_" . $idTraspaso;
           ?>
@@ -432,40 +491,82 @@ $stmtHist->close();
                       $txt = h($rx['marca'] . ' ' . $rx['modelo'])
                           . ($cap ? ' ' . h($cap) : '')
                           . ' ' . h($rx['color']);
+                      $tag = ($rx['_tipo']==='acc') ? 'ACC' : 'EQ';
                     ?>
-                    <span class="chip"><b><?= (int)$rx['piezas'] ?>×</b> <?= $txt ?></span>
+                    <span class="chip">
+                      <b><?= (int)$rx['piezas'] ?>×</b> <?= $txt ?>
+                      <span class="ms-1 badge bg-light text-dark"><?= $tag ?></span>
+                    </span>
                   <?php endforeach; ?>
                 </div>
               <?php endif; ?>
 
               <!-- Botón para expandir/colapsar detalle -->
-              <a class="btn btn-link" data-bs-toggle="collapse" href="#<?= $collapseId ?>">
-                🔍 Ver detalle
-              </a>
+              <a class="btn btn-link" data-bs-toggle="collapse" href="#<?= $collapseId ?>">🔍 Ver detalle</a>
 
               <!-- Detalle colapsable -->
               <div id="<?= $collapseId ?>" class="collapse mt-2">
-                <div class="table-responsive">
+                <!-- Equipos -->
+                <div class="table-responsive mb-3">
                   <table class="table table-striped table-bordered table-sm mb-0">
                     <thead class="table-dark">
+                      <tr>
+                        <th colspan="8">Equipos (IMEI)</th>
+                      </tr>
                       <tr>
                         <th>ID Inv</th><th>Marca</th><th>Modelo</th><th>Color</th><th>Capacidad</th>
                         <th>IMEI1</th><th>IMEI2</th><th>Estatus</th>
                       </tr>
                     </thead>
                     <tbody>
-                      <?php while ($row = $detalles->fetch_assoc()): ?>
-                        <tr>
-                          <td><?= (int)$row['id'] ?></td>
-                          <td><?= h($row['marca']) ?></td>
-                          <td><?= h($row['modelo']) ?></td>
-                          <td><?= h($row['color']) ?></td>
-                          <td><?= $row['capacidad'] ?: '-' ?></td>
-                          <td><?= h($row['imei1']) ?></td>
-                          <td><?= $row['imei2'] ? h($row['imei2']) : '-' ?></td>
-                          <td><span class="badge text-bg-warning">En tránsito</span></td>
-                        </tr>
-                      <?php endwhile; ?>
+                      <?php if ($detallesEq && $detallesEq->num_rows>0): ?>
+                        <?php while ($row = $detallesEq->fetch_assoc()): ?>
+                          <tr>
+                            <td><?= (int)$row['id'] ?></td>
+                            <td><?= h($row['marca']) ?></td>
+                            <td><?= h($row['modelo']) ?></td>
+                            <td><?= h($row['color']) ?></td>
+                            <td><?= $row['capacidad'] ?: '-' ?></td>
+                            <td><?= h($row['imei1']) ?></td>
+                            <td><?= $row['imei2'] ? h($row['imei2']) : '-' ?></td>
+                            <td><span class="badge text-bg-warning">En tránsito</span></td>
+                          </tr>
+                        <?php endwhile; ?>
+                      <?php else: ?>
+                        <tr><td colspan="8" class="text-center text-muted">Sin equipos</td></tr>
+                      <?php endif; ?>
+                    </tbody>
+                  </table>
+                </div>
+
+                <!-- Accesorios -->
+                <div class="table-responsive">
+                  <table class="table table-striped table-bordered table-sm mb-0">
+                    <thead class="table-dark">
+                      <tr>
+                        <th colspan="7">Accesorios (por cantidad)</th>
+                      </tr>
+                      <tr>
+                        <th>ID Inv Origen</th><th>Marca</th><th>Modelo</th><th>Color</th><th>Capacidad</th>
+                        <th class="text-end">Cantidad</th><th>Estatus</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <?php if ($hasDTA && $detallesAcc && $detallesAcc->num_rows>0): ?>
+                        <?php while ($row = $detallesAcc->fetch_assoc()): ?>
+                          <tr>
+                            <td><?= (int)$row['id_inventario'] ?></td>
+                            <td><?= h($row['marca']) ?></td>
+                            <td><?= h($row['modelo']) ?></td>
+                            <td><?= h($row['color']) ?></td>
+                            <td><?= $row['capacidad'] ?: '-' ?></td>
+                            <td class="text-end"><b><?= n0($row['cantidad']) ?></b></td>
+                            <td><span class="badge text-bg-warning">En tránsito</span></td>
+                          </tr>
+                        <?php endwhile; ?>
+                      <?php else: ?>
+                        <tr><td colspan="7" class="text-center text-muted">Sin accesorios</td></tr>
+                      <?php endif; ?>
                     </tbody>
                   </table>
                 </div>
@@ -538,8 +639,8 @@ $stmtHist->close();
           <?php
           $idT = (int)$h['id'];
 
-          // Conteos del detalle (si hay columnas de resultado)
-          $total = $rec = $rej = null;
+          // Conteos del detalle (equipos) para recibidas/rechazadas
+          $total_eq = $rec = $rej = null;
           if ($hasDT_Resultado) {
             $q = $conn->prepare("
               SELECT 
@@ -553,16 +654,28 @@ $stmtHist->close();
             $q->execute();
             $cnt = $q->get_result()->fetch_assoc();
             $q->close();
-            $total = (int)($cnt['total'] ?? 0);
-            $rec   = (int)($cnt['recibidos'] ?? 0);
-            $rej   = (int)($cnt['rechazados'] ?? 0);
+            $total_eq = (int)($cnt['total'] ?? 0);
+            $rec      = (int)($cnt['recibidos'] ?? 0);
+            $rej      = (int)($cnt['rechazados'] ?? 0);
           } else {
             $q = $conn->prepare("SELECT COUNT(*) AS total FROM detalle_traspaso WHERE id_traspaso=?");
             $q->bind_param("i", $idT);
             $q->execute();
-            $total = (int)($q->get_result()->fetch_assoc()['total'] ?? 0);
+            $total_eq = (int)($q->get_result()->fetch_assoc()['total'] ?? 0);
             $q->close();
           }
+
+          // Total accesorios (sum cantidades)
+          $total_acc = 0;
+          if ($hasDTA) {
+            $qa = $conn->prepare("SELECT COALESCE(SUM(cantidad),0) AS piezas FROM detalle_traspaso_acc WHERE id_traspaso=?");
+            $qa->bind_param("i", $idT);
+            $qa->execute();
+            $total_acc = (int)($qa->get_result()->fetch_assoc()['piezas'] ?? 0);
+            $qa->close();
+          }
+
+          $total = (int)$total_eq + (int)$total_acc;
 
           // Color de estatus
           $badge = 'bg-secondary';
@@ -595,9 +708,9 @@ $stmtHist->close();
                   <?php endif; ?>
                 </div>
                 <div class="text-end">
-                  <div>Total piezas: <b><?= ($total ?? '-') ?></b></div>
+                  <div>Total piezas: <b><?= ($total ?? '-') ?></b> <span class="text-muted">(EQ <?= (int)$total_eq ?> + ACC <?= (int)$total_acc ?>)</span></div>
                   <?php if ($hasDT_Resultado): ?>
-                    <div>Recibidas: <b><?= $rec ?></b> · Rechazadas: <b><?= $rej ?></b></div>
+                    <div>Recibidas (EQ): <b><?= (int)$rec ?></b> · Rechazadas (EQ): <b><?= (int)$rej ?></b></div>
                   <?php endif; ?>
                 </div>
               </div>
@@ -606,7 +719,7 @@ $stmtHist->close();
               <a class="btn btn-link mt-2" data-bs-toggle="collapse" href="#<?= $collapseIdH ?>">🔍 Ver detalle</a>
               <div id="<?= $collapseIdH ?>" class="collapse mt-2">
               <?php
-                $det = $conn->query("
+                $detEq = $conn->query("
                   SELECT i.id, p.marca, p.modelo, p.color, p.capacidad, p.imei1, p.imei2 " .
                   ($hasDT_Resultado ? ", dt.resultado" : "") .
                   ($hasDT_FechaResultado ? ", dt.fecha_resultado" : "") .
@@ -616,10 +729,26 @@ $stmtHist->close();
                   WHERE dt.id_traspaso = $idT
                   ORDER BY p.marca, p.modelo, i.id
                 ");
+
+                $detAcc = null;
+                if ($hasDTA) {
+                  $detAcc = $conn->query("
+                    SELECT dta.id_inventario_origen AS id_inventario, p.marca, p.modelo, p.color, COALESCE(p.capacidad,'') AS capacidad,
+                           dta.cantidad
+                    FROM detalle_traspaso_acc dta
+                    INNER JOIN productos p ON p.id = dta.id_producto
+                    WHERE dta.id_traspaso = $idT
+                    ORDER BY p.marca, p.modelo, dta.id_inventario_origen
+                  ");
+                }
               ?>
-                <div class="table-responsive">
+                <!-- Equipos -->
+                <div class="table-responsive mb-3">
                   <table class="table table-sm table-bordered mb-0">
                     <thead class="table-light">
+                      <tr>
+                        <th colspan="<?= 7 + ($hasDT_Resultado?1:0) + ($hasDT_FechaResultado?1:0) ?>">Equipos (IMEI)</th>
+                      </tr>
                       <tr>
                         <th>ID Inv</th><th>Marca</th><th>Modelo</th><th>Color</th><th>Capacidad</th>
                         <th>IMEI1</th><th>IMEI2</th>
@@ -628,26 +757,65 @@ $stmtHist->close();
                       </tr>
                     </thead>
                     <tbody>
-                      <?php while($r = $det->fetch_assoc()): ?>
-                        <tr>
-                          <td><?= (int)$r['id'] ?></td>
-                          <td><?= h($r['marca']) ?></td>
-                          <td><?= h($r['modelo']) ?></td>
-                          <td><?= h($r['color']) ?></td>
-                          <td><?= $r['capacidad'] ?: '-' ?></td>
-                          <td><?= h($r['imei1']) ?></td>
-                          <td><?= $r['imei2'] ? h($r['imei2']) : '-' ?></td>
-                          <?php if ($hasDT_Resultado): ?>
-                            <td><?= h($r['resultado'] ?? 'Pendiente') ?></td>
-                          <?php endif; ?>
-                          <?php if ($hasDT_FechaResultado): ?>
-                            <td><?= h($r['fecha_resultado'] ?? '') ?></td>
-                          <?php endif; ?>
-                        </tr>
-                      <?php endwhile; ?>
+                      <?php if ($detEq && $detEq->num_rows>0): ?>
+                        <?php while($r = $detEq->fetch_assoc()): ?>
+                          <tr>
+                            <td><?= (int)$r['id'] ?></td>
+                            <td><?= h($r['marca']) ?></td>
+                            <td><?= h($r['modelo']) ?></td>
+                            <td><?= h($r['color']) ?></td>
+                            <td><?= $r['capacidad'] ?: '-' ?></td>
+                            <td><?= h($r['imei1']) ?></td>
+                            <td><?= $r['imei2'] ? h($r['imei2']) : '-' ?></td>
+                            <?php if ($hasDT_Resultado): ?>
+                              <td><?= h($r['resultado'] ?? 'Pendiente') ?></td>
+                            <?php endif; ?>
+                            <?php if ($hasDT_FechaResultado): ?>
+                              <td><?= h($r['fecha_resultado'] ?? '') ?></td>
+                            <?php endif; ?>
+                          </tr>
+                        <?php endwhile; ?>
+                      <?php else: ?>
+                        <tr><td colspan="<?= 7 + ($hasDT_Resultado?1:0) + ($hasDT_FechaResultado?1:0) ?>" class="text-center text-muted">Sin equipos</td></tr>
+                      <?php endif; ?>
                     </tbody>
                   </table>
                 </div>
+
+                <!-- Accesorios -->
+                <div class="table-responsive">
+                  <table class="table table-sm table-bordered mb-0">
+                    <thead class="table-light">
+                      <tr>
+                        <th colspan="7">Accesorios (por cantidad)</th>
+                      </tr>
+                      <tr>
+                        <th>ID Inv Origen</th><th>Marca</th><th>Modelo</th><th>Color</th><th>Capacidad</th>
+                        <th class="text-end">Cantidad</th><th>Resultado</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <?php if ($hasDTA && $detAcc && $detAcc->num_rows>0): ?>
+                        <?php while($ra = $detAcc->fetch_assoc()): ?>
+                          <tr>
+                            <td><?= (int)$ra['id_inventario'] ?></td>
+                            <td><?= h($ra['marca']) ?></td>
+                            <td><?= h($ra['modelo']) ?></td>
+                            <td><?= h($ra['color']) ?></td>
+                            <td><?= $ra['capacidad'] ?: '-' ?></td>
+                            <td class="text-end"><b><?= n0($ra['cantidad']) ?></b></td>
+                            <td><span class="badge text-bg-<?= $h['estatus']==='Completado' ? 'success' : ($h['estatus']==='Parcial' ? 'warning text-dark' : 'secondary') ?>">
+                              <?= h($h['estatus']) ?>
+                            </span></td>
+                          </tr>
+                        <?php endwhile; ?>
+                      <?php else: ?>
+                        <tr><td colspan="7" class="text-center text-muted">Sin accesorios</td></tr>
+                      <?php endif; ?>
+                    </tbody>
+                  </table>
+                </div>
+
               </div>
             </div>
             <div class="card-footer d-flex justify-content-end">
@@ -737,7 +905,7 @@ $stmtHist->close();
     frame.classList.add('d-none');
   });
 
-  // Guardar/restaurar pestaña activa (UX nice-to-have)
+  // Guardar/restaurar pestaña activa (UX)
   const tabsEl = document.getElementById('tabTraspasos');
   if (tabsEl) {
     const stored = localStorage.getItem('ts_activeTab');
