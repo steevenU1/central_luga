@@ -5,14 +5,31 @@ if (!isset($_SESSION['id_usuario'])) {
     exit();
 }
 
-include 'db.php';
-include 'navbar.php';
+require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/navbar.php';
 
 $id_usuario  = (int)($_SESSION['id_usuario'] ?? 0);
 $rol         = $_SESSION['rol'] ?? '';
 $id_sucursal = (int)($_SESSION['id_sucursal'] ?? 0);
 
-// 🔹 Filtro por IMEI (BACKEND: igual que tu versión)
+/* ===========================
+   Helpers
+=========================== */
+function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
+
+/** Verifica si una columna existe en una tabla */
+function hasColumn(mysqli $conn, string $table, string $column): bool {
+    $t = $conn->real_escape_string($table);
+    $c = $conn->real_escape_string($column);
+    $rs = $conn->query("SHOW COLUMNS FROM `$t` LIKE '$c'");
+    return $rs && $rs->num_rows > 0;
+}
+
+$inventarioTieneCantidad = hasColumn($conn, 'inventario', 'cantidad');
+
+/* ===========================
+   Filtros (IMEI lado servidor)
+=========================== */
 $filtroImei = $_GET['imei'] ?? '';
 $where  = "WHERE i.estatus IN ('Disponible','En tránsito')";
 $params = [];
@@ -32,35 +49,49 @@ if (!empty($filtroImei)) {
     $types   .= "ss";
 }
 
-// 🔹 Consulta inventario (BACKEND: misma estructura)
+/* ===========================
+   Consulta inventario
+   - Trae inventario.cantidad si existe
+   - Calcula cantidad_mostrar:
+       * equipo (con IMEI) = 1
+       * accesorio (sin IMEI) = inventario.cantidad (o 0 si no existe col)
+=========================== */
+$selectCantidad = $inventarioTieneCantidad
+    ? " i.cantidad AS cantidad_inventario,
+        (CASE WHEN (p.imei1 IS NULL OR p.imei1='') THEN IFNULL(i.cantidad,0) ELSE 1 END) AS cantidad_mostrar "
+    : " NULL AS cantidad_inventario,
+        (CASE WHEN (p.imei1 IS NULL OR p.imei1='') THEN 0 ELSE 1 END) AS cantidad_mostrar ";
+
 $sql = "
-    SELECT i.id, p.marca, p.modelo, p.color, p.capacidad,
-           p.imei1, p.imei2, i.estatus, i.fecha_ingreso
+    SELECT i.id,
+           p.marca, p.modelo, p.color, p.capacidad,
+           p.imei1, p.imei2,
+           i.estatus, i.fecha_ingreso,
+           $selectCantidad
     FROM inventario i
     INNER JOIN productos p ON p.id = i.id_producto
     $where
     ORDER BY i.fecha_ingreso DESC
 ";
+
 $stmt = $conn->prepare($sql);
-if (!empty($params)) {
-    $stmt->bind_param($types, ...$params);
-}
+if (!empty($params)) $stmt->bind_param($types, ...$params);
 $stmt->execute();
 $res = $stmt->get_result();
 
-// Pasamos a arreglo para calcular resúmenes sin tocar la DB
+/* ===========================
+   A arreglo (para KPIs front)
+=========================== */
 $rows = [];
 while ($r = $res->fetch_assoc()) { $rows[] = $r; }
-$totalEquipos = count($rows);
+$totalFilas = count($rows);
 
-// 🔹 Resúmenes (solo front)
 $porEstatus = ['Disponible'=>0,'En tránsito'=>0];
 foreach ($rows as $r) {
   $st = $r['estatus'] ?? '';
   if (isset($porEstatus[$st])) $porEstatus[$st]++;
 }
 
-function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 ?>
 <!DOCTYPE html>
 <html lang="es" data-bs-theme="light">
@@ -116,8 +147,8 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
         <div class="stat">
           <div class="icon"><i class="bi bi-box-seam"></i></div>
           <div>
-            <div class="small-muted">Total de equipos</div>
-            <div class="h4 m-0 kpi"><?= (int)$totalEquipos ?></div>
+            <div class="small-muted">Total de registros</div>
+            <div class="h4 m-0 kpi"><?= (int)$totalFilas ?></div>
           </div>
         </div>
       </div>
@@ -178,7 +209,7 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
     <div class="mt-3 d-flex justify-content-end gap-2">
       <button class="btn btn-primary"><i class="bi bi-search"></i> Buscar</button>
       <a href="panel.php" class="btn btn-secondary">Limpiar</a>
-      <a href="exportar_inventario_excel.php" class="btn btn-success">
+      <a href="exportar_inventario_excel.php?<?= http_build_query(['imei'=>$filtroImei]) ?>" class="btn btn-success">
         <i class="bi bi-file-earmark-excel"></i> Exportar a Excel
       </a>
     </div>
@@ -188,7 +219,7 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
   <div class="card card-surface mt-3 mb-5">
     <div class="p-3 pb-0 d-flex align-items-center justify-content-between flex-wrap gap-2">
       <h5 class="m-0"><i class="bi bi-table me-2"></i>Inventario</h5>
-      <div class="small-muted">Mostrando <span id="countVisible"><?= (int)$totalEquipos ?></span> de <?= (int)$totalEquipos ?> equipos</div>
+      <div class="small-muted">Mostrando <span id="countVisible"><?= (int)$totalFilas ?></span> de <?= (int)$totalFilas ?> registros</div>
     </div>
     <div class="p-3 pt-2 tbl-wrap">
       <table id="tablaInv" class="table table-hover align-middle mb-0">
@@ -199,6 +230,7 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
             <th style="min-width:140px;">Modelo</th>
             <th>Color</th>
             <th>Capacidad</th>
+            <th class="text-end" style="min-width:100px;">Cantidad</th> <!-- ✅ NUEVA -->
             <th style="min-width:210px;">IMEI1</th>
             <th style="min-width:210px;">IMEI2</th>
             <th style="min-width:130px;">Estatus</th>
@@ -206,9 +238,10 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
           </tr>
         </thead>
         <tbody>
-          <?php foreach ($rows as $row): 
+          <?php foreach ($rows as $row):
             $estatus = $row['estatus'] ?? '';
             $chip = $estatus === 'Disponible' ? 'chip-success' : 'chip-warn';
+            $cantMostrar = isset($row['cantidad_mostrar']) ? (int)$row['cantidad_mostrar'] : 1;
           ?>
             <tr data-status="<?= h($estatus) ?>">
               <td><span class="badge text-bg-secondary">#<?= (int)$row['id'] ?></span></td>
@@ -216,6 +249,7 @@ function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
               <td><?= h($row['modelo'] ?? '') ?></td>
               <td><?= h($row['color'] ?? '') ?></td>
               <td><?= h($row['capacidad'] ?? '-') ?></td>
+              <td class="text-end"><strong><?= $cantMostrar ?></strong></td>
               <td>
                 <?php if (!empty($row['imei1'])): ?>
                   <div class="d-flex align-items-center gap-2">
@@ -276,6 +310,7 @@ document.querySelectorAll('.copy-btn').forEach(btn => {
   const rows   = Array.from(document.querySelectorAll('#tablaInv tbody tr'));
   const countEl= document.getElementById('countVisible');
   const norm = s => (s||'').toString().toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu,'');
+
   function apply(){
     const q  = norm(qInput.value);
     const st = stSel.value;
@@ -290,6 +325,7 @@ document.querySelectorAll('.copy-btn').forEach(btn => {
     });
     countEl.textContent = visible;
   }
+
   qInput.addEventListener('input', apply);
   stSel.addEventListener('change', apply);
 })();

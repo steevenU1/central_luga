@@ -1,5 +1,5 @@
 <?php
-// inventario_global.php — LUGA (RAM + "Almacenamiento", fecha sin hora, tabla compacta)
+// inventario_global.php — LUGA (RAM + "Almacenamiento", fecha sin hora, tabla compacta, CANTIDAD para accesorios)
 session_start();
 if (!isset($_SESSION['id_usuario'])) { header("Location: 403.php"); exit(); }
 
@@ -26,10 +26,11 @@ $filtroEstatus    = $_GET['estatus']     ?? '';
 $filtroAntiguedad = $_GET['antiguedad']  ?? '';
 $filtroPrecioMin  = $_GET['precio_min']  ?? '';
 $filtroPrecioMax  = $_GET['precio_max']  ?? '';
-$filtroModelo     = $_GET['modelo']      ?? ''; // <<< NUEVO FILTRO
+$filtroModelo     = $_GET['modelo']      ?? ''; // Filtro por modelo
 
 $sql = "
-  SELECT i.id AS id_inventario,
+  SELECT 
+         i.id AS id_inventario,
          s.id AS id_sucursal,
          s.nombre AS sucursal,
          p.id AS id_producto,
@@ -43,6 +44,11 @@ $sql = "
          p.tipo_producto,
          (p.precio_lista - COALESCE(p.costo_con_iva, p.costo, 0)) AS profit,
          i.estatus, i.fecha_ingreso,
+         i.cantidad AS cantidad_inventario,
+         -- es_accesorio: 1 cuando NO tiene IMEI (o vacío), 0 cuando sí
+         (CASE WHEN (p.imei1 IS NULL OR p.imei1 = '') THEN 1 ELSE 0 END) AS es_accesorio,
+         -- cantidad_mostrar: accesorios = i.cantidad; equipos = 1
+         (CASE WHEN (p.imei1 IS NULL OR p.imei1 = '') THEN IFNULL(i.cantidad,0) ELSE 1 END) AS cantidad_mostrar,
          TIMESTAMPDIFF(DAY, i.fecha_ingreso, NOW()) AS antiguedad_dias
   FROM inventario i
   INNER JOIN productos p ON p.id = i.id_producto
@@ -61,7 +67,6 @@ if ($filtroImei !== '') {
   $sql .= " AND (p.imei1 LIKE ? OR p.imei2 LIKE ?)";
   $like = "%$filtroImei%"; $params[] = $like; $params[] = $like; $types .= "ss";
 }
-// --- NUEVO: Filtro por modelo (LIKE, coincidencia parcial) ---
 if ($filtroModelo !== '') {
   $sql .= " AND p.modelo LIKE ?";
   $params[] = "%$filtroModelo%"; $types .= "s";
@@ -220,7 +225,6 @@ $promProfit     = $total ? round($sumProfit / $total, 2) : 0.0;
             <input type="text" name="imei" class="form-control" placeholder="Buscar IMEI..." value="<?= h($filtroImei) ?>">
           </div>
 
-          <!-- NUEVO CAMPO: MODELO -->
           <div class="col-12 col-md-3">
             <label class="form-label">Modelo</label>
             <input type="text" name="modelo" class="form-control" placeholder="Buscar modelo..." value="<?= h($filtroModelo) ?>">
@@ -307,6 +311,7 @@ $promProfit     = $total ? round($sumProfit / $total, 2) : 0.0;
           <th>Costo c/IVA ($)</th>
           <th>Precio Lista ($)</th>
           <th>Profit ($)</th>
+          <th>Cantidad</th> <!-- NUEVA: muestra i.cantidad para accesorios; 1 para equipos -->
           <th>Estatus</th>
           <th>Fecha ingreso</th>
           <th>Antigüedad</th>
@@ -323,6 +328,9 @@ $promProfit     = $total ? round($sumProfit / $total, 2) : 0.0;
           ? '<span class="chip"><span class="status-dot dot-green"></span>Disponible</span>'
           : '<span class="chip"><span class="status-dot dot-amber"></span>En tránsito</span>';
         $fechaSolo = h(substr((string)$row['fecha_ingreso'], 0, 10)); // YYYY-MM-DD
+
+        $esAcc = (int)$row['es_accesorio'] === 1;
+        $cantMostrar = (int)$row['cantidad_mostrar']; // i.cantidad o 1
       ?>
         <tr>
           <td><?= h($row['sucursal']) ?></td>
@@ -352,6 +360,9 @@ $promProfit     = $total ? round($sumProfit / $total, 2) : 0.0;
           <td class="text-end">$<?= number_format((float)$row['precio_lista'],2) ?></td>
           <td class="text-end">
             <span class="<?= $profit>=0 ? 'profit-pos' : 'profit-neg' ?>">$<?= number_format($profit,2) ?></span>
+          </td>
+          <td class="text-end">
+            <?= number_format($cantMostrar) ?>
           </td>
           <td><?= $statusChip ?></td>
           <td><?= $fechaSolo ?></td>
@@ -395,11 +406,11 @@ $promProfit     = $total ? round($sumProfit / $total, 2) : 0.0;
     });
   }
 
-  // DataTable (orden por fecha ingreso desc; índices actualizados por nueva columna RAM)
+  // DataTable (orden por fecha ingreso desc; AJUSTADO por nueva columna "Cantidad")
   $(function() {
     $('#tablaInventario').DataTable({
       pageLength: 25,
-      order: [[ 13, "desc" ]], // índice de "Fecha ingreso" tras agregar RAM
+      order: [[ 14, "desc" ]], // índice de "Fecha ingreso" (0-based) tras agregar la columna Cantidad
       responsive: true,
       autoWidth: false,
       fixedHeader: true,
@@ -413,8 +424,8 @@ $promProfit     = $total ? round($sumProfit / $total, 2) : 0.0;
         { extend: 'colvis',     className: 'btn btn-light btn-sm rounded-pill border', text: '<i class="bi bi-view-list me-1"></i>Columnas' }
       ],
       columnDefs: [
-        { targets: [9,10,11], className: 'text-end' },                 // precios/profit
-        { targets: [13,14], className: 'text-nowrap' },                // fecha y antigüedad
+        { targets: [9,10,11,12], className: 'text-end' },              // costo, precio, profit, cantidad
+        { targets: [14,15], className: 'text-nowrap' },                // fecha y antigüedad
         { responsivePriority: 1, targets: 0 },                         // sucursal
         { responsivePriority: 2, targets: 1 },                         // marca
         { responsivePriority: 3, targets: 2 },                         // modelo

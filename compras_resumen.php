@@ -16,34 +16,51 @@ function esc($s){ return htmlspecialchars($s ?? '', ENT_QUOTES, 'UTF-8'); }
 function cap($s,$n){ return substr(trim($s ?? ''),0,$n); }
 function n2($v){ return number_format((float)$v, 2); }
 
+// Helpers de metadata (tablas/columnas)
+function table_exists(mysqli $conn, string $table): bool {
+  $t = $conn->real_escape_string($table);
+  $q = $conn->query("SHOW TABLES LIKE '{$t}'");
+  return $q && $q->num_rows > 0;
+}
+function column_exists(mysqli $conn, string $table, string $col): bool {
+  $t = $conn->real_escape_string($table);
+  $c = $conn->real_escape_string($col);
+  $q = $conn->query("SHOW COLUMNS FROM `{$t}` LIKE '{$c}'");
+  return $q && $q->num_rows > 0;
+}
+
 $hoy = date('Y-m-d');
 
 // ====== Filtros ======
-$estado   = cap($_GET['estado'] ?? 'todos', 20);           // todos|Pendiente|Parcial|Pagada|Cancelada
+$estado   = cap($_GET['estado'] ?? 'todos', 20); // todos|Pendiente|Parcial|Pagada|Cancelada
 $prov_id  = (int)($_GET['proveedor'] ?? 0);
 $suc_id   = (int)($_GET['sucursal'] ?? 0);
-$desde    = cap($_GET['desde'] ?? '', 10);                 // YYYY-MM-DD
-$hasta    = cap($_GET['hasta'] ?? '', 10);                 // YYYY-MM-DD
-$q        = cap($_GET['q'] ?? '', 60);                     // búsqueda por # factura
-$pxdias   = (int)($_GET['px'] ?? 7);                       // Próximos X días (default 7)
+$desde    = cap($_GET['desde'] ?? '', 10);       // YYYY-MM-DD
+$hasta    = cap($_GET['hasta'] ?? '', 10);       // YYYY-MM-DD
+$q        = cap($_GET['q'] ?? '', 60);           // búsqueda por # factura
+$pxdias   = (int)($_GET['px'] ?? 7);             // Próximos X días (default 7)
 if ($pxdias < 0) $pxdias = 0;
 
 $where = [];
 $params = [];
 $types = '';
 
-if ($estado !== 'todos') { $where[] = "c.estatus = ?"; $params[] = $estado; $types.='s'; }
-if ($prov_id > 0)        { $where[] = "c.id_proveedor = ?"; $params[] = $prov_id; $types.='i'; }
-if ($suc_id > 0)         { $where[] = "c.id_sucursal = ?";  $params[] = $suc_id;  $types.='i'; }
-if ($desde !== '')       { $where[] = "c.fecha_factura >= ?"; $params[] = $desde; $types.='s'; }
-if ($hasta !== '')       { $where[] = "c.fecha_factura <= ?"; $params[] = $hasta; $types.='s'; }
-if ($q !== '')           { $where[] = "c.num_factura LIKE ?"; $params[] = "%$q%"; $types.='s'; }
+if ($estado !== 'todos') { $where[] = "c.estatus = ?";        $params[] = $estado; $types.='s'; }
+if ($prov_id > 0)        { $where[] = "c.id_proveedor = ?";   $params[] = $prov_id; $types.='i'; }
+if ($suc_id > 0)         { $where[] = "c.id_sucursal = ?";    $params[] = $suc_id;  $types.='i'; }
+if ($desde !== '')       { $where[] = "c.fecha_factura >= ?"; $params[] = $desde;   $types.='s'; }
+if ($hasta !== '')       { $where[] = "c.fecha_factura <= ?"; $params[] = $hasta;   $types.='s'; }
+if ($q !== '')           { $where[] = "c.num_factura LIKE ?"; $params[] = "%$q%";   $types.='s'; }
 
 $sqlWhere = count($where) ? ('WHERE '.implode(' AND ', $where)) : '';
 
 // Catálogos para filtros
 $proveedores = $conn->query("SELECT id, nombre FROM proveedores WHERE activo=1 ORDER BY nombre");
 $sucursales  = $conn->query("SELECT id, nombre FROM sucursales ORDER BY nombre");
+
+// ====== Agregador de ingresos robusto (SUM(cantidad) o COUNT(*)) ======
+$hasCantIngreso = table_exists($conn, 'compras_detalle_ingresos') && column_exists($conn, 'compras_detalle_ingresos', 'cantidad');
+$ingSub = $hasCantIngreso ? 'SUM(cantidad)' : 'COUNT(*)';
 
 // ====== Consulta principal ======
 $sql = "
@@ -75,10 +92,10 @@ $sql = "
     SELECT
       d.id_compra,
       SUM( GREATEST(d.cantidad - IFNULL(x.ing,0), 0) ) AS pendientes_ingreso,
-      MIN( CASE WHEN GREATEST(d.cantidad - IFNULL(x.ing,0), 0) > 0 THEN d.id END ) AS primer_detalle_pendiente
+      MIN( CASE WHEN d.cantidad > IFNULL(x.ing,0) THEN d.id END ) AS primer_detalle_pendiente
     FROM compras_detalle d
     LEFT JOIN (
-      SELECT id_detalle, COUNT(*) AS ing
+      SELECT id_detalle, {$ingSub} AS ing
       FROM compras_detalle_ingresos
       GROUP BY id_detalle
     ) x ON x.id_detalle = d.id
@@ -473,9 +490,6 @@ $agingData = [
 
 <!-- JS -->
 <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
-<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
-
-<!-- DataTables core + addons -->
 <script src="https://cdn.datatables.net/1.13.8/js/jquery.dataTables.min.js"></script>
 <script src="https://cdn.datatables.net/1.13.8/js/dataTables.bootstrap5.min.js"></script>
 <script src="https://cdn.datatables.net/fixedheader/3.4.0/js/dataTables.fixedHeader.min.js"></script>
@@ -490,10 +504,8 @@ $agingData = [
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 
 <script>
-  // Forzar título de pestaña
   try { document.title = 'Resumen · Compras — Central 2.0'; } catch(e){}
 
-  // DataTable
   let dt = null;
   $(function(){
     dt = $('#tablaCompras').DataTable({
