@@ -177,6 +177,9 @@ if (($rolUsuario === 'GerenteZona')) {
 $esAdmin = in_array($rolUsuario, ['Admin', 'Super'], true);
 $primerNombre = first_name($nombreUsuario);
 
+/* 👇 Permiso para ver el menú Operativos */
+$puedeVerOperativos = $esAdmin || $rolUsuario === 'Logistica' || in_array($idUsuario, [6, 8], true);
+
 /* ===== Dinámica: ¿sucursal sin gerente activo? y permisos derivados ===== */
 $sucursalSinGerente = false;
 if ($idSucursal > 0) {
@@ -231,9 +234,10 @@ $grpOperacion  = [
   'panel_operador.php', // ✅ NUEVO: para resaltar el parent
 ];
 $grpRH         = ['reporte_nomina_v2.php', 'reporte_nomina_gerentes_zona.php', 'admin_expedientes.php', 'admin_asistencias.php', 'productividad_ejecutivo.php'];
-/* ✅ Incluimos tareas.php al grupo Operativos para resaltar activo */
 $grpOperativos = [
-  'tareas.php', // NEW
+  'tickets_nuevo_luga.php',   // Tickets Central
+  'tickets_operador.php',     // Tickets Admin (solo ids 6 y 8)
+  'tareas.php',
   'insumos_catalogo.php',
   'actualizar_precios_modelo.php',
   'cuotas_mensuales.php',
@@ -701,18 +705,23 @@ function item_active(string $f, string $c): string
               <li><a class="dropdown-item <?= item_active('inventario_global.php', $current) ?>" href="inventario_global.php">Inventario global</a></li>
               <li><a class="dropdown-item <?= item_active('inventario_historico.php', $current) ?>" href="inventario_historico.php">Inventario histórico</a></li>
               <li><a class="dropdown-item <?= item_active('inventario_sims_resumen.php', $current) ?>" href="inventario_sims_resumen.php">Inventario SIMs</a></li>
+
             <?php else: ?>
               <?php if (in_array($rolUsuario, ['Ejecutivo', 'Gerente'])): ?>
                 <li><a class="dropdown-item <?= item_active('panel.php', $current) ?>" href="panel.php">Inventario sucursal</a></li>
+                <!-- ✅ NUEVO: habilitar Resumen Global para Gerente y Ejecutivo -->
+                <li><a class="dropdown-item <?= item_active('inventario_resumen.php', $current) ?>" href="inventario_resumen.php">Resumen Global</a></li>
               <?php endif; ?>
+
               <?php if (in_array($rolUsuario, ['Admin', 'Subdistribuidor', 'Super'])): ?>
                 <li><a class="dropdown-item <?= item_active('inventario_subdistribuidor.php', $current) ?>" href="inventario_subdistribuidor.php">Inventario subdistribuidor</a></li>
               <?php endif; ?>
+
               <?php if (in_array($rolUsuario, ['Admin', 'GerenteZona', 'Super'])): ?>
                 <li><a class="dropdown-item <?= item_active('inventario_global.php', $current) ?>" href="inventario_global.php">Inventario global</a></li>
               <?php endif; ?>
 
-              <!-- ✅ SIMs (Resumen) para Gerente, Admin y Logistica -->
+              <!-- SIMs (Resumen) para Gerente, Admin y Logistica -->
               <?php if (in_array($rolUsuario, ['Gerente', 'Admin', 'Logistica'], true)): ?>
                 <li><a class="dropdown-item <?= item_active('inventario_sims_resumen.php', $current) ?>" href="inventario_sims_resumen.php">Inventario SIMs</a></li>
               <?php endif; ?>
@@ -909,12 +918,30 @@ function item_active(string $f, string $c): string
             </a>
             <ul class="dropdown-menu">
               <!-- 🔝 Bitacora Sistema (solo Admin) -->
-              <?php if ($rolUsuario === 'Admin'): ?>
+              <!-- <?php if ($rolUsuario === 'Admin'): ?>
                 <li><a class="dropdown-item <?= item_active('tareas.php', $current) ?>" href="tareas.php">Bitacora Sistema</a></li>
                 <li>
                   <hr class="dropdown-divider">
                 </li>
+              <?php endif; ?> -->
+
+              <!-- 🔝 Tickets: siempre hasta arriba -->
+              <?php if ($esAdmin || $rolUsuario === 'Logistica'): ?>
+                <li>
+                  <a class="dropdown-item <?= item_active('tickets_nuevo_luga.php', $current) ?>" href="tickets_nuevo_luga.php">
+                    <i class="bi bi-ticket-detailed me-1"></i>Tickets Central
+                  </a>
+                </li>
               <?php endif; ?>
+
+              <?php if (in_array($idUsuario, [6, 8], true)): ?>
+                <li>
+                  <a class="dropdown-item <?= item_active('tickets_operador.php', $current) ?>" href="tickets_operador.php">
+                    <i class="bi bi-shield-lock me-1"></i>Tickets Admin
+                  </a>
+                </li>
+              <?php endif; ?>
+
 
               <li class="dropdown-header">Insumos & Precios</li>
               <li><a class="dropdown-item <?= item_active('insumos_catalogo.php', $current) ?>" href="insumos_catalogo.php">Catálogo de insumos</a></li>

@@ -14,6 +14,9 @@ abortar_si_captura_bloqueada(); // bloquea mutaciones si MODO_CAPTURA=false
 $id_usuario  = (int)($_SESSION['id_usuario']  ?? 0);
 $id_sucursal = (int)($_SESSION['id_sucursal'] ?? 0);
 
+/* Candado por sucursal específica (Sucursal 42) */
+$SUCURSAL_BLOQUEADA = ($id_sucursal === 42);
+
 /* ===========================
    Token anti doble-submit
    =========================== */
@@ -42,82 +45,89 @@ try {
    Procesar cobro (POST)
    =========================== */
 $msg = '';
-$lock = (defined('MODO_CAPTURA') && MODO_CAPTURA === false);
+$lock = (defined('MODO_CAPTURA') && MODO_CAPTURA === false) || $SUCURSAL_BLOQUEADA;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    // Valida token idempotencia
-    $posted_token = $_POST['cobro_token'] ?? '';
-    if (!hash_equals($_SESSION['cobro_token'] ?? '', $posted_token)) {
-        $msg = "<div class='alert alert-warning mb-3'>⚠ Sesión expirada o envío duplicado. Recarga la página e intenta de nuevo.</div>";
+    // Si la sucursal está bloqueada, no procesamos el POST
+    if ($SUCURSAL_BLOQUEADA) {
+        $msg = "<div class='alert alert-danger mb-3 fw-semibold'>
+                  ❌ Para tu sucursal no está permitida la captura de cobros.
+                </div>";
     } else {
-        $motivo         = trim($_POST['motivo'] ?? '');
-        $tipo_pago      = $_POST['tipo_pago'] ?? '';
-        $monto_total    = (float)($_POST['monto_total'] ?? 0);
-        $monto_efectivo = (float)($_POST['monto_efectivo'] ?? 0);
-        $monto_tarjeta  = (float)($_POST['monto_tarjeta'] ?? 0);
-
-        // Redondeo seguro
-        $monto_total    = round($monto_total, 2);
-        $monto_efectivo = round($monto_efectivo, 2);
-        $monto_tarjeta  = round($monto_tarjeta, 2);
-
-        // Normaliza por tipo de pago (evita arrastre de valores ocultos)
-        switch ($tipo_pago) {
-            case 'Efectivo':
-                $monto_efectivo = $monto_total;
-                $monto_tarjeta  = 0.00;
-                break;
-            case 'Tarjeta':
-                $monto_tarjeta  = $monto_total;
-                $monto_efectivo = 0.00;
-                break;
-            case 'Mixto':
-                // se queda como viene (ya redondeado)
-                break;
-            default:
-                $monto_efectivo = 0.00;
-                $monto_tarjeta  = 0.00;
-        }
-
-        // Comisión especial (solo si es Abono PayJoy/Krediya y NO es pago con tarjeta)
-        // Si también quieres excluir 'Mixto', cambia la condición a ($tipo_pago === 'Efectivo').
-        $esAbono = in_array($motivo, ['Abono PayJoy','Abono Krediya'], true);
-        $comision_especial = ($esAbono && $tipo_pago !== 'Tarjeta') ? 10.00 : 0.00;
-
-        if ($motivo === '' || $tipo_pago === '' || $monto_total <= 0) {
-            $msg = "<div class='alert alert-warning mb-3'>⚠ Debes llenar todos los campos obligatorios.</div>";
+        // Valida token idempotencia
+        $posted_token = $_POST['cobro_token'] ?? '';
+        if (!hash_equals($_SESSION['cobro_token'] ?? '', $posted_token)) {
+            $msg = "<div class='alert alert-warning mb-3'>⚠ Sesión expirada o envío duplicado. Recarga la página e intenta de nuevo.</div>";
         } else {
-            // Valida coherencia tras normalizar
-            $valido = false;
-            if ($tipo_pago === 'Efectivo' && abs($monto_efectivo - $monto_total) < 0.01) $valido = true;
-            if ($tipo_pago === 'Tarjeta'  && abs($monto_tarjeta  - $monto_total) < 0.01) $valido = true;
-            if ($tipo_pago === 'Mixto'    && abs(($monto_efectivo + $monto_tarjeta) - $monto_total) < 0.01) $valido = true;
+            $motivo         = trim($_POST['motivo'] ?? '');
+            $tipo_pago      = $_POST['tipo_pago'] ?? '';
+            $monto_total    = (float)($_POST['monto_total'] ?? 0);
+            $monto_efectivo = (float)($_POST['monto_efectivo'] ?? 0);
+            $monto_tarjeta  = (float)($_POST['monto_tarjeta'] ?? 0);
 
-            if (!$valido) {
-                $msg = "<div class='alert alert-danger mb-3'>⚠ Los montos no cuadran con el tipo de pago seleccionado.</div>";
+            // Redondeo seguro
+            $monto_total    = round($monto_total, 2);
+            $monto_efectivo = round($monto_efectivo, 2);
+            $monto_tarjeta  = round($monto_tarjeta, 2);
+
+            // Normaliza por tipo de pago (evita arrastre de valores ocultos)
+            switch ($tipo_pago) {
+                case 'Efectivo':
+                    $monto_efectivo = $monto_total;
+                    $monto_tarjeta  = 0.00;
+                    break;
+                case 'Tarjeta':
+                    $monto_tarjeta  = $monto_total;
+                    $monto_efectivo = 0.00;
+                    break;
+                case 'Mixto':
+                    // se queda como viene (ya redondeado)
+                    break;
+                default:
+                    $monto_efectivo = 0.00;
+                    $monto_tarjeta  = 0.00;
+            }
+
+            // Comisión especial (solo si es Abono PayJoy/Krediya y NO es pago con tarjeta)
+            // Si también quieres excluir 'Mixto', cambia la condición a ($tipo_pago === 'Efectivo').
+            $esAbono = in_array($motivo, ['Abono PayJoy','Abono Krediya'], true);
+            $comision_especial = ($esAbono && $tipo_pago !== 'Tarjeta') ? 10.00 : 0.00;
+
+            if ($motivo === '' || $tipo_pago === '' || $monto_total <= 0) {
+                $msg = "<div class='alert alert-warning mb-3'>⚠ Debes llenar todos los campos obligatorios.</div>";
             } else {
-                $stmt = $conn->prepare("
-                    INSERT INTO cobros (
-                        id_usuario, id_sucursal, motivo, tipo_pago,
-                        monto_total, monto_efectivo, monto_tarjeta, comision_especial,
-                        fecha_cobro, id_corte, corte_generado
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NULL, 0)
-                ");
-                $stmt->bind_param(
-                    "iissdddd",
-                    $id_usuario, $id_sucursal, $motivo, $tipo_pago,
-                    $monto_total, $monto_efectivo, $monto_tarjeta, $comision_especial
-                );
-                if ($stmt->execute()) {
-                    $msg = "<div class='alert alert-success mb-3'>✅ Cobro registrado correctamente.</div>";
-                    // Regenera token para impedir re-envío del mismo POST
-                    $_SESSION['cobro_token'] = bin2hex(random_bytes(16));
-                    // Limpia POST para no repoblar inputs
-                    $_POST = [];
+                // Valida coherencia tras normalizar
+                $valido = false;
+                if ($tipo_pago === 'Efectivo' && abs($monto_efectivo - $monto_total) < 0.01) $valido = true;
+                if ($tipo_pago === 'Tarjeta'  && abs($monto_tarjeta  - $monto_total) < 0.01) $valido = true;
+                if ($tipo_pago === 'Mixto'    && abs(($monto_efectivo + $monto_tarjeta) - $monto_total) < 0.01) $valido = true;
+
+                if (!$valido) {
+                    $msg = "<div class='alert alert-danger mb-3'>⚠ Los montos no cuadran con el tipo de pago seleccionado.</div>";
                 } else {
-                    $msg = "<div class='alert alert-danger mb-3'>❌ Error al registrar cobro.</div>";
+                    $stmt = $conn->prepare("
+                        INSERT INTO cobros (
+                            id_usuario, id_sucursal, motivo, tipo_pago,
+                            monto_total, monto_efectivo, monto_tarjeta, comision_especial,
+                            fecha_cobro, id_corte, corte_generado
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NULL, 0)
+                    ");
+                    $stmt->bind_param(
+                        "iissdddd",
+                        $id_usuario, $id_sucursal, $motivo, $tipo_pago,
+                        $monto_total, $monto_efectivo, $monto_tarjeta, $comision_especial
+                    );
+                    if ($stmt->execute()) {
+                        $msg = "<div class='alert alert-success mb-3'>✅ Cobro registrado correctamente.</div>";
+                        // Regenera token para impedir re-envío del mismo POST
+                        $_SESSION['cobro_token'] = bin2hex(random_bytes(16));
+                        // Limpia POST para no repoblar inputs
+                        $_POST = [];
+                    } else {
+                        $msg = "<div class='alert alert-danger mb-3'>❌ Error al registrar cobro.</div>";
+                    }
+                    $stmt->close();
                 }
-                $stmt->close();
             }
         }
     }
@@ -191,6 +201,16 @@ try {
     <div class="alert alert-warning d-flex align-items-center mb-3" role="alert">
       <i class="bi bi-lock-fill me-2"></i>
       <div><strong>Captura deshabilitada temporalmente.</strong> Podrás registrar cobros cuando el admin lo habilite.</div>
+    </div>
+  <?php endif; ?>
+
+  <?php if ($SUCURSAL_BLOQUEADA): ?>
+    <div class="alert alert-danger d-flex align-items-center mb-3" role="alert" style="border-width:2px">
+      <i class="bi bi-ban fs-3 me-2"></i>
+      <div>
+        <div class="fw-bold">Para tu sucursal no está permitida la captura de cobros.</div>
+        <div class="small opacity-75">Consulta con Administración si consideras que esto es un error.</div>
+      </div>
     </div>
   <?php endif; ?>
 
@@ -386,6 +406,16 @@ try {
 
 <!-- JS -->
 <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+<?php if ($SUCURSAL_BLOQUEADA): ?>
+<script>
+  (function(){
+    // Deshabilita todos los campos del formulario cuando la sucursal está bloqueada
+    const form = document.getElementById('formCobro');
+    if (!form) return;
+    form.querySelectorAll('input, select, textarea, button').forEach(el => { el.disabled = true; });
+  })();
+</script>
+<?php endif; ?>
 <script>
 (function(){
   // === Lógica de formulario (resumen + validación) ===
