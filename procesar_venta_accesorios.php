@@ -1,6 +1,8 @@
 <?php
-// procesar_venta_accesorios.php — Venta de accesorios con modo REGALO (whitelist + $0) y FIFO por sucursal
-// Respeta estatus: 'Disponible', 'En tránsito', 'Vendido', 'Retirado' (sin 'Agotado').
+// procesar_venta_accesorios.php — LUGA / Central 2.0
+// Opción A: descuenta SOLO cantidad sin tocar estatus.
+// Inserta detalle en la tabla existente: detalle_venta_accesorio (singular) o detalle_venta_accesorios (plural).
+// NUEVO: si accesorios_regalo_modelos.vender=0 => solo permite operación cuando ES_REGALO=1.
 
 session_start();
 if (!isset($_SESSION['id_usuario'])) { header('Location: index.php'); exit(); }
@@ -10,236 +12,293 @@ date_default_timezone_set('America/Mexico_City');
 $ID_USUARIO  = (int)($_SESSION['id_usuario'] ?? 0);
 $ID_SUCURSAL = (int)($_POST['id_sucursal'] ?? ($_SESSION['id_sucursal'] ?? 0));
 
-/* Helpers */
+/* ---------------- Helpers ---------------- */
 function h($s){ return htmlspecialchars($s ?? '', ENT_QUOTES, 'UTF-8'); }
-function fail($m){ http_response_code(400); echo h($m); exit; }
-function n2($v){ return number_format((float)$v, 2, '.', ''); }
-function toInt($v){ return (is_numeric($v) ? (int)$v : 0); }
-function toFloat($v){ return (is_numeric($v) ? (float)$v : -1); }
-function table_exists(mysqli $c, string $t): bool {
-  $t = $c->real_escape_string($t);
-  $rs = $c->query("SHOW TABLES LIKE '{$t}'");
+function column_exists(mysqli $conn, string $table, string $col): bool {
+  $t = $conn->real_escape_string($table);
+  $c = $conn->real_escape_string($col);
+  $rs = $conn->query("SHOW COLUMNS FROM `{$t}` LIKE '{$c}'");
   return $rs && $rs->num_rows > 0;
 }
-function column_exists(mysqli $c, string $t, string $col): bool {
-  $t = $c->real_escape_string($t);
-  $col = $c->real_escape_string($col);
-  $rs = $c->query("SHOW COLUMNS FROM `{$t}` LIKE '{$col}'");
+function table_exists(mysqli $conn, string $table): bool {
+  $t = $conn->real_escape_string($table);
+  $rs = $conn->query("SHOW TABLES LIKE '{$t}'");
   return $rs && $rs->num_rows > 0;
 }
-
-/* POST base */
-$tag            = trim($_POST['tag'] ?? '');
-$nombre_cliente = trim($_POST['nombre_cliente'] ?? '');
-$telefono       = trim($_POST['telefono'] ?? '');
-$comentarios    = trim($_POST['comentarios'] ?? '');
-$forma_pago     = $_POST['forma_pago'] ?? 'Efectivo';
-$efectivo       = (float)($_POST['efectivo'] ?? 0);
-$tarjeta        = (float)($_POST['tarjeta'] ?? 0);
-$es_regalo      = (int)($_POST['es_regalo'] ?? 0);
-
-/* Validaciones base */
-if ($tag === '') fail('TAG requerido');
-if ($nombre_cliente === '') fail('Nombre del cliente requerido');
-if (!preg_match('/^[0-9]{10}$/', $telefono)) fail('Teléfono inválido (10 dígitos)');
-if ($ID_SUCURSAL <= 0) fail('Sucursal inválida');
-if (!in_array($forma_pago, ['Efectivo','Tarjeta','Mixto'], true)) fail('Forma de pago inválida');
-
-/* -------------------- PARSEO DE LÍNEAS -------------------- */
-$norm = [];
-$raw = $_POST['linea'] ?? null;
-
-$push = function($idp,$cant,$precio) use (&$norm){
-  $idp = toInt($idp); $cant = toInt($cant); $precio = toFloat($precio);
-  if ($idp<=0 && $cant==0 && ($precio<0 || $precio===0.0)) { return; } // fila en blanco
-  if ($idp<=0 || $cant<=0 || $precio<0) {
-    $norm[] = ['_invalid'=>true, 'id_producto'=>$idp, 'cantidad'=>$cant, 'precio'=>$precio];
+function normalizar_tag($s){
+  $s = strtoupper(trim((string)$s));
+  return preg_replace('/\s+/', ' ', $s);
+}
+function buscar_venta_equipo_por_tag(mysqli $conn, string $tag): array {
+  $tag = normalizar_tag($tag);
+  if ($tag === '') return [0,0];
+  $sql = "SELECT v.id, v.id_sucursal FROM ventas v
+          WHERE UPPER(TRIM(v.tag)) = UPPER(TRIM(?)) LIMIT 1";
+  $st = $conn->prepare($sql);
+  if (!$st) return [0,0];
+  $st->bind_param('s', $tag);
+  if (!$st->execute()) return [0,0];
+  $r = $st->get_result()->fetch_row();
+  return $r ? [(int)$r[0], (int)$r[1]] : [0,0];
+}
+function parse_codes_to_array(string $raw): array {
+  $raw = trim($raw);
+  if ($raw === '') return [];
+  if (preg_match('/^\s*\[/', $raw)) {
+    $arr = json_decode($raw, true);
+    if (!is_array($arr)) return [];
+    $arr = array_map(fn($x)=>trim((string)$x), $arr);
   } else {
-    $norm[] = ['id_producto'=>$idp,'cantidad'=>$cant,'precio'=>$precio];
+    $raw = str_replace(["\r\n","\r"], "\n", $raw);
+    $arr = preg_split('/[\n,]+/', $raw);
+    $arr = array_map('trim', $arr);
   }
-};
-
-if (is_array($raw) && isset($raw[0]) && is_array($raw[0])) {
-  foreach ($raw as $ln) { $push($ln['id_producto'] ?? null, $ln['cantidad'] ?? null, $ln['precio'] ?? null); }
-} elseif (is_array($raw) && isset($raw['id_producto']) && isset($raw['cantidad']) && isset($raw['precio'])
-          && (is_array($raw['id_producto']) || is_array($raw['cantidad']) || is_array($raw['precio']))) {
-  $N = max(count((array)$raw['id_producto']), count((array)$raw['cantidad']), count((array)$raw['precio']));
-  for ($i=0;$i<$N;$i++){ $push($raw['id_producto'][$i] ?? null, $raw['cantidad'][$i] ?? null, $raw['precio'][$i] ?? null); }
-} elseif (is_array($raw) && isset($raw['id_producto'],$raw['cantidad'],$raw['precio'])) {
-  $push($raw['id_producto'], $raw['cantidad'], $raw['precio']);
-} elseif (isset($_POST['linea_id_producto'],$_POST['linea_cantidad'],$_POST['linea_precio'])) {
-  $ips = (array)$_POST['linea_id_producto'];
-  $cns = (array)$_POST['linea_cantidad'];
-  $prs = (array)$_POST['linea_precio'];
-  $N = max(count($ips),count($cns),count($prs));
-  for ($i=0;$i<$N;$i++){ $push($ips[$i] ?? null, $cns[$i] ?? null, $prs[$i] ?? null); }
-} else {
-  fail('No se recibió ninguna línea.');
+  return array_values(array_unique(array_filter($arr, fn($x)=>$x!=='')));
+}
+function nombre_producto(mysqli $conn, int $idProducto): string {
+  $st = $conn->prepare("SELECT TRIM(CONCAT(marca,' ',modelo,' ',COALESCE(color,''))) AS n FROM productos WHERE id=?");
+  $st->bind_param('i', $idProducto);
+  $st->execute();
+  $r = $st->get_result()->fetch_assoc();
+  return trim((string)($r['n'] ?? 'Producto #'.$idProducto));
+}
+// NUEVO: checar si el producto es "solo regalo" (vender=0)
+function es_solo_regalo(mysqli $conn, int $idProducto): bool {
+  $tbl = $conn->query("SHOW TABLES LIKE 'accesorios_regalo_modelos'");
+  if (!$tbl || $tbl->num_rows === 0) return false;
+  $st = $conn->prepare("SELECT 1 FROM accesorios_regalo_modelos WHERE id_producto=? AND activo=1 AND vender=0 LIMIT 1");
+  $st->bind_param('i', $idProducto);
+  $st->execute();
+  return (bool)$st->get_result()->fetch_row();
 }
 
-if (empty($norm)) fail('No hay líneas válidas.');
-$idx = 1;
-foreach ($norm as $ln){
-  if (!empty($ln['_invalid'])) fail('Línea inválida en la fila '.$idx.'. Selecciona accesorio, cantidad y precio.');
-  $idx++;
+/* ---------------- Entradas ---------------- */
+$TAG_ACCES    = normalizar_tag($_POST['tag'] ?? '');
+$NOMBRE       = trim((string)($_POST['nombre_cliente'] ?? ''));
+$TELEFONO     = trim((string)($_POST['telefono'] ?? ''));
+$FORMA_PAGO   = trim((string)($_POST['forma_pago'] ?? 'Efectivo'));
+$EFECTIVO     = (float)($_POST['efectivo'] ?? 0);
+$TARJETA      = (float)($_POST['tarjeta'] ?? 0);
+$COMENTARIOS  = trim((string)($_POST['comentarios'] ?? ''));
+$ES_REGALO    = (int)($_POST['es_regalo'] ?? 0);
+$TAG_EQUIPO   = normalizar_tag($_POST['tag_equipo'] ?? ($_POST['tag_venta_equipo'] ?? ''));
+
+$IDS  = array_map('intval', (array)($_POST['linea_id_producto'] ?? []));
+$CANT = array_map('intval', (array)($_POST['linea_cantidad'] ?? []));
+$PREC = array_map('floatval', (array)($_POST['linea_precio'] ?? []));
+
+/* ---------------- Validaciones básicas ---------------- */
+if ($ID_SUCURSAL <= 0)                   die('Sucursal inválida.');
+if ($TAG_ACCES === '')                   die('TAG de la venta de accesorios es requerido.');
+if ($NOMBRE === '' || $TELEFONO === '')  die('Nombre y teléfono son requeridos.');
+if (count($IDS) === 0)                   die('Debes agregar al menos una línea.');
+if (count($IDS) !== count($CANT) || count($IDS) !== count($PREC)) die('Líneas mal formadas.');
+
+$lineas = [];
+for ($i=0; $i<count($IDS); $i++){
+  $pid = (int)$IDS[$i]; if ($pid<=0) continue;
+  $qty = max(1, (int)$CANT[$i]);
+  $prc = max(0.0, (float)$PREC[$i]);
+  $lineas[] = ['id_producto'=>$pid, 'cantidad'=>$qty, 'precio'=>$prc];
 }
+if (empty($lineas)) die('Líneas inválidas.');
 
-/* =========================
-   MODO REGALO (servidor)
-   ========================= */
-$regaloMode = ($es_regalo === 1);
-$permitidos = [];
-
-if ($regaloMode) {
-  if (!table_exists($conn, 'accesorios_regalo_modelos')) {
-    fail('No existe configuración de modelos para regalo. Contacta a Logística.');
-  }
-  $wh = $conn->query("SELECT id_producto FROM accesorios_regalo_modelos WHERE activo=1");
-  if ($wh) while ($r = $wh->fetch_assoc()) $permitidos[(int)$r['id_producto']] = true;
-  if (empty($permitidos)) fail('No hay modelos elegibles para regalo configurados.');
-
-  foreach ($norm as &$ln) {
-    $pid = (int)$ln['id_producto'];
-    if (!isset($permitidos[$pid])) fail('El producto '.$pid.' no está autorizado como regalo.');
-    $ln['precio'] = 0.00; // precio $0 en regalo
-  }
-  unset($ln);
-  $forma_pago = 'Efectivo'; // backend fuerza efectivo $0
-  $efectivo   = 0.00;
-  $tarjeta    = 0.00;
-}
-
-/* Total y pagos */
-$total = 0.0;
-foreach ($norm as $ln) $total += $ln['cantidad'] * $ln['precio'];
-$total = (float)n2($total);
-
-if (!$regaloMode) {
-  if ($forma_pago==='Efectivo' && (float)n2($efectivo) !== $total) fail('Efectivo debe igualar el total.');
-  if ($forma_pago==='Tarjeta'  && (float)n2($tarjeta)  !== $total) fail('Tarjeta debe igualar el total.');
-  if ($forma_pago==='Mixto'    && (float)n2($efectivo+$tarjeta) !== $total) fail('En pago Mixto, Efectivo + Tarjeta debe igualar el total.');
-} else {
-  if ((float)$total !== 0.0) fail('En venta con regalo el total debe ser $0.');
-}
-
-/* ====== FIFO (respetando estatus existentes) ======
-   - Solo consume filas con estatus = 'Disponible'
-   - Si se consume por completo: estatus = 'Vendido'
-   - Si se consume parcial: permanece 'Disponible'
-==================================================== */
-$EST_DISPONIBLE = 'Disponible';
-$EST_VENDIDO    = 'Vendido';
-
-$conn->begin_transaction();
-try {
-  // Validar TAG único
-  $chk = $conn->prepare("SELECT id FROM ventas_accesorios WHERE tag=? LIMIT 1");
-  if (!$chk) throw new Exception('Error al preparar verificación de TAG.');
-  $chk->bind_param('s', $tag);
-  $chk->execute();
-  $r = $chk->get_result();
-  if ($r && $r->num_rows > 0) throw new Exception('El TAG ya existe.');
-
-  // ¿ventas_accesorios.es_regalo existe?
-  $tiene_es_regalo = column_exists($conn, 'ventas_accesorios', 'es_regalo');
-
-  // Encabezado
-  if ($tiene_es_regalo) {
-    $stmt = $conn->prepare("INSERT INTO ventas_accesorios
-      (tag,nombre_cliente,telefono,id_sucursal,id_usuario,forma_pago,efectivo,tarjeta,total,comentarios,es_regalo)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?)");
-    if (!$stmt) throw new Exception('Error al preparar encabezado.');
-    $stmt->bind_param('sssiisdddsi', $tag,$nombre_cliente,$telefono,$ID_SUCURSAL,$ID_USUARIO,$forma_pago,$efectivo,$tarjeta,$total,$comentarios,$es_regalo);
-  } else {
-    if ($regaloMode) $comentarios = trim(($comentarios!==''?$comentarios.' ':'').'(REGALO)');
-    $stmt = $conn->prepare("INSERT INTO ventas_accesorios
-      (tag,nombre_cliente,telefono,id_sucursal,id_usuario,forma_pago,efectivo,tarjeta,total,comentarios)
-      VALUES (?,?,?,?,?,?,?,?,?,?)");
-    if (!$stmt) throw new Exception('Error al preparar encabezado.');
-    $stmt->bind_param('sssiisddds', $tag,$nombre_cliente,$telefono,$ID_SUCURSAL,$ID_USUARIO,$forma_pago,$efectivo,$tarjeta,$total,$comentarios);
-  }
-  $stmt->execute();
-  $idVenta = (int)$conn->insert_id;
-
-  // Helpers
-  $getP = $conn->prepare("SELECT TRIM(CONCAT(marca,' ',modelo,' ',COALESCE(color,''))) AS nombre FROM productos WHERE id=? LIMIT 1");
-  if (!$getP) throw new Exception('Error al preparar snapshot de producto.');
-  $insD = $conn->prepare("INSERT INTO detalle_venta_accesorio (id_venta,id_producto,descripcion_snapshot,cantidad,precio_unitario,subtotal)
-                          VALUES (?,?,?,?,?,?)");
-  if (!$insD) throw new Exception('Error al preparar detalle.');
-
-  // Solo cuenta y consume inventario con estatus 'Disponible'
-  $qDisp = $conn->prepare("SELECT SUM(COALESCE(cantidad,1)) AS disp
-                           FROM inventario
-                           WHERE id_producto=? AND id_sucursal=? AND estatus=?");
-  if (!$qDisp) throw new Exception('Error al preparar consulta de stock.');
-
-  $qFIFO = $conn->prepare("SELECT id, COALESCE(cantidad,1) AS qty
-                           FROM inventario
-                           WHERE id_producto=? AND id_sucursal=? AND estatus=?
-                           ORDER BY fecha_ingreso ASC, id ASC");
-  if (!$qFIFO) throw new Exception('Error al preparar consulta FIFO.');
-
-  $updRestar = $conn->prepare("UPDATE inventario SET cantidad = cantidad - ? WHERE id=?");
-  // Cuando se agota, se marca como Vendido (no usamos 'Agotado')
-  $updAgotar = $conn->prepare("UPDATE inventario SET cantidad = 0, estatus = ? WHERE id=?");
-
-  foreach ($norm as $ln){
-    $pid    = (int)$ln['id_producto'];
-    $cant   = (int)$ln['cantidad'];
-    $precio = (float)$ln['precio']; // 0 en modo regalo
-
-    // Stock disponible en sucursal
-    $qDisp->bind_param('iis', $pid, $ID_SUCURSAL, $EST_DISPONIBLE);
-    $qDisp->execute();
-    $disp = (int)($qDisp->get_result()->fetch_assoc()['disp'] ?? 0);
-    if ($disp < $cant) throw new Exception('Stock insuficiente para producto '.$pid.' (disp: '.$disp.', req: '.$cant.').');
-
-    // Snapshot de producto
-    $getP->bind_param('i', $pid);
-    $getP->execute();
-    $rP = $getP->get_result();
-    $nombre = ($rP && $rP->num_rows) ? ($rP->fetch_assoc()['nombre'] ?? ('Prod #'.$pid)) : ('Prod #'.$pid);
-
-    // Detalle
-    $sub = (float)n2($cant * $precio);
-    $insD->bind_param('iisidd', $idVenta, $pid, $nombre, $cant, $precio, $sub);
-    $insD->execute();
-
-    // FIFO
-    $qFIFO->bind_param('iis', $pid, $ID_SUCURSAL, $EST_DISPONIBLE);
-    $qFIFO->execute();
-    $rows = $qFIFO->get_result()->fetch_all(MYSQLI_ASSOC);
-
-    $porConsumir = $cant;
-    foreach ($rows as $rw){
-      if ($porConsumir <= 0) break;
-      $filaId = (int)$rw['id'];
-      $tiene  = (int)$rw['qty'];
-      if ($tiene <= 0) continue;
-
-      if ($tiene > $porConsumir){
-        // consumo parcial -> sigue 'Disponible'
-        $updRestar->bind_param('ii', $porConsumir, $filaId);
-        $updRestar->execute();
-        $porConsumir = 0;
-      } else {
-        // consumo total -> marcar 'Vendido'
-        $nuevoEstatus = $EST_VENDIDO;
-        $updAgotar->bind_param('si', $nuevoEstatus, $filaId);
-        $updAgotar->execute();
-        $porConsumir -= $tiene;
-      }
+/* ---------------- Bloqueo por vender=0 (si NO es regalo) ---------------- */
+if ($ES_REGALO === 0){
+  foreach ($lineas as $ln){
+    if (es_solo_regalo($conn, (int)$ln['id_producto'])) {
+      die('Este accesorio es solo para regalo.');
     }
-    if ($porConsumir > 0) throw new Exception('No se pudo completar la salida de inventario (FIFO) para producto '.$pid);
+  }
+}
+
+/* ---------------- Modo REGALO ---------------- */
+$has_es_regalo_col  = column_exists($conn, 'ventas_accesorios', 'es_regalo');
+$has_tag_equipo_col = column_exists($conn, 'ventas_accesorios', 'tag_equipo');
+
+if ($ES_REGALO === 1) {
+  if (count($lineas) !== 1) die('En regalo solo se permite 1 accesorio.');
+  $lineas[0]['cantidad'] = 1;
+  $lineas[0]['precio']   = 0.00;
+
+  if ($TAG_EQUIPO === '') die('Debes capturar el TAG de la venta de equipo.');
+  [$ID_VENTA_EQUIPO] = buscar_venta_equipo_por_tag($conn, $TAG_EQUIPO);
+  if ($ID_VENTA_EQUIPO <= 0) die('No se encontró una venta de equipo con ese TAG.');
+
+  if ($has_tag_equipo_col){
+    $st = $conn->prepare("SELECT 1 FROM ventas_accesorios WHERE tag_equipo=? LIMIT 1");
+    $st->bind_param('s', $TAG_EQUIPO);
+    $st->execute();
+    if ($st->get_result()->fetch_row()) die('Ese TAG ya usó su accesorio de regalo.');
+  }
+
+  // Whitelist
+  $ID_ACC = (int)$lineas[0]['id_producto'];
+  $st = $conn->prepare("SELECT codigos_equipos
+                          FROM accesorios_regalo_modelos
+                         WHERE id_producto=? AND activo=1 LIMIT 1");
+  if (!$st) die('Error preparando whitelist: '.$conn->error);
+  $st->bind_param('i', $ID_ACC);
+  $st->execute();
+  $row = $st->get_result()->fetch_assoc();
+  if (!$row) die('El accesorio no está habilitado para regalo.');
+
+  $codes = parse_codes_to_array((string)$row['codigos_equipos']);
+  if (empty($codes)) die('No hay códigos habilitadores configurados para este accesorio.');
+
+  $marks = implode(',', array_fill(0, count($codes), '?'));
+  $types = str_repeat('s', count($codes));
+  $sql = "SELECT 1 FROM detalle_venta dv
+          JOIN productos p ON p.id = dv.id_producto
+          WHERE dv.id_venta = ? AND p.codigo_producto IN ($marks) LIMIT 1";
+  $st = $conn->prepare($sql);
+  if (!$st) die('Error validando códigos habilitadores: '.$conn->error);
+  $bind_types = 'i'.$types;
+  $bind_vals  = array_merge([$ID_VENTA_EQUIPO], $codes);
+  $st->bind_param($bind_types, ...$bind_vals);
+  $st->execute();
+  if (!$st->get_result()->fetch_row()){
+    die('La venta de equipo no contiene un modelo habilitador para este accesorio.');
+  }
+
+  // Forzar pagos $0
+  $FORMA_PAGO = 'Efectivo';
+  $EFECTIVO   = 0.00;
+  $TARJETA    = 0.00;
+}
+
+/* ---------------- Stock (solo 'Disponible') ---------------- */
+function stock_disponible(mysqli $conn, int $idSucursal, int $idProducto): int {
+  $st = $conn->prepare("
+    SELECT COALESCE(SUM(CASE WHEN estatus='Disponible'
+                             THEN COALESCE(cantidad,1) ELSE 0 END),0)
+    FROM inventario WHERE id_sucursal=? AND id_producto=?");
+  $st->bind_param('ii', $idSucursal, $idProducto);
+  $st->execute();
+  return (int)$st->get_result()->fetch_row()[0];
+}
+function descontar_inventario(mysqli $conn, int $idSucursal, int $idProducto, int $qty){
+  $st = $conn->prepare("
+    SELECT id, COALESCE(cantidad,1) AS cant
+    FROM inventario
+    WHERE id_sucursal=? AND id_producto=? AND estatus='Disponible'
+    ORDER BY id ASC");
+  $st->bind_param('ii', $idSucursal, $idProducto);
+  $st->execute();
+  $res = $st->get_result();
+
+  $pend = $qty;
+  while ($pend > 0 && ($row = $res->fetch_assoc())){
+    $iid = (int)$row['id'];
+    $c   = (int)$row['cant'];
+    if ($c <= 0) continue;
+    $take = min($pend, $c);
+    // Opción A: solo restar cantidad; NO tocar estatus.
+    $up = $conn->prepare("UPDATE inventario SET cantidad = GREATEST(cantidad-?,0) WHERE id=?");
+    $up->bind_param('ii', $take, $iid);
+    if (!$up->execute()) throw new Exception('No se pudo actualizar inventario: '.$conn->error);
+    $pend -= $take;
+  }
+  if ($pend > 0) throw new Exception('Stock insuficiente en inventario.');
+}
+
+/* ---------------- Totales / Pagos ---------------- */
+$total = 0.0;
+if ($ES_REGALO === 0){
+  foreach ($lineas as $ln){ $total += $ln['cantidad'] * $ln['precio']; }
+  $total = (float)round($total, 2);
+
+  if ($FORMA_PAGO === 'Efectivo'){
+    if (abs($EFECTIVO - $total) > 0.01) die('Efectivo debe igualar el Total.');
+    $TARJETA = 0.00;
+  } elseif ($FORMA_PAGO === 'Tarjeta'){
+    if (abs($TARJETA - $total) > 0.01) die('Tarjeta debe igualar el Total.');
+    $EFECTIVO = 0.00;
+  } else { // Mixto
+    if (abs(($EFECTIVO + $TARJETA) - $total) > 0.01) die('En Mixto, Efectivo + Tarjeta debe igualar el Total.');
+  }
+}
+
+/* ---------------- Validar stock ---------------- */
+foreach ($lineas as $ln){
+  $disp = stock_disponible($conn, $ID_SUCURSAL, $ln['id_producto']);
+  if ($ln['cantidad'] > $disp){
+    die('Stock insuficiente para el producto '.$ln['id_producto'].' (solicitado '.$ln['cantidad'].', disponible '.$disp.').');
+  }
+}
+
+/* ---------------- Transacción ---------------- */
+$conn->begin_transaction();
+try{
+  // Encabezado
+  $cols = "tag, nombre_cliente, telefono, id_sucursal, id_usuario, forma_pago, efectivo, tarjeta, total, comentarios";
+  $vals = "?,   ?,              ?,        ?,           ?,          ?,          ?,       ?,       ?,     ?";
+  $bind = "sssii sddd s"; $bind = str_replace(' ','',$bind);
+  $params = [$TAG_ACCES, $NOMBRE, $TELEFONO, $ID_SUCURSAL, $ID_USUARIO, $FORMA_PAGO, $EFECTIVO, $TARJETA, $total, $COMENTARIOS];
+
+  if (column_exists($conn,'ventas_accesorios','es_regalo')) { $cols.=", es_regalo";  $vals.=", ?"; $bind.="i"; $params[]=(int)$ES_REGALO; }
+  if (column_exists($conn,'ventas_accesorios','tag_equipo')) { $cols.=", tag_equipo"; $vals.=", ?"; $bind.="s"; $params[]=$TAG_EQUIPO; }
+
+  $sql = "INSERT INTO ventas_accesorios ($cols) VALUES ($vals)";
+  $st = $conn->prepare($sql);
+  if (!$st) throw new Exception('No se pudo preparar INSERT de venta: '.$conn->error);
+  $st->bind_param($bind, ...$params);
+  if (!$st->execute()) throw new Exception('No se pudo guardar la venta: '.$st->error);
+  $ID_VENTA_ACC = (int)$st->insert_id;
+
+  // Tabla de detalle (detecta singular/plural)
+  $tblDetalle = table_exists($conn,'detalle_venta_accesorio') ? 'detalle_venta_accesorio'
+              : (table_exists($conn,'detalle_venta_accesorios') ? 'detalle_venta_accesorios' : '');
+
+  if ($tblDetalle === '') throw new Exception('No existe tabla de detalle para accesorios.');
+
+  // Columnas disponibles en tu screenshot: descripcion_snapshot, cantidad, precio_unitario, subtotal
+  $tieneDescripcion = column_exists($conn, $tblDetalle, 'descripcion_snapshot');
+  $tieneSubtotal    = column_exists($conn, $tblDetalle, 'subtotal');
+
+  $sqlDet = "INSERT INTO `$tblDetalle` (id_venta, id_producto"
+          . ($tieneDescripcion? ", descripcion_snapshot":"")
+          . ", cantidad, precio_unitario"
+          . ($tieneSubtotal? ", subtotal":"")
+          . ") VALUES (?,?,?,?,?"
+          . ($tieneSubtotal? ",?":"")
+          . ")";
+  $stDet = $conn->prepare($sqlDet);
+  if (!$stDet) throw new Exception('No se pudo preparar detalle: '.$conn->error);
+
+  foreach ($lineas as $ln){
+    $desc = $tieneDescripcion ? nombre_producto($conn, (int)$ln['id_producto']) : null;
+    $subt = $tieneSubtotal    ? (float)($ln['cantidad'] * $ln['precio']) : null;
+
+    if ($tieneDescripcion && $tieneSubtotal){
+      $stDet->bind_param('iisidd', $ID_VENTA_ACC, $ln['id_producto'], $desc, $ln['cantidad'], $ln['precio'], $subt);
+    } elseif ($tieneDescripcion && !$tieneSubtotal){
+      $stDet->bind_param('iisid',  $ID_VENTA_ACC, $ln['id_producto'], $desc, $ln['cantidad'], $ln['precio']);
+    } elseif (!$tieneDescripcion && $tieneSubtotal){
+      $stDet->bind_param('iiidd',  $ID_VENTA_ACC, $ln['id_producto'],        $ln['cantidad'], $ln['precio'], $subt);
+    } else {
+      // fallback por si fuera una estructura mínima
+      $stDet->close();
+      $sqlDetMin = "INSERT INTO `$tblDetalle` (id_venta, id_producto, cantidad, precio_unitario) VALUES (?,?,?,?)";
+      $stDet = $conn->prepare($sqlDetMin);
+      $stDet->bind_param('iiid', $ID_VENTA_ACC, $ln['id_producto'], $ln['cantidad'], $ln['precio']);
+    }
+
+    if (!$stDet->execute()) throw new Exception('No se pudo guardar detalle: '.$stDet->error);
+  }
+
+  // Descontar inventario (opción A)
+  foreach ($lineas as $ln){
+    descontar_inventario($conn, $ID_SUCURSAL, $ln['id_producto'], $ln['cantidad']);
   }
 
   $conn->commit();
-  header('Location: venta_accesorios_ticket.php?id='.$idVenta);
+  header("Location: venta_accesorios_ticket.php?id=".$ID_VENTA_ACC);
   exit;
 
 } catch (Throwable $e){
   $conn->rollback();
-  http_response_code(500);
-  echo 'Error al guardar la venta: '.h($e->getMessage());
+  http_response_code(400);
+  echo "Error al procesar la venta de accesorios: ".h($e->getMessage());
+  exit;
 }

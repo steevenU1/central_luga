@@ -1,6 +1,7 @@
 <?php
 // accesorios_regalo_admin.php — Admin/Logística: modelos elegibles para REGALO
-// FIX: endpoints AJAX se atienden ANTES de cualquier salida (sin navbar) para evitar "headers already sent"
+// + Switch individual para permitir/ bloquear VENTA (campo booleano `vender`).
+// Endpoints AJAX al inicio para evitar "headers already sent".
 
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 if (!isset($_SESSION['id_usuario'])) { header('Location: index.php'); exit(); }
@@ -14,7 +15,6 @@ if (!in_array($ROL, ['Admin','Logistica'], true)) { header('Location: 403.php');
 /* ===== Helpers ===== */
 function h($s){ return htmlspecialchars($s ?? '', ENT_QUOTES, 'UTF-8'); }
 function jexit($arr){
-  // limpiar buffers por si acaso
   while (ob_get_level() > 0) { ob_end_clean(); }
   header('Content-Type: application/json; charset=utf-8');
   echo json_encode($arr, JSON_UNESCAPED_UNICODE);
@@ -29,24 +29,30 @@ function column_exists(mysqli $conn, string $table, string $col): bool {
   return $rs && $rs->num_rows > 0;
 }
 
-/* ===== DDL segura (crea tabla whitelist si no existe) ===== */
-$conn->query("
-  CREATE TABLE IF NOT EXISTS accesorios_regalo_modelos (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    id_producto INT NOT NULL,
-    activo TINYINT(1) NOT NULL DEFAULT 1,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    UNIQUE KEY uniq_id_producto (id_producto)
-  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-");
+/* ===== DDL SEGURA ===== */
+$conn->query("CREATE TABLE IF NOT EXISTS accesorios_regalo_modelos (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  id_producto INT NOT NULL,
+  activo TINYINT(1) NOT NULL DEFAULT 1,
+  codigos_equipos TEXT NULL,
+  vender TINYINT(1) NOT NULL DEFAULT 1,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uniq_id_producto (id_producto)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
 
-/* ===== Endpoints AJAX (antes de cualquier HTML) ===== */
+if (!column_exists($conn, 'accesorios_regalo_modelos', 'codigos_equipos')) {
+  $conn->query("ALTER TABLE accesorios_regalo_modelos ADD COLUMN codigos_equipos TEXT NULL AFTER activo");
+}
+if (!column_exists($conn, 'accesorios_regalo_modelos', 'vender')) {
+  $conn->query("ALTER TABLE accesorios_regalo_modelos ADD COLUMN vender TINYINT(1) NOT NULL DEFAULT 1 AFTER codigos_equipos");
+}
+
+/* ===== Endpoints AJAX ===== */
 $action = $_GET['action'] ?? $_POST['action'] ?? null;
 
 if ($action === 'search_products') {
-  $q = trim($_GET['q'] ?? '');
-  if ($q === '') bad('Término vacío');
+  $q = trim($_GET['q'] ?? ''); if ($q === '') bad('Término vacío');
 
   $hasMarca  = column_exists($conn, 'productos', 'marca');
   $hasModelo = column_exists($conn, 'productos', 'modelo');
@@ -78,38 +84,27 @@ if ($action === 'search_products') {
   if ($hasColor)  $likes[] = "p.color  LIKE CONVERT(? USING utf8mb4)";
 
   if (empty($likes)) {
-    $sql = "
-      SELECT p.id AS id_producto, $nombreExpr AS nombre
-        FROM productos p
-       WHERE $whereTipo AND p.id = ?
-       ORDER BY nombre ASC
-       LIMIT 25";
-    $st = $conn->prepare($sql);
-    if (!$st) bad('Error SQL (prep/fallback id): '.$conn->error);
-    $idExacto = (int)$q;
-    $st->bind_param('i', $idExacto);
+    $sql = "SELECT p.id AS id_producto, $nombreExpr AS nombre
+            FROM productos p
+            WHERE $whereTipo AND p.id = ?
+            ORDER BY nombre ASC
+            LIMIT 25";
+    $st = $conn->prepare($sql); if (!$st) bad('Error SQL (prep/fallback id): '.$conn->error);
+    $idExacto = (int)$q; $st->bind_param('i', $idExacto);
   } else {
-    $sql = "
-      SELECT p.id AS id_producto, $nombreExpr AS nombre
-        FROM productos p
-       WHERE $whereTipo
-         AND (" . implode(" OR ", $likes) . ")
-       ORDER BY nombre ASC
-       LIMIT 25";
-    $st = $conn->prepare($sql);
-    if (!$st) bad('Error SQL (prepare): '.$conn->error);
-    $qLike = '%'.$q.'%';
-    $binds = [];
-    for ($i=0; $i<count($likes); $i++) $binds[] = $qLike;
-    $types = str_repeat('s', count($binds));
+    $sql = "SELECT p.id AS id_producto, $nombreExpr AS nombre
+            FROM productos p
+            WHERE $whereTipo AND (" . implode(" OR ", $likes) . ")
+            ORDER BY nombre ASC
+            LIMIT 25";
+    $st = $conn->prepare($sql); if (!$st) bad('Error SQL (prepare): '.$conn->error);
+    $qLike = '%'.$q.'%'; $binds = array_fill(0, count($likes), $qLike); $types = str_repeat('s', count($binds));
     $st->bind_param($types, ...$binds);
   }
 
   if (!$st->execute()) bad('Error SQL (exec): '.$st->error);
-  $rs = $st->get_result();
-  if (!$rs) bad('Error SQL (result): '.$st->error);
-  $items = $rs->fetch_all(MYSQLI_ASSOC);
-  ok(['items'=>$items]);
+  $rs = $st->get_result(); if (!$rs) bad('Error SQL (result): '.$st->error);
+  $items = $rs->fetch_all(MYSQLI_ASSOC); ok(['items'=>$items]);
 }
 
 if ($action === 'add_or_activate') {
@@ -119,22 +114,25 @@ if ($action === 'add_or_activate') {
                         VALUES (?,1)
                         ON DUPLICATE KEY UPDATE activo=VALUES(activo), updated_at=CURRENT_TIMESTAMP");
   if (!$st) bad('Error preparando alta: '.$conn->error);
-  $st->bind_param('i', $pid);
-  if (!$st->execute()) bad('Error al guardar: '.$st->error);
-  ok();
+  $st->bind_param('i', $pid); if (!$st->execute()) bad('Error al guardar: '.$st->error); ok();
 }
 
-if ($action === 'toggle') {
+if ($action === 'toggle') { // Activa/Inactiva como REGALO
   $pid = (int)($_POST['id_producto'] ?? 0);
   $val = (int)($_POST['activo'] ?? -1);
   if ($pid<=0 || ($val!==0 && $val!==1)) bad('Parámetros inválidos');
-  $st = $conn->prepare("UPDATE accesorios_regalo_modelos
-                           SET activo=?, updated_at=CURRENT_TIMESTAMP
-                         WHERE id_producto=?");
+  $st = $conn->prepare("UPDATE accesorios_regalo_modelos SET activo=?, updated_at=CURRENT_TIMESTAMP WHERE id_producto=?");
   if (!$st) bad('Error preparando toggle: '.$conn->error);
-  $st->bind_param('ii', $val, $pid);
-  if (!$st->execute()) bad('Error al actualizar: '.$st->error);
-  ok();
+  $st->bind_param('ii', $val, $pid); if (!$st->execute()) bad('Error al actualizar: '.$st->error); ok();
+}
+
+if ($action === 'toggle_vender') { // NUEVO: permite/ bloquea VENTA
+  $pid = (int)($_POST['id_producto'] ?? 0);
+  $val = (int)($_POST['vender'] ?? -1);
+  if ($pid<=0 || ($val!==0 && $val!==1)) bad('Parámetros inválidos');
+  $st = $conn->prepare("UPDATE accesorios_regalo_modelos SET vender=?, updated_at=CURRENT_TIMESTAMP WHERE id_producto=?");
+  if (!$st) bad('Error preparando toggle_vender: '.$conn->error);
+  $st->bind_param('ii', $val, $pid); if (!$st->execute()) bad('Error al actualizar: '.$st->error); ok();
 }
 
 if ($action === 'remove') {
@@ -142,39 +140,78 @@ if ($action === 'remove') {
   if ($pid<=0) bad('Producto inválido');
   $st = $conn->prepare("DELETE FROM accesorios_regalo_modelos WHERE id_producto=?");
   if (!$st) bad('Error preparando eliminación: '.$conn->error);
-  $st->bind_param('i', $pid);
-  if (!$st->execute()) bad('Error al eliminar: '.$st->error);
-  ok();
+  $st->bind_param('i', $pid); if (!$st->execute()) bad('Error al eliminar: '.$st->error); ok();
 }
 
 if ($action === 'list') {
   $only = isset($_GET['solo_activos']) ? (int)$_GET['solo_activos'] : -1;
   $where = ($only === 1) ? " WHERE arm.activo=1 " : "";
-  $sql = "
-    SELECT arm.id_producto,
-           arm.activo,
-           TRIM(CONCAT(COALESCE(p.marca,''),' ',COALESCE(p.modelo,''),' ',COALESCE(p.color,''))) AS nombre
-      FROM accesorios_regalo_modelos arm
-      LEFT JOIN productos p ON p.id = arm.id_producto
-      $where
-     ORDER BY arm.activo DESC, nombre ASC";
+  $sql = "SELECT arm.id_producto, arm.activo, arm.codigos_equipos, arm.vender,
+                 TRIM(CONCAT(COALESCE(p.marca,''),' ',COALESCE(p.modelo,''),' ',COALESCE(p.color,''))) AS nombre
+          FROM accesorios_regalo_modelos arm
+          LEFT JOIN productos p ON p.id = arm.id_producto
+          $where
+          ORDER BY arm.activo DESC, nombre ASC";
   $rs = $conn->query($sql);
   $rows = $rs ? $rs->fetch_all(MYSQLI_ASSOC) : [];
+  foreach ($rows as &$r){
+    $raw = trim((string)($r['codigos_equipos'] ?? ''));
+    $cnt = 0; if ($raw !== ''){
+      if (preg_match('/^\s*\[/', $raw)) {
+        $arr = json_decode($raw, true);
+        if (is_array($arr)) $cnt = count(array_filter($arr, fn($x)=>trim((string)$x) !== ''));
+      } else {
+        $parts = array_filter(array_map('trim', explode(',', $raw)), fn($x)=>$x!=='');
+        $cnt = count($parts);
+      }
+    }
+    $r['codes_count'] = $cnt;
+    $r['vender'] = (int)($r['vender'] ?? 1);
+  }
   ok(['rows'=>$rows]);
 }
 
-/* ===== Si llegamos aquí, es render HTML (no AJAX) ===== */
-require_once __DIR__.'/navbar.php';
+if ($action === 'get_codes') {
+  $pid = (int)($_GET['id_producto'] ?? 0); if ($pid<=0) bad('Producto inválido');
+  $st = $conn->prepare("SELECT codigos_equipos FROM accesorios_regalo_modelos WHERE id_producto=? LIMIT 1");
+  if (!$st) bad('Error preparando lectura: '.$conn->error);
+  $st->bind_param('i', $pid); if (!$st->execute()) bad('Error al leer: '.$st->error);
+  $row = $st->get_result()->fetch_assoc(); ok(['codigos' => (string)($row['codigos_equipos'] ?? '')]);
+}
 
-/* Render inicial */
+if ($action === 'save_codes') {
+  $pid = (int)($_POST['id_producto'] ?? 0);
+  $raw = (string)($_POST['codigos'] ?? '');
+  if ($pid<=0) bad('Producto inválido');
+
+  $txt = trim($raw);
+  if ($txt !== '') {
+    if (preg_match('/^\s*\[/', $txt)) {
+      $arr = json_decode($txt, true); if (!is_array($arr)) bad('JSON inválido en la lista de códigos.');
+      $arr = array_values(array_unique(array_filter(array_map(fn($x)=>trim((string)$x), $arr), fn($x)=>$x!=='')));
+      $txt = json_encode($arr, JSON_UNESCAPED_UNICODE);
+    } else {
+      $txt = str_replace(["\r\n","\r"], "\n", $txt);
+      $parts = preg_split('/[\n,]+/', $txt);
+      $parts = array_values(array_unique(array_filter(array_map(fn($x)=>trim($x), $parts), fn($x)=>$x!=='')));
+      $txt = implode(',', $parts);
+    }
+    if (strlen($txt) > 65534) bad('La lista es demasiado grande.');
+  }
+
+  $st = $conn->prepare("UPDATE accesorios_regalo_modelos SET codigos_equipos=?, updated_at=CURRENT_TIMESTAMP WHERE id_producto=?");
+  if (!$st) bad('Error preparando guardado: '.$conn->error);
+  $st->bind_param('si', $txt, $pid); if (!$st->execute()) bad('Error al guardar: '.$st->error); ok();
+}
+
+/* ===== Render HTML (no AJAX) ===== */
+require_once __DIR__.'/navbar.php';
 $primerListado = [];
-$init = $conn->query("
-  SELECT arm.id_producto, arm.activo,
-         TRIM(CONCAT(COALESCE(p.marca,''),' ',COALESCE(p.modelo,''),' ',COALESCE(p.color,''))) AS nombre
-    FROM accesorios_regalo_modelos arm
-    LEFT JOIN productos p ON p.id = arm.id_producto
-   ORDER BY arm.activo DESC, nombre ASC
-");
+$init = $conn->query("SELECT arm.id_producto, arm.activo, arm.codigos_equipos, arm.vender,
+                             TRIM(CONCAT(COALESCE(p.marca,''),' ',COALESCE(p.modelo,''),' ',COALESCE(p.color,''))) AS nombre
+                      FROM accesorios_regalo_modelos arm
+                      LEFT JOIN productos p ON p.id = arm.id_producto
+                      ORDER BY arm.activo DESC, nombre ASC");
 if ($init) { $primerListado = $init->fetch_all(MYSQLI_ASSOC); }
 ?>
 <!doctype html>
@@ -196,8 +233,9 @@ if ($init) { $primerListado = $init->fetch_all(MYSQLI_ASSOC); }
     .dot-on{background:#16a34a}
     .dot-off{background:#dc2626}
     .table-sticky thead th{position:sticky; top:0; background:#fff; z-index:1}
-    .w-40{width:40%}
+    .w-35{width:32%}
     .w-15{width:15%}
+    .w-10{width:10%}
   </style>
 </head>
 <body>
@@ -211,7 +249,7 @@ if ($init) { $primerListado = $init->fetch_all(MYSQLI_ASSOC); }
   </div>
 
   <div class="card card-ghost p-3 mb-3">
-    <h5 class="mb-3">Agregar modelo</h5>
+    <h5 class="mb-3">Agregar accesorio a la lista</h5>
     <div class="row g-2 align-items-end position-relative" id="searchRow">
       <div class="col-md-8 position-relative">
         <label class="form-label">Buscar accesorio (marca, modelo o color)</label>
@@ -235,37 +273,56 @@ if ($init) { $primerListado = $init->fetch_all(MYSQLI_ASSOC); }
   <div class="card card-ghost p-3">
     <div class="d-flex align-items-center justify-content-between mb-2">
       <h5 class="mb-0">Listado</h5>
-      <small class="muted">Click en los botones para activar/desactivar o quitar</small>
+      <small class="muted">Activa/desactiva REGALO, bloquea/permite VENTA, quita o edita códigos.</small>
     </div>
     <div class="table-responsive">
       <table class="table table-sm align-middle table-sticky" id="tbl">
         <thead class="table-light">
           <tr>
-            <th class="w-40">Modelo</th>
-            <th class="w-15">Estatus</th>
-            <th class="w-15 text-center">Acción</th>
-            <th class="w-15 text-center">Quitar</th>
+            <th class="w-35">Accesorio</th>
+            <th class="w-15">Regalo</th>
+            <th class="w-15">Vender</th>
+            <th class="w-15 text-center">Códigos</th>
+            <th class="w-10 text-center">Editar</th>
+            <th class="w-10 text-center">Quitar</th>
           </tr>
         </thead>
         <tbody id="tbody">
           <?php if (empty($primerListado)): ?>
-            <tr><td colspan="4" class="text-center text-muted">Sin modelos configurados todavía.</td></tr>
-          <?php else: foreach ($primerListado as $r): ?>
+            <tr><td colspan="6" class="text-center text-muted">Sin modelos configurados todavía.</td></tr>
+          <?php else: foreach ($primerListado as $r):
+            $nombre = trim($r['nombre']) !== '' ? $r['nombre'] : ('Prod #'.(int)$r['id_producto']);
+            $raw = trim((string)($r['codigos_equipos'] ?? ''));
+            $cnt = 0;
+            if ($raw !== '') {
+              if (preg_match('/^\s*\[/', $raw)) {
+                $arr = json_decode($raw, true);
+                if (is_array($arr)) $cnt = count(array_filter($arr, fn($x)=>trim((string)$x) !== ''));
+              } else {
+                $parts = array_filter(array_map('trim', explode(',', $raw)), fn($x)=>$x!=='');
+                $cnt = count($parts);
+              }
+            }
+            $vender = (int)($r['vender'] ?? 1);
+          ?>
             <tr data-id="<?= (int)$r['id_producto'] ?>">
-              <td><?= h(trim($r['nombre']) !== '' ? $r['nombre'] : ('Prod #'.(int)$r['id_producto'])) ?></td>
+              <td><?= h($nombre) ?></td>
               <td>
-                <?php if ((int)$r['activo']===1): ?>
-                  <span class="status-dot dot-on"></span> Activo
-                <?php else: ?>
-                  <span class="status-dot dot-off"></span> Inactivo
-                <?php endif; ?>
-              </td>
-              <td class="text-center">
                 <?php if ((int)$r['activo']===1): ?>
                   <button class="btn btn-outline-warning btn-sm btnToggle" data-val="0">Desactivar</button>
                 <?php else: ?>
                   <button class="btn btn-outline-success btn-sm btnToggle" data-val="1">Activar</button>
                 <?php endif; ?>
+              </td>
+              <td>
+                <div class="form-check form-switch">
+                  <input class="form-check-input swVender" type="checkbox" <?= $vender? 'checked':'' ?> />
+                  <label class="form-check-label small"><?= $vender? 'Permitida' : 'Bloqueada' ?></label>
+                </div>
+              </td>
+              <td class="text-center"><span class="badge bg-secondary-subtle text-dark"><?= $cnt ?> códigos</span></td>
+              <td class="text-center">
+                <button class="btn btn-outline-primary btn-sm btnEditCodes">Editar códigos</button>
               </td>
               <td class="text-center">
                 <button class="btn btn-outline-danger btn-sm btnRemove">Quitar</button>
@@ -274,6 +331,37 @@ if ($init) { $primerListado = $init->fetch_all(MYSQLI_ASSOC); }
           <?php endforeach; endif; ?>
         </tbody>
       </table>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: editar códigos -->
+<div class="modal fade" id="codesModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Códigos de equipos habilitadores</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+      </div>
+      <div class="modal-body">
+        <p class="mb-2">
+          Ingresa los <b>codigo_producto</b> de equipos que habilitan el regalo para este accesorio.
+          Puedes usar <b>CSV</b> (separados por coma) o <b>JSON</b> (<code>["A12-128","SM-A15"]</code>),
+          o uno por línea.
+        </p>
+        <textarea id="codesText" class="form-control" rows="8" placeholder="A12-128,SM-A15,IP12-64"></textarea>
+        <div class="d-flex justify-content-between mt-2">
+          <small id="codesCount" class="text-muted">0 códigos</small>
+          <div class="btn-group btn-group-sm">
+            <button type="button" id="btnToCSV" class="btn btn-outline-secondary">A CSV</button>
+            <button type="button" id="btnToJSON" class="btn btn-outline-secondary">A JSON</button>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
+        <button class="btn btn-primary" id="btnSaveCodes">Guardar</button>
+      </div>
     </div>
   </div>
 </div>
@@ -287,15 +375,26 @@ async function jfetch(url, opt){
 }
 function rowHTML(r){
   const activo = Number(r.activo)===1;
+  const vender = Number(r.vender)===1;
   const nombre = (r.nombre && r.nombre.trim()) ? r.nombre : ('Prod #'+r.id_producto);
+  const cnt = Number(r.codes_count||0);
   return `
     <tr data-id="${r.id_producto}">
       <td>${nombre}</td>
-      <td>${activo ? '<span class="status-dot dot-on"></span> Activo' : '<span class="status-dot dot-off"></span> Inactivo'}</td>
-      <td class="text-center">
+      <td>
         ${activo
           ? '<button class="btn btn-outline-warning btn-sm btnToggle" data-val="0">Desactivar</button>'
           : '<button class="btn btn-outline-success btn-sm btnToggle" data-val="1">Activar</button>'}
+      </td>
+      <td>
+        <div class="form-check form-switch">
+          <input class="form-check-input swVender" type="checkbox" ${vender? 'checked':''} />
+          <label class="form-check-label small">${vender? 'Permitida' : 'Bloqueada'}</label>
+        </div>
+      </td>
+      <td class="text-center"><span class="badge bg-secondary-subtle text-dark">${cnt} códigos</span></td>
+      <td class="text-center">
+        <button class="btn btn-outline-primary btn-sm btnEditCodes">Editar códigos</button>
       </td>
       <td class="text-center">
         <button class="btn btn-outline-danger btn-sm btnRemove">Quitar</button>
@@ -303,22 +402,11 @@ function rowHTML(r){
     </tr>`;
 }
 
-// Typeahead
-const q = $('#q');
-const portal = $('#portal');
-const btnAdd = $('#btnAdd');
-const selHidden = $('#selIdProducto');
+// Typeahead (agregar accesorio)
+const q = $('#q'), portal = $('#portal'), btnAdd = $('#btnAdd'), selHidden = $('#selIdProducto');
 let debounceTimer = null;
-
 function closePortal(){ portal.style.display='none'; }
-function openPortal(){
-  const r = q.getBoundingClientRect();
-  portal.style.minWidth = r.width+'px';
-  portal.style.left = r.left+'px';
-  portal.style.top = (r.bottom + window.scrollY)+'px';
-  portal.style.display='block';
-}
-
+function openPortal(){ const r = q.getBoundingClientRect(); portal.style.minWidth = r.width+'px'; portal.style.left = r.left+'px'; portal.style.top = (r.bottom + window.scrollY)+'px'; portal.style.display='block'; }
 q.addEventListener('input', ()=>{
   selHidden.value=''; btnAdd.disabled = true;
   const term = q.value.trim();
@@ -328,98 +416,141 @@ q.addEventListener('input', ()=>{
     try{
       const res = await jfetch('accesorios_regalo_admin.php?action=search_products&q='+encodeURIComponent(term));
       const items = res.items || [];
-      if (items.length===0){
-        portal.innerHTML = '<div class="portal-item text-muted">Sin coincidencias</div>'; openPortal(); return;
-      }
+      if (items.length===0){ portal.innerHTML = '<div class="portal-item text-muted">Sin coincidencias</div>'; openPortal(); return; }
       portal.innerHTML = items.map(it => `<div class="portal-item" data-id="${it.id_producto}">${it.nombre}</div>`).join('');
       openPortal();
-    }catch(e){
-      portal.innerHTML = `<div class="portal-item text-danger">${e.message || 'Error en búsqueda'}</div>`; openPortal();
-    }
+    }catch(e){ portal.innerHTML = `<div class="portal-item text-danger">${e.message || 'Error en búsqueda'}</div>`; openPortal(); }
   }, 250);
 });
-
 document.addEventListener('click', (ev)=>{
   if (portal.contains(ev.target)){
     const it = ev.target.closest('.portal-item[data-id]');
-    if (it){
-      selHidden.value = it.dataset.id;
-      q.value = it.textContent.trim();
-      btnAdd.disabled = false;
-      closePortal();
-    }
-  } else if (ev.target !== q){
-    closePortal();
-  }
+    if (it){ selHidden.value = it.dataset.id; q.value = it.textContent.trim(); btnAdd.disabled = false; closePortal(); }
+  } else if (ev.target !== q){ closePortal(); }
 });
-
-// Agregar / activar
 btnAdd.addEventListener('click', async ()=>{
-  const idp = Number(selHidden.value||0);
-  if (!idp){ alert('Selecciona un producto de la lista.'); return; }
+  const idp = Number(selHidden.value||0); if (!idp){ alert('Selecciona un accesorio de la lista.'); return; }
   btnAdd.disabled = true;
   try{
-    const fd = new FormData();
-    fd.append('action','add_or_activate');
-    fd.append('id_producto', String(idp));
+    const fd = new FormData(); fd.append('action','add_or_activate'); fd.append('id_producto', String(idp));
     const res = await jfetch('accesorios_regalo_admin.php', { method:'POST', body: fd });
-    if (!res.ok) throw new Error(res.error||'No se pudo agregar');
-    q.value=''; selHidden.value=''; await reloadList();
+    if (!res.ok) throw new Error(res.error||'No se pudo agregar'); q.value=''; selHidden.value=''; await reloadList();
   }catch(e){ alert(e.message); }
   finally{ btnAdd.disabled = false; }
 });
 
-// Listado
+// Listado dinámico
 const cbSoloActivos = $('#cbSoloActivos');
 const tbody = document.querySelector('#tbody');
-
 async function reloadList(){
   try{
     const url = 'accesorios_regalo_admin.php?action=list' + (cbSoloActivos.checked ? '&solo_activos=1' : '');
-    const res = await jfetch(url);
-    const rows = res.rows || [];
-    if (rows.length===0){
-      tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted">Sin modelos configurados.</td></tr>';
-      return;
-    }
+    const res = await jfetch(url); const rows = res.rows || [];
+    if (rows.length===0){ tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">Sin modelos configurados.</td></tr>'; return; }
     tbody.innerHTML = rows.map(rowHTML).join('');
-  }catch(e){
-    alert('Error cargando listado: '+e.message);
-  }
+  }catch(e){ alert('Error cargando listado: '+e.message); }
 }
 cbSoloActivos.addEventListener('change', reloadList);
 
-// Acciones por fila
-tbody.addEventListener('click', async (e)=>{
-  const tr = e.target.closest('tr[data-id]');
-  if (!tr) return;
-  const idp = Number(tr.dataset.id||0);
+// Modal de códigos
+let EDIT_ID = 0; const codesModalEl = document.getElementById('codesModal'); let codesModal = null;
+const codesText = document.getElementById('codesText'); const codesCount = document.getElementById('codesCount');
+const btnSaveCodes = document.getElementById('btnSaveCodes'); // ← DEFINIDO UNA SOLA VEZ
+const btnToCSV = document.getElementById('btnToCSV'); const btnToJSON = document.getElementById('btnToJSON');
+function countCodes(txt){
+  txt = (txt||'').trim(); if (txt==='') return 0;
+  if (/^\s*\[/.test(txt)){
+    try{ const arr = JSON.parse(txt); if (Array.isArray(arr)) return arr.filter(x => String(x).trim()!=='').length; }catch(_){}
+    return 0;
+  }
+  const parts = txt.replace(/\r/g,'').split(/[\n,]+/).map(s=>s.trim()).filter(Boolean);
+  return parts.length;
+}
+codesText.addEventListener('input', ()=>{ codesCount.textContent = countCodes(codesText.value)+' códigos'; });
+btnToCSV.addEventListener('click', ()=>{
+  let t = codesText.value || '';
+  if (/^\s*\[/.test(t)){
+    try{ const arr = JSON.parse(t); if (Array.isArray(arr)){ const parts = arr.map(x=>String(x).trim()).filter(Boolean); codesText.value = parts.join(','); } }catch(_){}
+  } else {
+    t = t.replace(/\r/g,''); const parts = t.split(/[\n,]+/).map(s=>s.trim()).filter(Boolean); codesText.value = parts.join(',');
+  }
+  codesText.dispatchEvent(new Event('input'));
+});
+btnToJSON.addEventListener('click', ()=>{
+  let t = codesText.value || '';
+  if (!/^\s*\[/.test(t)){
+    t = t.replace(/\r/g,''); const parts = t.split(/[\n,]+/).map(s=>s.trim()).filter(Boolean); codesText.value = JSON.stringify(parts);
+  }
+  codesText.dispatchEvent(new Event('input'));
+});
 
-  if (e.target.classList.contains('btnToggle')){
-    const val = Number(e.target.dataset.val||0);
-    const fd = new FormData();
-    fd.append('action','toggle');
-    fd.append('id_producto', String(idp));
-    fd.append('activo', String(val));
+tbody.addEventListener('click', async (e)=>{
+  const tr = e.target.closest('tr[data-id]'); if (!tr) return; const idp = Number(tr.dataset.id||0);
+
+  if (e.target.classList.contains('btnToggle')){ // toggle regalo
+    const val = Number(e.target.dataset.val||0); const fd = new FormData();
+    fd.append('action','toggle'); fd.append('id_producto', String(idp)); fd.append('activo', String(val));
     try{
       const res = await jfetch('accesorios_regalo_admin.php', { method:'POST', body: fd });
       if (!res.ok) throw new Error(res.error||'No se pudo cambiar el estado');
       await reloadList();
-    }catch(err){ alert(err.message); }
+    } catch(err){ alert(err.message); }
+    return;
   }
-
-  if (e.target.classList.contains('btnRemove')){
-    if (!confirm('¿Quitar este modelo de la lista de regalo?')) return;
-    const fd = new FormData();
-    fd.append('action','remove');
-    fd.append('id_producto', String(idp));
+  if (e.target.classList.contains('btnRemove')){ // quitar
+    if (!confirm('¿Quitar este accesorio de la lista de regalo?')) return;
+    const fd = new FormData(); fd.append('action','remove'); fd.append('id_producto', String(idp));
     try{
       const res = await jfetch('accesorios_regalo_admin.php', { method:'POST', body: fd });
       if (!res.ok) throw new Error(res.error||'No se pudo quitar');
       await reloadList();
-    }catch(err){ alert(err.message); }
+    } catch(err){ alert(err.message); }
+    return;
+  }
+  if (e.target.classList.contains('btnEditCodes')){ // editar códigos
+    EDIT_ID = idp;
+    try{
+      const res = await jfetch('accesorios_regalo_admin.php?action=get_codes&id_producto='+idp);
+      codesText.value = res.codigos || ''; codesText.dispatchEvent(new Event('input'));
+      if (!codesModal){ try{ codesModal = new bootstrap.Modal(codesModalEl); }catch(_){} }
+      if (codesModal && codesModal.show){ codesModal.show(); } else { codesModalEl.style.display='block'; codesModalEl.classList.add('show'); }
+    }catch(err){ alert('No se pudieron cargar los códigos: '+(err.message||err)); }
   }
 });
+
+// Cambios del switch VENDER (delegación por tbody)
+tbody.addEventListener('change', async (e)=>{
+  if (!e.target.classList.contains('swVender')) return;
+  const tr = e.target.closest('tr[data-id]'); if (!tr) return; const idp = Number(tr.dataset.id||0);
+  const val = e.target.checked ? 1 : 0;
+  const fd = new FormData(); fd.append('action','toggle_vender'); fd.append('id_producto', String(idp)); fd.append('vender', String(val));
+  try{
+    const res = await jfetch('accesorios_regalo_admin.php', { method:'POST', body: fd });
+    if (!res.ok) throw new Error(res.error||'No se pudo actualizar el permiso de venta');
+    const lbl = tr.querySelector('.swVender + .form-check-label'); if (lbl) lbl.textContent = val ? 'Permitida' : 'Bloqueada';
+  }catch(err){
+    alert(err.message);
+    e.target.checked = !e.target.checked; // revertir visual si fallo
+  }
+});
+
+// Guardar códigos
+btnSaveCodes.addEventListener('click', async ()=>{
+  if (!EDIT_ID){ alert('Accesorio no válido'); return; }
+  const fd = new FormData(); fd.append('action','save_codes'); fd.append('id_producto', String(EDIT_ID)); fd.append('codigos', (document.getElementById('codesText').value || ''));
+  btnSaveCodes.disabled = true;
+  try{
+    const res = await jfetch('accesorios_regalo_admin.php', { method:'POST', body: fd });
+    if (!res.ok) throw new Error(res.error||'No se pudieron guardar los códigos');
+    if (window.bootstrap){ const m = bootstrap.Modal.getInstance(document.getElementById('codesModal')); if (m) m.hide(); }
+    document.getElementById('codesModal').classList.remove('show'); document.getElementById('codesModal').style.display='none';
+    await reloadList();
+  }catch(err){ alert(err.message); }
+  finally{ btnSaveCodes.disabled = false; }
+});
+
+/* Carga inicial (servidor ya pintó algo, pero homogeneizamos con AJAX tras 1er tick) */
+setTimeout(reloadList, 0);
 </script>
 <!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
 </body>
