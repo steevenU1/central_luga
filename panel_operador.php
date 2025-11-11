@@ -108,6 +108,14 @@ $TOOLS = [
     'icon'       => 'bi-box-seam', // 📦 Producto físico
     'roles'      => ['Admin','Logistica'],
   ],
+  [
+    'key'        => 'promocional_recargas',
+    'title'      => 'Crear Promocion Recargas',
+    'desc'       => 'Generar promociones para portal de recargas promocionales.',
+    'href'       => 'recargas_admin.php',
+    'icon'       => 'bi-tags', // 🏷️ Etiquetas = precios
+    'roles'      => ['Logistica', 'Admin'],
+  ],
 
 
   // ==== Ejemplos para futuro (déjalos como referencia) ====

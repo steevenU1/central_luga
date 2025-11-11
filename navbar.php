@@ -231,7 +231,8 @@ $grpOperacion  = [
   'gestionar_usuarios.php',
   'zona_asistencias.php',
   'nomina_mi_semana.php',
-  'panel_operador.php', // ✅ NUEVO: para resaltar el parent
+  'panel_operador.php',
+  'recargas_portal.php', // ✅ NUEVO: para resaltar el parent
 ];
 $grpRH         = ['reporte_nomina_v2.php', 'reporte_nomina_gerentes_zona.php', 'admin_expedientes.php', 'admin_asistencias.php', 'productividad_ejecutivo.php'];
 $grpOperativos = [
@@ -861,6 +862,12 @@ function item_active(string $f, string $c): string
           </a>
           <ul class="dropdown-menu">
             <li><a class="dropdown-item <?= item_active('lista_precios.php', $current) ?>" href="lista_precios.php">Lista de precios</a></li>
+
+            <li>
+              <a class="dropdown-item <?= item_active('recargas_portal.php', $current) ?>" href="recargas_portal.php">
+                Recargas Promo
+              </a>
+            </li>
 
             <?php if (in_array($rolUsuario, ['Admin', 'Logistica'], true)): ?>
               <li>

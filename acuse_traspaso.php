@@ -77,6 +77,8 @@ if (!$head) {
 }
 
 $folio       = (int)$head['id'];
+$idOrigen    = (int)$head['id_sucursal_origen'];
+$idDestino   = (int)$head['id_sucursal_destino'];
 $origenNom   = $head['sucursal_origen'] ?? '—';
 $destNom     = $head['sucursal_destino'] ?? '—';
 $fCreacion   = $head['fecha_traspaso'] ? date('d/m/Y H:i', strtotime($head['fecha_traspaso'])) : '—';
@@ -157,32 +159,73 @@ $totalAccPzas = array_sum(array_map(fn($r)=>(int)$r['cantidad'], $itemsAcc));
   <title><?= h($tituloAcuse) ?> · #<?= (int)$folio ?></title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    :root { --ink:#0f172a; --muted:#64748b; --line:#e2e8f0; --brand:#0d6efd; }
+    :root {
+      --ink:#0f172a; --muted:#64748b; --line:#e2e8f0; --brand:#0d6efd;
+      --ok:#16a34a; --warn:#f59e0b; --soft:#f8fafc;
+    }
     * { box-sizing: border-box; }
-    html, body { margin:0; padding:0; color:var(--ink); font:13px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; }
-    .wrap { max-width: 1000px; margin: 24px auto; padding: 0 16px 32px; }
+    html, body { margin:0; padding:0; color:var(--ink); font:13px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; background:#fff; }
+
+    .wrap { max-width: 1080px; margin: 24px auto; padding: 0 16px 32px; }
+
+    /* Header */
     header { display:flex; align-items:center; justify-content:space-between; gap:16px; padding-bottom:14px; border-bottom:2px solid var(--ink); }
     .brand { display:flex; align-items:center; gap:12px; }
     .brand .logo-img { width:56px; height:56px; object-fit:contain; border-radius:12px; border:2px solid var(--ink); background:#fff; }
+    .title { display:flex; flex-direction:column; gap:4px; }
     h1 { font-size:20px; margin:0; }
-    .meta { margin-top:6px; color:var(--muted); }
-    .grid { margin-top:18px; display:grid; grid-template-columns:1fr 1fr; gap:12px; }
-    .card { border:1px solid var(--line); border-radius:10px; padding:10px 12px; background:#fff; }
+    .meta { margin-top:2px; color:var(--muted); }
+    .badge { display:inline-block; padding:3px 8px; border-radius:999px; font-size:11px; border:1px solid var(--line); background:#fff; }
+    .badge.ok { border-color:#bbf7d0; background:#ecfdf5; }
+    .badge.warn { border-color:#fde68a; background:#fffbeb; }
+
+    /* Cards superiores */
+    .cards-top { margin-top:14px; display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+    .card {
+      position:relative; border:1px solid var(--line); border-radius:14px; padding:14px 14px 12px;
+      background: radial-gradient(600px 200px at 100% -50%, rgba(13,110,253,.06), transparent),
+                  radial-gradient(600px 200px at -20% 120%, rgba(34,197,94,.06), transparent),
+                  #fff;
+      box-shadow: 0 8px 22px rgba(2,8,20,.06), 0 2px 6px rgba(2,8,20,.05);
+    }
+    .card .sup {
+      display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px;
+    }
+    .tag {
+      display:inline-flex; align-items:center; gap:6px; font-weight:700; letter-spacing:.4px; text-transform:uppercase; font-size:11px; color:#334155;
+    }
+    .pill {
+      display:inline-block; padding:3px 8px; border-radius:8px; font-size:11px; background:#eef2ff; border:1px solid #c7d2fe; color:#1e40af;
+    }
     .kv { display:grid; grid-template-columns:140px 1fr; gap:6px 10px; }
-    .kv .k { color:var(--muted); } .kv .v { font-weight:600; }
+    .kv .k { color:var(--muted); }
+    .kv .v { font-weight:600; }
+    .sep { height:10px; }
+
+    /* Tablas */
     table { width:100%; border-collapse:collapse; margin-top:18px; border:1px solid var(--line); }
-    thead th { text-transform:uppercase; letter-spacing:.4px; font-size:11px; background:#f8fafc; border-bottom:1px solid var(--line); }
+    thead th { text-transform:uppercase; letter-spacing:.4px; font-size:11px; background:var(--soft); border-bottom:1px solid var(--line); }
     th, td { padding:8px 8px; border-bottom:1px solid var(--line); }
     tbody tr:nth-child(even){ background:#fcfdff; }
     code { font-family: ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace; background:#f1f5f9; padding:2px 6px; border-radius:6px; }
+
+    .tot { margin:10px 0 18px; font-weight:700; }
+    .note { margin-top:12px; color:#7c3aed; background:#faf5ff; border:1px solid #e9d5ff; padding:8px 10px; border-radius:8px; }
+
     .footer { margin-top:18px; display:grid; grid-template-columns:1fr 1fr; gap:12px; }
     .sign { border-top:1px dashed var(--line); padding-top:10px; min-height:84px; }
-    .tot { margin-top:12px; font-weight:700; }
-    .note { margin-top:10px; color:#7c3aed; background:#faf5ff; border:1px solid #e9d5ff; padding:8px 10px; border-radius:8px; }
-    @media print { .wrap{margin:0;max-width:none;padding:0} header{margin:0 0 8px 0} .no-print{display:none!important} body{-webkit-print-color-adjust:exact; print-color-adjust:exact} }
+
     .toolbar { display:flex; gap:8px; justify-content:flex-end; margin-bottom:10px; }
     .toolbar .btn { border:1px solid var(--line); background:#fff; padding:6px 10px; border-radius:8px; cursor:pointer; }
     .toolbar .btn.primary { border-color:#c7d2fe; background:#eef2ff; }
+
+    @media print {
+      .wrap{margin:0;max-width:none;padding:0}
+      header{margin:0 0 8px 0}
+      .no-print{display:none!important}
+      body{-webkit-print-color-adjust:exact; print-color-adjust:exact}
+      .card{box-shadow:none}
+    }
   </style>
 </head>
 <body>
@@ -197,37 +240,56 @@ $totalAccPzas = array_sum(array_map(fn($r)=>(int)$r['cantidad'], $itemsAcc));
     <header>
       <div class="brand">
         <img class="logo-img" src="<?= h($logoSrc) ?>" alt="Logo">
-        <div>
+        <div class="title">
           <h1><?= h($tituloAcuse) ?></h1>
-          <div class="meta">Folio <b>#<?= (int)$folio ?></b> · Generado el <?= date('d/m/Y H:i') ?></div>
+          <div class="meta">
+            Folio <b>#<?= (int)$folio ?></b> · Generado el <?= date('d/m/Y H:i') ?>
+          </div>
         </div>
       </div>
-      <div class="kv" style="min-width:280px">
-        <div class="k">Estatus:</div><div class="v"><?= h($estatus) ?></div>
-        <div class="k">Fecha traspaso:</div><div class="v"><?= h($fCreacion) ?></div>
-        <?php if ($esRecepcion && $fRecepcion): ?>
-          <div class="k">Fecha recepción:</div><div class="v"><?= h($fRecepcion) ?></div>
-        <?php endif; ?>
+      <div class="title" style="align-items:flex-end">
+        <div>
+          <span class="badge <?= ($estatus==='Recibido' || $estatus==='Completado') ? 'ok' : 'warn' ?>">Estatus: <?= h($estatus) ?></span>
+        </div>
+        <div class="meta">
+          Traspaso: <b><?= h($fCreacion) ?></b>
+          <?php if ($esRecepcion && $fRecepcion): ?>
+            · Recepción: <b><?= h($fRecepcion) ?></b>
+          <?php endif; ?>
+        </div>
       </div>
     </header>
 
-    <div class="grid">
+    <!-- 🔥 Cards superiores modernas -->
+    <section class="cards-top">
+      <!-- Origen -->
       <div class="card">
-        <b>Origen</b>
-        <div class="kv" style="margin-top:6px">
+        <div class="sup">
+          <span class="tag">Sucursal Origen</span>
+          <span class="pill">ID #<?= (int)$idOrigen ?></span>
+        </div>
+        <div class="kv">
           <div class="k">Sucursal:</div><div class="v"><?= h($origenNom) ?></div>
-          <div class="k">Generó:</div><div class="v"><?= h($usrCrea ?: '—') ?></div>
+          <div class="k">Quién envía:</div><div class="v"><?= h($usrCrea ?: '—') ?></div>
+          <div class="k">Fecha envío:</div><div class="v"><?= h($fCreacion) ?></div>
         </div>
       </div>
+
+      <!-- Destino -->
       <div class="card">
-        <b>Destino</b>
-        <div class="kv" style="margin-top:6px">
+        <div class="sup">
+          <span class="tag">Sucursal Destino</span>
+          <span class="pill">ID #<?= (int)$idDestino ?></span>
+        </div>
+        <div class="kv">
           <div class="k">Sucursal:</div><div class="v"><?= h($destNom) ?></div>
-          <div class="k"><?= $esRecepcion ? 'Recibió:' : 'Por recibir:' ?></div>
+          <div class="k"><?= $esRecepcion ? 'Quién recibe:' : 'Por recibir:' ?></div>
           <div class="v"><?= h($usrRecibio ?: '—') ?></div>
+          <div class="k">Fecha recepción:</div>
+          <div class="v"><?= $fRecepcion ? h($fRecepcion) : '—' ?></div>
         </div>
       </div>
-    </div>
+    </section>
 
     <?php if ($showScopeWarning): ?>
       <div class="note">
@@ -274,7 +336,7 @@ $totalAccPzas = array_sum(array_map(fn($r)=>(int)$r['cantidad'], $itemsAcc));
           <th>Marca</th>
           <th>Modelo</th>
           <th>Color</th>
-          <th class="text-end">Piezas</th>
+          <th style="text-align:right">Piezas</th>
         </tr>
       </thead>
       <tbody>
@@ -295,6 +357,7 @@ $totalAccPzas = array_sum(array_map(fn($r)=>(int)$r['cantidad'], $itemsAcc));
     </table>
     <div class="tot">Total de accesorios (piezas): <?= (int)$totalAccPzas ?></div>
 
+    <!-- Firmas -->
     <div class="footer">
       <div class="sign">
         <div><b>Entrega (Origen)</b></div>
