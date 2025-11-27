@@ -1,4 +1,7 @@
 <?php
+// nueva_venta.php — Central LUGA
+// Versión con confirmación + envío por AJAX + modal de resultado (incluye tarjeta de lealtad).
+
 // ✅ Iniciamos sesión aquí porque moveremos el include del navbar más abajo
 if (session_status() === PHP_SESSION_NONE) {
   session_start();
@@ -301,6 +304,25 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
             </div>
           </div>
 
+          <!-- 🔹 Fila extra: código de referido + activación de tarjeta de lealtad -->
+          <div class="row g-3 mb-2 align-items-end">
+            <div class="col-md-4">
+              <label class="form-label">Código de referido (opcional)</label>
+              <input type="text" name="codigo_referido" id="codigo_referido" class="form-control" placeholder="Ej. LUGA-XYZ123">
+              <div class="form-text">Si el cliente viene recomendado, captura el código de su tarjeta de lealtad.</div>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label d-block">Tarjeta de lealtad</label>
+              <input type="hidden" name="crear_tarjeta_lealtad" id="crear_tarjeta_lealtad" value="0">
+              <button type="button" class="btn btn-outline-success w-100" id="btn_lealtad_toggle">
+                <i class="bi bi-stars me-1"></i> Activar tarjeta de lealtad
+              </button>
+              <div id="lealtad_status" class="form-text text-success d-none">
+                Se generará una tarjeta digital al registrar la venta.
+              </div>
+            </div>
+          </div>
+
           <hr class="my-4">
 
           <div class="section-title"><i class="bi bi-device-ssd"></i> Equipos</div>
@@ -420,6 +442,8 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
                     <li class="d-none" id="li_enganche"><strong>Enganche:</strong> $<span id="conf_enganche">0.00</span></li>
                     <li class="d-none" id="li_financiera"><strong>Financiera:</strong> <span id="conf_financiera">—</span></li>
                     <li class="d-none" id="li_tag"><strong>TAG:</strong> <span id="conf_tag">—</span></li>
+                    <li class="d-none" id="li_codigo_ref"><strong>Código referido:</strong> <span id="conf_codigo_ref">—</span></li>
+                    <li class="d-none" id="li_lealtad"><strong>Lealtad:</strong> <span id="conf_lealtad">—</span></li>
                   </ul>
                 </div>
               </div>
@@ -443,7 +467,39 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
     </div>
   </div>
 
-  <!-- Bootstrap JS (bundle) para que funcione el modal -->
+  <!-- Modal resultado de la venta (éxito / error + tarjeta de lealtad) -->
+  <div class="modal fade" id="modalResultadoVenta" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-md modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header bg-light">
+          <h5 class="modal-title" id="resultado_titulo">
+            <i class="bi bi-info-circle me-2 text-primary"></i>Resultado de la venta
+          </h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+        </div>
+        <div class="modal-body">
+          <div id="resultado_mensaje"></div>
+          <div id="resultado_tarjeta_wrap" class="mt-3 d-none">
+            <hr>
+            <p class="mb-2">
+              <i class="bi bi-stars me-1"></i>
+              <strong>Tarjeta de lealtad generada para este cliente.</strong>
+            </p>
+            <a href="#" target="_blank" id="resultado_tarjeta_link" class="btn btn-success w-100">
+              <i class="bi bi-credit-card-2-front me-1"></i> Ver tarjeta de lealtad
+            </a>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline-secondary" data-bs-dismiss="modal">
+            Cerrar
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- NOTA: el bundle de Bootstrap normalmente ya va en navbar.php; si no, descomenta: -->
   <!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
 
   <script>
@@ -451,6 +507,17 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
       const idSucursalUsuario = <?= $id_sucursal_usuario ?>;
       const mapaSucursales = <?= json_encode($mapSuc, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
       const modalConfirm = new bootstrap.Modal(document.getElementById('modalConfirmacion'));
+      const modalResultado = new bootstrap.Modal(document.getElementById('modalResultadoVenta'));
+
+      function escapeHtml(text) {
+        if (typeof text !== 'string') return '';
+        return text
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#039;");
+      }
 
       // ==== 🔒 Helpers de candado (UI) ====
       function setLockedUI(locked, msgHtml) {
@@ -474,9 +541,9 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
 
       // Estado inicial según PHP
       <?php if ($bloquearInicial): ?>
-        setLockedUI(true);
+      setLockedUI(true);
       <?php else: ?>
-        setLockedUI(false);
+      setLockedUI(false);
       <?php endif; ?>
 
       // Select2
@@ -521,7 +588,6 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
           $('#precio_venta').val('');
         }
 
-        // Actualizar también el modal (por si ya está abierto más adelante)
         const precio = parseFloat($('#precio_venta').val()) || 0;
         $('#conf_precio').text(precio.toFixed(2));
       }
@@ -607,6 +673,24 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
         recalcPrecioVenta();
       });
 
+      // ===== Botón toggle tarjeta de lealtad =====
+      $('#btn_lealtad_toggle').on('click', function() {
+        const $hidden = $('#crear_tarjeta_lealtad');
+        const activo = $hidden.val() === '1';
+
+        if (activo) {
+          $hidden.val('0');
+          $('#lealtad_status').addClass('d-none');
+          $(this).removeClass('btn-success').addClass('btn-outline-success');
+          $(this).html('<i class="bi bi-stars me-1"></i> Activar tarjeta de lealtad');
+        } else {
+          $hidden.val('1');
+          $('#lealtad_status').removeClass('d-none');
+          $(this).removeClass('btn-outline-success').addClass('btn-success');
+          $(this).html('<i class="bi bi-stars me-1"></i> Tarjeta de lealtad activada');
+        }
+      });
+
       // ===== Carga de equipos por sucursal (se redefine más abajo) =====
       function cargarEquipos(sucursalId) {
         /* se redefine más abajo */
@@ -626,20 +710,18 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
         $.post('ajax_check_corte.php', {
           id_sucursal: seleccionada
         }, function(res) {
-          // res: {ok: true, bloquear: bool, motivo: "...", ayer: "YYYY-MM-DD"}
           if (!res || !res.ok) return;
 
           if (res.bloquear) {
             const html = `
-          <strong>Captura bloqueada.</strong> ${res.motivo}
-          <div class="small">Genera el corte de <strong>${res.ayer}</strong> para continuar.</div>
-        `;
+              <strong>Captura bloqueada.</strong> ${res.motivo}
+              <div class="small">Genera el corte de <strong>${res.ayer}</strong> para continuar.</div>
+            `;
             setLockedUI(true, html);
           } else {
             setLockedUI(false);
           }
         }, 'json').fail(function() {
-          // En caso de error, no bloqueamos por UI (el back-end igualmente valida)
           console.warn('No se pudo verificar el candado por AJAX. El back-end seguirá validando.');
         });
       });
@@ -667,7 +749,6 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
         if (!forma) errores.push('Selecciona la forma de pago.');
         if (!$('#equipo1').val()) errores.push('Selecciona el equipo principal.');
 
-        // Reglas Fin+Combo
         if (isFinanciamientoCombo()) {
           const v1 = $('#equipo1').val();
           const v2 = $('#equipo2').val();
@@ -739,15 +820,30 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
         } else {
           $('#li_enganche, #li_financiera, #li_tag').addClass('d-none');
         }
+
+        // Código referido
+        const refCode = ($('#codigo_referido').val() || '').trim();
+        if (refCode) {
+          $('#conf_codigo_ref').text(refCode);
+          $('#li_codigo_ref').removeClass('d-none');
+        } else {
+          $('#li_codigo_ref').addClass('d-none');
+        }
+
+        // Info de lealtad
+        const lealtadActiva = $('#crear_tarjeta_lealtad').val() === '1';
+        if (lealtadActiva) {
+          $('#conf_lealtad').text('Se generará tarjeta de lealtad para este cliente.');
+          $('#li_lealtad').removeClass('d-none');
+        } else {
+          $('#li_lealtad').addClass('d-none');
+        }
       }
 
       $('#form_venta').on('submit', function(e) {
-        // Si está bloqueado por UI, evitamos el submit (de todos modos el back bloquea).
         if ($('#form_venta').attr('data-locked') === '1') {
           e.preventDefault();
-          $('html, body').animate({
-            scrollTop: 0
-          }, 300);
+          $('html, body').animate({ scrollTop: 0 }, 300);
           return;
         }
 
@@ -758,10 +854,7 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
         if (errores.length > 0) {
           $('#errores').removeClass('d-none')
             .html('<strong>Corrige lo siguiente:</strong><ul class="mb-0"><li>' + errores.join('</li><li>') + '</li></ul>');
-          window.scrollTo({
-            top: 0,
-            behavior: 'smooth'
-          });
+          window.scrollTo({ top: 0, behavior: 'smooth' });
           return;
         }
 
@@ -770,11 +863,79 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
         modalConfirm.show();
       });
 
+      // Enviar por AJAX al confirmar en el modal
       $('#btn_confirmar_envio').on('click', function() {
         $('#btn_submit').prop('disabled', true).text('Enviando...');
-        permitSubmit = true;
-        modalConfirm.hide();
-        $('#form_venta')[0].submit();
+
+        const datos = $('#form_venta').serializeArray();
+        datos.push({ name: 'ajax', value: '1' });
+
+        $.ajax({
+          url: 'procesar_venta.php',
+          method: 'POST',
+          data: $.param(datos),
+          dataType: 'json'
+        }).done(function(res) {
+          modalConfirm.hide();
+          $('#btn_submit').prop('disabled', false).html('<i class="bi bi-check2-circle me-2"></i> Registrar Venta');
+
+          // Si algo salió mal o no se recibió estructura esperada
+          if (!res || res.status !== 'ok') {
+            const msg = res && res.message ? res.message : 'Ocurrió un error al registrar la venta.';
+            $('#resultado_titulo').text('Error al registrar la venta');
+            $('#resultado_mensaje').html('<div class="alert alert-danger mb-0">' + escapeHtml(msg) + '</div>');
+            $('#resultado_tarjeta_wrap').addClass('d-none');
+            modalResultado.show();
+            return;
+          }
+
+          // Éxito
+          $('#resultado_titulo').text('Venta registrada correctamente');
+
+          let html = '';
+          if (res.id_venta) {
+            html += '<p>Venta registrada con ID <strong>#' + escapeHtml(String(res.id_venta)) + '</strong>.</p>';
+          } else {
+            html += '<p>La venta se registró correctamente.</p>';
+          }
+
+          const com = parseFloat(res.comision || 0);
+          html += '<p>Comisión generada: <strong>$' + com.toFixed(2) + '</strong>.</p>';
+
+          $('#resultado_mensaje').html(html);
+
+          if (res.url_tarjeta) {
+            $('#resultado_tarjeta_link').attr('href', res.url_tarjeta);
+            $('#resultado_tarjeta_wrap').removeClass('d-none');
+          } else {
+            $('#resultado_tarjeta_wrap').addClass('d-none');
+          }
+
+          // Limpiar formulario para siguiente venta
+          $('#form_venta')[0].reset();
+          $('#equipo1, #equipo2').val(null).trigger('change');
+          $('#crear_tarjeta_lealtad').val('0');
+          $('#lealtad_status').addClass('d-none');
+          $('#btn_lealtad_toggle')
+            .removeClass('btn-success').addClass('btn-outline-success')
+            .html('<i class="bi bi-stars me-1"></i> Activar tarjeta de lealtad');
+          toggleVenta();
+          recalcPrecioVenta();
+
+          modalResultado.show();
+        }).fail(function(xhr) {
+          modalConfirm.hide();
+          $('#btn_submit').prop('disabled', false).html('<i class="bi bi-check2-circle me-2"></i> Registrar Venta');
+
+          let msg = 'Error de comunicación con el servidor.';
+          if (xhr && xhr.responseText) {
+            msg += '<br><small>' + escapeHtml(xhr.responseText) + '</small>';
+          }
+          $('#resultado_titulo').text('Error al registrar la venta');
+          $('#resultado_mensaje').html('<div class="alert alert-danger mb-0">' + msg + '</div>');
+          $('#resultado_tarjeta_wrap').addClass('d-none');
+          modalResultado.show();
+        });
       });
 
       // Inicial: definimos cargarEquipos REAL aquí para que siempre refresque precio también
