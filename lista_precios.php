@@ -1,6 +1,7 @@
 <?php
 // lista_precios.php — Luga
 // KPIs globales para Admin, Top promos solo de la lista, pills legibles (texto negro) y % por promo, RAM antes de Capacidad.
+// Ahora precios y promo se leen directo de productos: precio_lista, precio_combo, promocion.
 
 session_start();
 require_once __DIR__ . '/db.php';
@@ -37,14 +38,11 @@ $sql = "
     ($hasP_RAM ? " MAX(COALESCE(p.ram,'')) AS ram," : " '' AS ram,") . "
     COUNT(*) AS disponibles_global,
     SUM(CASE WHEN i.id_sucursal = ? THEN 1 ELSE 0 END) AS disponibles_sucursal,
-    MAX(p.precio_lista) AS precio_lista,
-    MAX(pc.precio_combo) AS precio_combo,
-    MAX(pc.promocion)    AS promocion
+    MAX(p.precio_lista)   AS precio_lista,
+    MAX(p.precio_combo)   AS precio_combo,
+    MAX(p.promocion)      AS promocion
   FROM inventario i
   INNER JOIN productos p ON p.id = i.id_producto
-  LEFT JOIN precios_combo pc
-    ON pc.marca = p.marca AND pc.modelo = p.modelo 
-   AND COALESCE(pc.capacidad,'') = COALESCE(p.capacidad,'')
   WHERE i.estatus = 'Disponible'
   GROUP BY p.marca, p.modelo, COALESCE(p.capacidad,'')
   ORDER BY p.marca ASC, p.modelo ASC, capacidad ASC
@@ -97,7 +95,7 @@ if ($isAdmin) {
   $q7->bind_param('s', $hace7);
 } else {
   $q7 = $conn->prepare("SELECT COUNT(*) AS unidades
-                        FROM detalle_venta dv INNER JOIN ventas v ON v.id = dv.id_venta
+                        FROM detalle_venta dv INNERJOIN ventas v ON v.id = dv.id_venta
                         WHERE v.id_sucursal = ? AND $DATE_LOCAL >= ?");
   $q7->bind_param('is', $idSucursal, $hace7);
 }
@@ -176,34 +174,26 @@ if (!empty($promoList)) {
   $inList  = implode(',', $escaped);
 
   if ($isAdmin) {
-    $sqlTop = "SELECT pc.promocion AS promo, COUNT(*) AS unidades
+    $sqlTop = "SELECT p.promocion AS promo, COUNT(*) AS unidades
                FROM detalle_venta dv
                INNER JOIN ventas v   ON v.id = dv.id_venta
                INNER JOIN productos p ON p.id = dv.id_producto
-               LEFT JOIN precios_combo pc
-                 ON pc.marca = p.marca
-                AND pc.modelo = p.modelo
-                AND COALESCE(pc.capacidad,'') = COALESCE(p.capacidad,'')
                WHERE $DATE_LOCAL BETWEEN ? AND ?
-                 AND pc.promocion IN ($inList)
-               GROUP BY pc.promocion
+                 AND p.promocion IN ($inList)
+               GROUP BY p.promocion
                ORDER BY unidades DESC
                LIMIT 5";
     $qp = $conn->prepare($sqlTop);
     $qp->bind_param('ss', $inicioMes, $hoy);
   } else {
-    $sqlTop = "SELECT pc.promocion AS promo, COUNT(*) AS unidades
+    $sqlTop = "SELECT p.promocion AS promo, COUNT(*) AS unidades
                FROM detalle_venta dv
                INNER JOIN ventas v   ON v.id = dv.id_venta
                INNER JOIN productos p ON p.id = dv.id_producto
-               LEFT JOIN precios_combo pc
-                 ON pc.marca = p.marca
-                AND pc.modelo = p.modelo
-                AND COALESCE(pc.capacidad,'') = COALESCE(p.capacidad,'')
                WHERE v.id_sucursal = ?
                  AND $DATE_LOCAL BETWEEN ? AND ?
-                 AND pc.promocion IN ($inList)
-               GROUP BY pc.promocion
+                 AND p.promocion IN ($inList)
+               GROUP BY p.promocion
                ORDER BY unidades DESC
                LIMIT 5";
     $qp = $conn->prepare($sqlTop);
@@ -491,7 +481,6 @@ $ultima = date('Y-m-d H:i');
   </div>
 </div>
 
-<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
 <script>
   // ---------- Filtros / búsqueda ----------
   const fMarca = document.getElementById('fMarca');

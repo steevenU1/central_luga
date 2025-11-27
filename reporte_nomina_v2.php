@@ -1,9 +1,16 @@
 <?php
 // reporte_nomina_v2.php — Nómina semanal v2 (Mar→Lun, UI con cards de KPIs)
-// Ajuste: Las columnas de "Comisión Gerente" se muestran en 0 para Ejecutivos y
-// se concentran en el renglón del Gerente de la misma sucursal (suma de todos los ejecutivos).
-// La BD NO se modifica; solo es redistribución en el render.
-// Este archivo incluye una columna informativa "$ Bono prov." (no persiste en BD).
+// Ajustes:
+// 1) La columna "Comisión Equipos" del ejecutivo ya incluye comision_especial
+//    SOLO si el ejecutivo llegó a su cuota de unidades de la semana.
+// 2) Nueva columna "Cuota":
+//    - Ejecutivos: muestra cuota_unidades de su sucursal.
+//    - Gerentes: muestra cuota_monto de su sucursal.
+// 3) Las comisiones de gerente se muestran solo en el renglón del gerente
+//    (redistribución visual, sin tocar BD).
+// 4) Bono provisional semana especial (versión actual):
+//    - Ejecutivo: $50 por unidad elegible (venta principal, es_combo=0, sin módem) si vendió 10 unidades o más.
+//    - Gerente:  sin bono provisional en esta versión.
 
 session_start();
 if (!isset($_SESSION['id_usuario'])) { header("Location: index.php"); exit(); }
@@ -63,8 +70,8 @@ function notModemSQL(mysqli $conn): string {
           AND $hay NOT LIKE '%router%'";
 }
 
-/* ---------------- Sumas / Conteos por usuario ---------------- */
-function sumDetalleVenta(mysqli $conn, int $idUsuario, string $ini, string $fin, string $campo = 'comision'): float {
+/* ------------- Sumas detalle_venta (genérico) ------------- */
+function sumDetalleVentaCampo(mysqli $conn, int $idUsuario, string $ini, string $fin, string $campo = 'comision'): float {
   $colFecha = dateColVentas($conn);
   $sql = "
     SELECT COALESCE(SUM(d.$campo),0) AS s
@@ -79,7 +86,42 @@ function sumDetalleVenta(mysqli $conn, int $idUsuario, string $ini, string $fin,
   return (float)($row['s'] ?? 0);
 }
 
-/** Conteo de unidades totales (Eq #)
+/**
+ * Comisión de equipos del EJECUTIVO:
+ *  - Si $aplicaEspecial = true y existe columna comision_especial:
+ *      SUM(comision + comision_especial)
+ *  - Si no:
+ *      SUM(comision)
+ */
+function sumDetalleVentaEquiposEjecutivo(mysqli $conn, int $idUsuario, string $ini, string $fin, bool $aplicaEspecial): float {
+  $colFecha = dateColVentas($conn);
+  $hasComEsp = columnExists($conn,'detalle_venta','comision_especial');
+  $pIni = $ini . ' 00:00:00';
+  $pFin = $fin . ' 23:59:59';
+
+  if ($aplicaEspecial && $hasComEsp) {
+    $sql = "
+      SELECT COALESCE(SUM(d.comision + d.comision_especial),0) AS s
+      FROM detalle_venta d
+      INNER JOIN ventas v ON v.id = d.id_venta
+      WHERE v.id_usuario = ? AND v.$colFecha BETWEEN ? AND ?
+    ";
+  } else {
+    $sql = "
+      SELECT COALESCE(SUM(d.comision),0) AS s
+      FROM detalle_venta d
+      INNER JOIN ventas v ON v.id = d.id_venta
+      WHERE v.id_usuario = ? AND v.$colFecha BETWEEN ? AND ?
+    ";
+  }
+
+  $stmt = $conn->prepare($sql);
+  $stmt->bind_param("iss", $idUsuario, $pIni, $pFin);
+  $stmt->execute(); $row = $stmt->get_result()->fetch_assoc(); $stmt->close();
+  return (float)($row['s'] ?? 0);
+}
+
+/** Conteo de equipos totales (Eq #)
  *  - Con detalle_venta: cuenta renglones del detalle EXCLUYENDO módem/MiFi => combo con 2 productos (no módem) cuenta 2.
  *  - Sin detalle_venta: si hay v.tipo_venta, SUM(CASE WHEN tipo_venta LIKE '%combo%' THEN 2 ELSE 1 END); si no, COUNT(*).
  */
@@ -126,79 +168,70 @@ function countEquipos(mysqli $conn, int $idUsuario, string $ini, string $fin): i
   }
 }
 
-/** Unidades elegibles para bono:
- * - No-combo: cuenta renglones de detalle EXCLUYENDO módem/MiFi (1 por renglón).
- * - Combo: cuenta **1 por venta** (si existe al menos un detalle no-módem en esa venta).
- * - Sin detalle_venta: cuenta 1 por venta; si no hay tipo_venta, devolvemos 0 (no podemos distinguir combos ni módems).
+/** Unidades elegibles para bono provisional (no afecta la BD, solo info)
+ *  1 unidad = 1 venta principal de equipo:
+ *   - detalle_venta.es_combo = 0
+ *   - No módem (según notModemSQL)
+ *   - Cuenta 1 por venta (DISTINCT v.id)
  */
 function countEligibleUnitsForBonus(mysqli $conn, int $idUsuario, string $ini, string $fin): int {
   $colFecha = dateColVentas($conn);
-  $pIni = $ini . ' 00:00:00'; 
+  $pIni = $ini . ' 00:00:00';
   $pFin = $fin . ' 23:59:59';
 
-  $tieneDet  = columnExists($conn,'detalle_venta','id');
-  $tieneTipo = columnExists($conn,'ventas','tipo_venta');
+  $tieneDet     = columnExists($conn,'detalle_venta','id');
+  $tieneEsCombo = columnExists($conn,'detalle_venta','es_combo');
 
-  if ($tieneDet) {
-    $joinProd = columnExists($conn,'productos','id') ? "LEFT JOIN productos p ON p.id = d.id_producto" : "";
+  if ($tieneDet && $tieneEsCombo) {
+    $joinProd    = columnExists($conn,'productos','id')
+      ? "LEFT JOIN productos p ON p.id = d.id_producto"
+      : "";
     $condNoModem = notModemSQL($conn);
+    $estatusCond = columnExists($conn,'ventas','estatus')
+      ? " AND (v.estatus IS NULL OR v.estatus NOT IN ('Cancelada','Cancelado','cancelada','cancelado'))"
+      : "";
 
-    // A) No-combo: cuenta unidades no-módem (1 por renglón del detalle)
-    $sqlA = "
-      SELECT COUNT(d.id) AS c
+    $sql = "
+      SELECT COUNT(DISTINCT v.id) AS c
       FROM detalle_venta d
       INNER JOIN ventas v ON v.id = d.id_venta
       $joinProd
-      WHERE v.id_usuario=? 
+      WHERE v.id_usuario = ?
         AND v.$colFecha BETWEEN ? AND ?
-        ".($tieneTipo ? "AND (LOWER(v.tipo_venta) NOT LIKE '%combo%')" : "")."
+        AND d.es_combo = 0
         AND ($condNoModem)
-    ";
-    $stmtA = $conn->prepare($sqlA);
-    $stmtA->bind_param("iss", $idUsuario, $pIni, $pFin);
-    $stmtA->execute(); 
-    $rowA = $stmtA->get_result()->fetch_assoc(); 
-    $stmtA->close();
-    $countA = (int)($rowA['c'] ?? 0);
-
-    // B) Combo: cuenta 1 por venta con al menos un detalle no-módem
-    if ($tieneTipo) {
-      $sqlB = "
-        SELECT COUNT(DISTINCT v.id) AS c
-        FROM ventas v
-        INNER JOIN detalle_venta d ON d.id_venta = v.id
-        $joinProd
-        WHERE v.id_usuario=?
-          AND v.$colFecha BETWEEN ? AND ?
-          AND (LOWER(v.tipo_venta) LIKE '%combo%')
-          AND ($condNoModem)
-      ";
-      $stmtB = $conn->prepare($sqlB);
-      $stmtB->bind_param("iss", $idUsuario, $pIni, $pFin);
-      $stmtB->execute(); 
-      $rowB = $stmtB->get_result()->fetch_assoc(); 
-      $stmtB->close();
-      $countB = (int)($rowB['c'] ?? 0);
-    } else {
-      $countB = 0;
-    }
-
-    return $countA + $countB;
-  }
-
-  // Fallback sin detalle_venta:
-  if ($tieneTipo) {
-    $sql = "
-      SELECT COALESCE(SUM(1),0) AS c
-      FROM ventas v
-      WHERE v.id_usuario=? AND v.$colFecha BETWEEN ? AND ?
+        $estatusCond
     ";
     $stmt = $conn->prepare($sql);
     $stmt->bind_param("iss", $idUsuario, $pIni, $pFin);
-    $stmt->execute(); 
-    $row = $stmt->get_result()->fetch_assoc(); 
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
     $stmt->close();
-    return (int)($row['c'] ?? 0); // combo=1 también aquí
+    return (int)($row['c'] ?? 0);
+  }
+
+  // Fallback sin detalle_venta o sin es_combo:
+  // Cuenta ventas no combo por tipo_venta (sin filtrar módem porque no tenemos productos).
+  $tieneTipo = columnExists($conn,'ventas','tipo_venta');
+  $estatusCond = columnExists($conn,'ventas','estatus')
+    ? " AND (v.estatus IS NULL OR v.estatus NOT IN ('Cancelada','Cancelado','cancelada','cancelado'))"
+    : "";
+
+  if ($tieneTipo) {
+    $sql = "
+      SELECT COUNT(*) AS c
+      FROM ventas v
+      WHERE v.id_usuario = ?
+        AND v.$colFecha BETWEEN ? AND ?
+        AND (LOWER(v.tipo_venta) NOT LIKE '%combo%')
+        $estatusCond
+    ";
+    $stmt = $conn->prepare($sql);
+    $stmt->bind_param("iss", $idUsuario, $pIni, $pFin);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    return (int)($row['c'] ?? 0);
   }
 
   return 0;
@@ -299,29 +332,97 @@ if (columnExists($conn,'nomina_confirmaciones','id')) {
   }
 }
 
+/* ---------------- Cuotas por sucursal (unidades y monto) ---------------- */
+$cuotaUnidPorSuc  = []; // id_sucursal => cuota_unidades (int|null)
+$cuotaMontoPorSuc = []; // id_sucursal => cuota_monto (float|null)
+
+if ($colUserSuc) {
+  // Cuota de unidades semanal
+  if ($stmtCU = $conn->prepare("
+        SELECT cuota_unidades
+        FROM cuotas_semanales_sucursal
+        WHERE id_sucursal=? AND semana_inicio<=? AND semana_fin>=?
+        ORDER BY id DESC LIMIT 1
+      ")) {
+    // Cuota de monto sucursal
+    $stmtCM = $conn->prepare("
+        SELECT cuota_monto
+        FROM cuotas_sucursales
+        WHERE id_sucursal=? AND fecha_inicio<=?
+        ORDER BY fecha_inicio DESC, id DESC
+        LIMIT 1
+      ");
+
+    foreach ($usuarios as $u) {
+      $sid = (int)($u['id_sucursal'] ?? 0);
+      if ($sid <= 0) continue;
+
+      if (!array_key_exists($sid, $cuotaUnidPorSuc)) {
+        $stmtCU->bind_param("iss", $sid, $iniStr, $finStr);
+        $stmtCU->execute();
+        $row = $stmtCU->get_result()->fetch_assoc();
+        $cuotaUnidPorSuc[$sid] = $row ? (int)$row['cuota_unidades'] : null;
+      }
+      if (!array_key_exists($sid, $cuotaMontoPorSuc)) {
+        $stmtCM->bind_param("is", $sid, $finStr);
+        $stmtCM->execute();
+        $row2 = $stmtCM->get_result()->fetch_assoc();
+        $cuotaMontoPorSuc[$sid] = $row2 ? (float)$row2['cuota_monto'] : null;
+      }
+    }
+    $stmtCU->close();
+    $stmtCM->close();
+  }
+}
+
 /* ---------------- Cálculo por usuario (primer pase, RAW) ---------------- */
 $data = [];
+$eligibleUnitsSucursal = [];   // ya no se usa para bono de gerente, pero se deja declarado por compatibilidad
+
 foreach ($usuarios as $u) {
   $uid  = (int)$u['id'];
   $base = (float)($u['sueldo'] ?? 0);
+  $sid  = (int)($u['id_sucursal'] ?? 0);
+  $rol  = (string)$u['rol'];
 
-  $eq_eje  = sumDetalleVenta($conn, $uid, $iniStr, $finStr, 'comision');
-  $eq_cnt  = countEquipos($conn, $uid, $iniStr, $finStr); // combo=2, sin módem
-  $eligible_units = countEligibleUnitsForBonus($conn, $uid, $iniStr, $finStr); // combo=1, sin módem
-  $bono_provisional = ($eligible_units > 10) ? ($eligible_units * 50) : 0;
+  $cuota_unid  = $sid ? ($cuotaUnidPorSuc[$sid]  ?? null) : null;
+  $cuota_monto = $sid ? ($cuotaMontoPorSuc[$sid] ?? null) : null;
 
+  // Conteo de equipos de la semana (combo=2, sin módem)
+  $eq_cnt  = countEquipos($conn, $uid, $iniStr, $finStr);
+
+  // ¿Cumple cuota de unidades? (solo ejecutivos) — sigue aplicando solo para comision_especial
+  $aplicaEspecial = (strcasecmp($rol,'Ejecutivo')===0 && $cuota_unid !== null && $eq_cnt >= $cuota_unid);
+
+  // Eq ejecutivo: ya incluye comision_especial si aplica
+  $eq_eje  = sumDetalleVentaEquiposEjecutivo($conn, $uid, $iniStr, $finStr, $aplicaEspecial);
+
+  // SIMs / pospago / TC
   $sim_eje = sumSims($conn, $uid, $iniStr, $finStr, false, 'comision_ejecutivo');
   $pos_eje = sumSims($conn, $uid, $iniStr, $finStr, true,  'comision_ejecutivo');
   $tc_eje  = sumPayjoyTC($conn, $uid, $iniStr, $finStr, 'comision');
 
-  $eq_ger  = sumDetalleVenta($conn, $uid, $iniStr, $finStr, 'comision_gerente');
+  // Comisiones gerente (raw, se redistribuyen después)
+  $eq_ger  = sumDetalleVentaCampo($conn, $uid, $iniStr, $finStr, 'comision_gerente');
   $sim_ger = sumSims($conn, $uid, $iniStr, $finStr, false, 'comision_gerente');
   $pos_ger = sumSims($conn, $uid, $iniStr, $finStr, true,  'comision_gerente');
   $tc_ger  = sumPayjoyTC($conn, $uid, $iniStr, $finStr, 'comision_gerente');
 
+  // Ajustes / descuentos
   $bonos   = sumAjusteTipo($conn, $uid, $iniStr, $finStr, 'bono');
   $ajuste  = sumAjusteTipo($conn, $uid, $iniStr, $finStr, 'ajuste');
   $descs   = sumDescuentos($conn, $uid, $iniStr, $finStr);
+
+  // Unidades elegibles para bono provisional:
+  // 1 unidad = 1 venta principal de equipo (es_combo=0), no módem.
+  $eligible_units = countEligibleUnitsForBonus($conn, $uid, $iniStr, $finStr);
+
+  // Bono provisional del ejecutivo:
+  // $50 por unidad elegible, solo si vendió 10 unidades o más.
+  $bono_prov_eje = 0.0;
+  if (strcasecmp($rol,'Ejecutivo')===0 && $eligible_units >= 10) {
+    $bono_prov_eje = $eligible_units * 50.0;
+  }
 
   $total_raw = $base
          + $eq_eje + $sim_eje + $pos_eje + $tc_eje
@@ -331,9 +432,11 @@ foreach ($usuarios as $u) {
   $conf = $confirmMap[$uid] ?? ['confirmado'=>0,'confirmado_en'=>null];
 
   $data[] = [
-    'id'=>$uid, 'nombre'=>$u['nombre'], 'rol'=>$u['rol'], 'id_sucursal'=>$u['id_sucursal'],
+    'id'=>$uid, 'nombre'=>$u['nombre'], 'rol'=>$rol, 'id_sucursal'=>$sid,
     'sucursal_nombre'=>$u['sucursal_nombre'],
     'eq_cnt'=>$eq_cnt,
+    'cuota_unid'=>$cuota_unid,
+    'cuota_monto'=>$cuota_monto,
     'base'=>$base,
     // ejecutivo
     'eq_eje'=>$eq_eje, 'sim_eje'=>$sim_eje, 'pos_eje'=>$pos_eje, 'tc_eje'=>$tc_eje,
@@ -344,10 +447,36 @@ foreach ($usuarios as $u) {
     // ajustes
     'bonos'=>$bonos, 'descuentos'=>$descs, 'ajuste'=>$ajuste,
     // informativo
-    'bono_provisional'=>$bono_provisional,
+    'eligible_units'=>$eligible_units,
+    'bono_prov_eje'=>$bono_prov_eje,
+    'bono_provisional'=>0.0, // se define en segundo pase (solo ejecutivo)
     'total_raw'=>$total_raw, 'total'=>0,
     'confirmado'=>$conf['confirmado'], 'confirmado_en'=>$conf['confirmado_en']
   ];
+}
+
+/* ---------------- Monto de ventas por sucursal (para cuota de gerente) ---------------- */
+$montoSucPorSemana = [];
+if (columnExists($conn, 'ventas', 'id_sucursal')) {
+  $colFechaVentas = dateColVentas($conn);
+  $pIniV = $iniStr . ' 00:00:00';
+  $pFinV = $finStr . ' 23:59:59';
+
+  $sqlMontoSuc = "
+    SELECT id_sucursal, COALESCE(SUM(precio_venta),0) AS total
+    FROM ventas
+    WHERE $colFechaVentas BETWEEN ? AND ?
+    GROUP BY id_sucursal
+  ";
+  if ($stMS = $conn->prepare($sqlMontoSuc)) {
+    $stMS->bind_param("ss", $pIniV, $pFinV);
+    $stMS->execute();
+    $resMS = $stMS->get_result();
+    while ($row = $resMS->fetch_assoc()) {
+      $montoSucPorSemana[(int)$row['id_sucursal']] = (float)($row['total'] ?? 0);
+    }
+    $stMS->close();
+  }
 }
 
 /* ---------------- Redistribución para mostrar: gerente por sucursal ---------------- */
@@ -363,10 +492,13 @@ foreach ($data as $r) {
   }
 }
 
-// Segundo pase: set de columnas mostradas y TOTAL calculado con lo mostrado
+// Segundo pase: set de columnas mostradas, BONO PROVISIONAL final y TOTAL calculado con lo mostrado
 foreach ($data as &$r) {
-  $sid = (int)($r['id_sucursal'] ?? 0);
-  if (strcasecmp($r['rol'],'Gerente') === 0) {
+  $sid  = (int)($r['id_sucursal'] ?? 0);
+  $rolR = (string)$r['rol'];
+
+  // Comisiones de gerente visibles (eq/sim/pos/tc) concentradas en el renglón del gerente
+  if (strcasecmp($rolR,'Gerente') === 0) {
     $r['eq_ger']  = (float)($gerPorSucursal[$sid]['eq']  ?? 0);
     $r['sim_ger'] = (float)($gerPorSucursal[$sid]['sim'] ?? 0);
     $r['pos_ger'] = (float)($gerPorSucursal[$sid]['pos'] ?? 0);
@@ -375,7 +507,12 @@ foreach ($data as &$r) {
     $r['eq_ger'] = $r['sim_ger'] = $r['pos_ger'] = $r['tc_ger'] = 0.0;
   }
 
-  // Recalcular total usando valores mostrados (no raw)
+  // Bono provisional:
+  // Solo ejecutivos: 'bono_prov_eje' calculado en el primer pase.
+  $bono = (float)($r['bono_prov_eje'] ?? 0);
+  $r['bono_provisional'] = $bono;
+
+  // Recalcular total usando valores mostrados (no incluye bono_provisional, sigue siendo informativo)
   $r['total'] = (float)$r['base']
               + (float)$r['eq_eje'] + (float)$r['sim_eje'] + (float)$r['pos_eje'] + (float)$r['tc_eje']
               + (float)$r['eq_ger'] + (float)$r['sim_ger'] + (float)$r['pos_ger'] + (float)$r['tc_ger']
@@ -420,14 +557,14 @@ $confirmados          = array_sum(array_map(fn($r)=> (int)($r['confirmado'] ?? 0
   .toolbar .btn{border-radius:10px;}
 
   /* KPI Cards */
-  .kpi{border:0; border-radius:14px; box-shadow:0 10px 22px rgba(0,0,0,.05);}
+  .kpi{border:0; border-radius:14px; box-shadow:0 10px 22px rgba(0,0,0,.05); }
   .kpi .icon{width:38px;height:38px; display:inline-flex; align-items:center; justify-content:center; border-radius:10px;}
   .kpi h6{margin:0; font-size:.78rem; color:#6b7280; text-transform:uppercase; letter-spacing:.08em;}
   .kpi .val{font-variant-numeric:tabular-nums; font-size:1.05rem; font-weight:800;}
 
   /* Tabla compacta y visible */
   .tbl-wrap{position:relative; overflow:auto; max-height:70vh;}
-  .tbl{width:100%; border-collapse:separate; border-spacing:0; font-size:var(--fs-xs);}
+  .tbl{width:100%; border-collapse:separate; border-spacing:0; font-size:var(--fs-xs); }
   .tbl thead th{position:sticky; top:0; z-index:3; background:#fff; font-weight:700;
     padding:.4rem var(--pad-x); white-space:nowrap; border-bottom:2px solid #e5e7eb;}
   .tbl tbody td{padding:var(--pad-y) var(--pad-x); border-top:1px solid #eef1f5; vertical-align:middle;}
@@ -443,7 +580,6 @@ $confirmados          = array_sum(array_map(fn($r)=> (int)($r['confirmado'] ?? 0
   .badge-ok{background:#dcfce7;color:#166534;border:1px solid #bbf7d0;}
   .badge-pend{background:#111;color:#9a3412;border:1px solid #fed7aa;}
 
-  /* Estilo bono provisional */
   .bono-prov-aplica { color:#16a34a; font-weight:600; }
   .bono-prov-noaplica { color:#6b7280; }
 </style>
@@ -475,7 +611,7 @@ $confirmados          = array_sum(array_map(fn($r)=> (int)($r['confirmado'] ?? 0
         <i class="bi bi-magic me-1"></i> Aplicar cuotas y recalcular
       </button>
 
-      <button class="btn btn-primary" type="submit"><i class="bi bi-arrow-repeat me-1"></i>Actualizar</button>
+      <button class="btn btn-outline-primary" type="submit"><i class="bi bi-arrow-repeat me-1"></i>Actualizar</button>
     </form>
   </div>
 
@@ -559,8 +695,9 @@ $confirmados          = array_sum(array_map(fn($r)=> (int)($r['confirmado'] ?? 0
               <th class="col-emp">Empleado</th>
               <th>Sucursal</th>
               <th class="text-end"><abbr title="Conteo de ventas de equipos (combo=2; sin módem/mifi si hay detalle)">Eq #</abbr></th>
+              <th class="text-end"><abbr title="Cuota semanal: Ejecutivos = unidades; Gerentes = monto sucursal">Cuota</abbr></th>
               <th><abbr title="Sueldo base">Base</abbr></th>
-              <th class="text-end"><abbr title="Comisión Equipos">Eq</abbr></th>
+              <th class="text-end"><abbr title="Comisión Equipos (incluye especial si cumplió cuota)">Eq</abbr></th>
               <th class="text-end"><abbr title="Comisión SIMs (prepago)">SIMs</abbr></th>
               <th class="text-end"><abbr title="Comisión Pospago">Posp</abbr></th>
               <th class="text-end"><abbr title="Comisión PayJoy TC">TC</abbr></th>
@@ -568,12 +705,12 @@ $confirmados          = array_sum(array_map(fn($r)=> (int)($r['confirmado'] ?? 0
               <th class="text-end"><abbr title="Comisión Gerente SIMs">G. SIMs</abbr></th>
               <th class="text-end"><abbr title="Comisión Gerente Pospago">G. Posp</abbr></th>
               <th class="text-end"><abbr title="Comisión Gerente TC">G. TC</abbr></th>
-              <!-- ★ NUEVO: columna informativa bono provisional -->
-              <th class="text-end"><abbr title="Bono provisional automático ($50 por unidad elegible si >10; combo cuenta 1; sin módem)">$ Bono prov.</abbr></th>
+              <th class="text-end"><abbr title="Bono provisional Ejecutivo + Gerente (semana especial)">$ Bono prov.</abbr></th>
               <th class="text-end">Bonos</th>
               <th class="text-end"><abbr title="Descuentos">Desc</abbr></th>
               <th class="text-end">Ajuste</th>
               <th class="text-end">Total</th>
+              <th><abbr title="Descargar detalle de comisiones del usuario">Detalle</abbr></th>
               <th><abbr title="Confirmación del ejecutivo en la semana">Confirmación</abbr></th>
             </tr>
           </thead>
@@ -586,6 +723,13 @@ $confirmados          = array_sum(array_map(fn($r)=> (int)($r['confirmado'] ?? 0
               </td>
               <td><?= htmlspecialchars($r['sucursal_nombre']) ?></td>
               <td class="text-end"><?= number_format($r['eq_cnt']) ?></td>
+              <td class="text-end">
+                <?php if (strcasecmp($r['rol'],'Gerente')===0): ?>
+                  <?= $r['cuota_monto'] !== null ? '$'.number_format($r['cuota_monto'],2) : '—' ?>
+                <?php else: ?>
+                  <?= $r['cuota_unid'] !== null ? number_format($r['cuota_unid']) : '—' ?>
+                <?php endif; ?>
+              </td>
               <td class="money">$<?= number_format($r['base'],2) ?></td>
               <td class="money text-end">$<?= number_format($r['eq_eje'],2) ?></td>
               <td class="money text-end">$<?= number_format($r['sim_eje'],2) ?></td>
@@ -612,6 +756,17 @@ $confirmados          = array_sum(array_map(fn($r)=> (int)($r['confirmado'] ?? 0
                   value="<?= htmlspecialchars(number_format($r['ajuste'],2,'.','')) ?>" data-field="ajuste">
               </td>
               <td class="money text-end">$<?= number_format($r['total'],2) ?></td>
+
+              <td class="text-center">
+                <a
+                  href="export_detalle_nomina_usuario.php?uid=<?= (int)$r['id'] ?>&ini=<?= urlencode($iniStr) ?>&fin=<?= urlencode($finStr) ?>"
+                  class="btn btn-outline-success btn-sm"
+                  title="Descargar detalle de comisiones"
+                >
+                  <i class="bi bi-file-earmark-spreadsheet"></i>
+                </a>
+              </td>
+
               <td>
                 <?php if ((int)($r['confirmado'] ?? 0) === 1): ?>
                   <span class="badge badge-confirm badge-ok">Confirmada<?= $r['confirmado_en'] ? ' · '.htmlspecialchars($r['confirmado_en']) : '' ?></span>
@@ -627,6 +782,7 @@ $confirmados          = array_sum(array_map(fn($r)=> (int)($r['confirmado'] ?? 0
               <td>Total</td>
               <td></td>
               <td class="text-end"><?= number_format($tot['eq_cnt']) ?></td>
+              <td></td>
               <td class="money">$<?= number_format($tot['base'],2) ?></td>
               <td class="money text-end">$<?= number_format($tot['eq_eje'],2) ?></td>
               <td class="money text-end">$<?= number_format($tot['sim_eje'],2) ?></td>
@@ -641,6 +797,7 @@ $confirmados          = array_sum(array_map(fn($r)=> (int)($r['confirmado'] ?? 0
               <td class="money text-end">$<?= number_format($tot['descuentos'],2) ?></td>
               <td class="money text-end">$<?= number_format($tot['ajuste'],2) ?></td>
               <td class="money text-end">$<?= number_format($tot['total'],2) ?></td>
+              <td></td>
               <td></td>
             </tr>
           </tfoot>
@@ -704,7 +861,7 @@ document.querySelectorAll('input.editable').forEach(inp=>{
   });
 });
 
-// Export CSV
+// Export CSV (resumen de la tabla)
 document.getElementById('btn_export').addEventListener('click', ()=>{
   const rows = [...document.querySelectorAll('.tbl tr')].map(tr=>[...tr.children].map(td=>{
     const inp = td.querySelector('input'); return (inp ? inp.value : td.innerText).replace(/\s+/g,' ').trim();

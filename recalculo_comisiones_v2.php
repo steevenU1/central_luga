@@ -1,6 +1,6 @@
 <?php
 // recalculo_comisiones_v2.php — Recalcula comisiones (Ejecutivo/Gerente) por cumplimiento de cuota.
-// Aplica reglas de esquemas_comisiones_v2 a: detalle_venta, ventas_sims, ventas_payjoy_tc.
+// Aplica reglas de esquemas_comisiones_v2 a: detalle_venta, ventas_sims, y usa montos FIJOS para ventas_payjoy_tc (TC).
 // Semana operativa: Mar→Lun.
 
 session_start();
@@ -97,8 +97,18 @@ try {
   $res->close();
 
   /* ========== Cuotas: monto sucursal y unidades usuario ========== */
-  $stmtMontoSuc = $conn->prepare("SELECT COALESCE(SUM(precio_venta),0) AS total FROM ventas WHERE id_sucursal=? AND fecha_venta BETWEEN ? AND ?");
-  $stmtCuotaMonto = $conn->prepare("SELECT cuota_monto FROM cuotas_sucursales WHERE id_sucursal=? AND fecha_inicio<=? ORDER BY fecha_inicio DESC, id DESC LIMIT 1");
+  $stmtMontoSuc = $conn->prepare("
+    SELECT COALESCE(SUM(precio_venta),0) AS total
+    FROM ventas
+    WHERE id_sucursal=? AND fecha_venta BETWEEN ? AND ?
+  ");
+  $stmtCuotaMonto = $conn->prepare("
+    SELECT cuota_monto
+    FROM cuotas_sucursales
+    WHERE id_sucursal=? AND fecha_inicio<=?
+    ORDER BY fecha_inicio DESC, id DESC
+    LIMIT 1
+  ");
 
   $stmtUdsUser = $conn->prepare("
     SELECT COUNT(d.id) AS uds
@@ -109,8 +119,11 @@ try {
   "); // Cada renglón (no módem) = 1 unidad
 
   $stmtCuotaUds = $conn->prepare("
-    SELECT cuota_unidades FROM cuotas_semanales_sucursal
-    WHERE id_sucursal=? AND semana_inicio<=? AND semana_fin>=? ORDER BY id DESC LIMIT 1
+    SELECT cuota_unidades
+    FROM cuotas_semanales_sucursal
+    WHERE id_sucursal=? AND semana_inicio<=? AND semana_fin>=?
+    ORDER BY id DESC
+    LIMIT 1
   ");
 
   $cumpleMonto = [];
@@ -148,7 +161,8 @@ try {
   /* ========== Selectores de REGLA en esquemas_comisiones_v2 ========== */
   // Equipos (usa precio_min/precio_max)
   $selEquipo = $conn->prepare("
-    SELECT monto_fijo FROM esquemas_comisiones_v2
+    SELECT monto_fijo
+    FROM esquemas_comisiones_v2
     WHERE activo=1 AND rol=? AND categoria='Equipo' AND componente=?
       AND vigente_desde<=? AND (vigente_hasta IS NULL OR vigente_hasta>=?)
       AND (id_sucursal IS NULL OR id_sucursal=?)
@@ -161,20 +175,11 @@ try {
 
   // SIMs
   $selSIM = $conn->prepare("
-    SELECT monto_fijo FROM esquemas_comisiones_v2
+    SELECT monto_fijo
+    FROM esquemas_comisiones_v2
     WHERE activo=1 AND rol=? AND categoria='SIM' AND componente=?
       AND (subtipo=? OR subtipo='General' OR subtipo IS NULL)
       AND (operador=? OR operador='*' OR operador IS NULL)
-      AND vigente_desde<=? AND (vigente_hasta IS NULL OR vigente_hasta>=?)
-      AND (id_sucursal IS NULL OR id_sucursal=?)
-    ORDER BY (id_sucursal IS NULL) ASC, prioridad ASC
-    LIMIT 1
-  ");
-
-  // Tarjeta (PayJoy/TC)
-  $selTC = $conn->prepare("
-    SELECT monto_fijo FROM esquemas_comisiones_v2
-    WHERE activo=1 AND rol=? AND categoria='Tarjeta' AND componente=?
       AND vigente_desde<=? AND (vigente_hasta IS NULL OR vigente_hasta>=?)
       AND (id_sucursal IS NULL OR id_sucursal=?)
     ORDER BY (id_sucursal IS NULL) ASC, prioridad ASC
@@ -195,6 +200,10 @@ try {
   $COMP_COMI = 'comision';
   $COMP_COMI_GER = 'comision_gerente';
 
+  // Montos fijos de TC (regla nueva)
+  $TC_COMISION_EJE = 50.0;
+  $TC_COMISION_GER = 20.0;
+
   /* ========== PROCESO POR USUARIO ========== */
   $stats = ['equipos'=>0,'sims'=>0,'pospago'=>0,'tc'=>0];
 
@@ -204,8 +213,8 @@ try {
     $rolUsuario=(string)$u['rol'];
     $isGerenteVendedor = (strcasecmp($rolUsuario,'Gerente')===0);
 
-    $aplicaEje = !empty($cumpleUnidades[$uid]);
-    $aplicaGer = !empty($cumpleMonto[$sid]);
+    $aplicaEje = !empty($cumpleUnidades[$uid]); // llegó a cuota de unidades
+    $aplicaGer = !empty($cumpleMonto[$sid]);    // sucursal llegó a cuota de monto
 
     /* ---- EQUIPOS (detalle_venta) ---- */
     // precio_ref: productos.precio_lista -> detalle_venta.precio_unitario -> detalle_venta.precio
@@ -313,36 +322,57 @@ try {
       $stVS->close();
     }
 
-    /* ---- Tarjeta / PayJoy (ventas_payjoy_tc) ---- */
+    /* ---- Tarjeta / PayJoy (ventas_payjoy_tc) ----
+       Regla nueva:
+       - Ejecutivo: $50 por TC si llegó a cuota de unidades (aplicaEje=true).
+       - Gerente: $20 por TC de la sucursal si la sucursal llegó a cuota de monto (aplicaGer=true).
+       - Si la venta la hizo un Gerente: comision_gerente siempre 0 (igual que antes).
+       - Si NO hay cuota: ambas comisiones = 0.
+    ------------------------------------------------ */
     if ($hasTC) {
-      $stTC=$conn->prepare("SELECT id FROM ventas_payjoy_tc WHERE id_usuario=? AND fecha_venta BETWEEN ? AND ?");
+      // Primero traemos todas las TC de este usuario en la semana
+      $stTC=$conn->prepare("
+        SELECT id
+        FROM ventas_payjoy_tc
+        WHERE id_usuario=? AND fecha_venta BETWEEN ? AND ?
+      ");
       $stTC->bind_param('iss',$uid,$iniTS,$finTS);
       $stTC->execute(); $rsTC=$stTC->get_result();
+
       while($t=$rsTC->fetch_assoc()){
         $idT=(int)$t['id'];
 
-        // Comisión propia
-        if ($aplicaEje && $updTC_Eje) {
-          $rolTmp = $ROL_EJE; $compTmp = $COMP_COMI;
-          $selTC->bind_param('ssssi',$rolTmp,$compTmp,$fin,$fin,$sid);
-          $selTC->execute(); $re=$selTC->get_result()->fetch_assoc();
-          if ($re && $re['monto_fijo']!==null) {
-            $v=(float)$re['monto_fijo']; $updTC_Eje->bind_param('di',$v,$idT); $updTC_Eje->execute();
-            $stats['tc']++;
-          }
+        // Siempre partimos de 0 para evitar arrastrar valores viejos
+        if ($updTC_Eje) {
+          $v0 = 0.0;
+          $updTC_Eje->bind_param('di',$v0,$idT);
+          $updTC_Eje->execute();
         }
-        // Si la vendió un Gerente, comision_gerente=0
+        if ($updTC_Ger) {
+          $v0g = 0.0;
+          $updTC_Ger->bind_param('di',$v0g,$idT);
+          $updTC_Ger->execute();
+        }
+
+        // Comisión propia del vendedor (Ejecutivo o Gerente como VENDEDOR)
+        if ($aplicaEje && $updTC_Eje) {
+          // Por política: $50 por cada TC si llegó a cuota de unidades
+          $v = $TC_COMISION_EJE;
+          $updTC_Eje->bind_param('di',$v,$idT);
+          $updTC_Eje->execute();
+          $stats['tc']++;
+        }
+
+        // Comisión Gerente sobre esa venta:
         if ($isGerenteVendedor && $updTC_Ger) {
-          $v=0.0; $updTC_Ger->bind_param('di',$v,$idT); $updTC_Ger->execute();
+          // Si la vendió un Gerente, comision_gerente = 0 (ya se dejó en 0 arriba)
+          // No hacemos nada más aquí
         } else if ($aplicaGer && $updTC_Ger) {
-          // Solo si NO es venta de Gerente
-          $rolTmp = $ROL_GER; $compTmp = $COMP_COMI_GER;
-          $selTC->bind_param('ssssi',$rolTmp,$compTmp,$fin,$fin,$sid);
-          $selTC->execute(); $rg=$selTC->get_result()->fetch_assoc();
-          if ($rg && $rg['monto_fijo']!==null) {
-            $v=(float)$rg['monto_fijo']; $updTC_Ger->bind_param('di',$v,$idT); $updTC_Ger->execute();
-            $stats['tc']++;
-          }
+          // Solo si NO es venta de Gerente y la sucursal llegó a cuota de monto
+          $v = $TC_COMISION_GER;
+          $updTC_Ger->bind_param('di',$v,$idT);
+          $updTC_Ger->execute();
+          $stats['tc']++;
         }
       }
       $stTC->close();

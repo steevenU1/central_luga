@@ -322,7 +322,10 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
           <div class="row g-3 mb-2">
             <div class="col-md-4">
               <label class="form-label req">Precio de Venta Total ($)</label>
-              <input type="number" step="0.01" min="0.01" name="precio_venta" id="precio_venta" class="form-control" placeholder="0.00" required>
+              <!-- 🔒 Ahora solo lectura: se llena desde precios de lista/combo -->
+              <input type="number" step="0.01" min="0.01" name="precio_venta" id="precio_venta"
+                     class="form-control" placeholder="0.00" required readonly>
+              <div class="form-text">Se calcula automáticamente según los equipos seleccionados.</div>
             </div>
             <div class="col-md-4" id="enganche_field">
               <label class="form-label">Enganche ($)</label>
@@ -483,20 +486,6 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
         width: '100%'
       });
 
-      $('#tipo_venta').on('change', function() {
-        $('#combo').toggle(isFinanciamientoCombo());
-        if (!isFinanciamientoCombo()) {
-          $('#equipo2').val(null).trigger('change');
-          $('#equipo1 option, #equipo2 option').prop('disabled', false);
-        }
-        toggleVenta();
-        refreshEquipoLocks();
-      });
-
-      $('#forma_pago_enganche').on('change', function() {
-        $('#mixto_detalle').toggle($(this).val() === 'Mixto' && isFinanciamiento());
-      });
-
       function isFinanciamiento() {
         const tipo = $('#tipo_venta').val();
         return (tipo === 'Financiamiento' || tipo === 'Financiamiento+Combo');
@@ -505,6 +494,52 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
       function isFinanciamientoCombo() {
         return $('#tipo_venta').val() === 'Financiamiento+Combo';
       }
+
+      // 🔹 Nuevo: recalcular precio total según equipos y tipo
+      function recalcPrecioVenta() {
+        let total = 0;
+
+        const $opt1 = $('#equipo1').find('option:selected');
+        if ($opt1.length && $opt1.val()) {
+          const pLista1 = parseFloat($opt1.data('precio-lista')) || 0;
+          total += pLista1;
+        }
+
+        if (isFinanciamientoCombo()) {
+          const $opt2 = $('#equipo2').find('option:selected');
+          if ($opt2.length && $opt2.val()) {
+            const pLista2 = parseFloat($opt2.data('precio-lista')) || 0;
+            const pCombo2 = parseFloat($opt2.data('precio-combo'));
+            const precio2 = (!isNaN(pCombo2) && pCombo2 > 0) ? pCombo2 : pLista2;
+            total += precio2;
+          }
+        }
+
+        if (total > 0) {
+          $('#precio_venta').val(total.toFixed(2));
+        } else {
+          $('#precio_venta').val('');
+        }
+
+        // Actualizar también el modal (por si ya está abierto más adelante)
+        const precio = parseFloat($('#precio_venta').val()) || 0;
+        $('#conf_precio').text(precio.toFixed(2));
+      }
+
+      $('#tipo_venta').on('change', function() {
+        $('#combo').toggle(isFinanciamientoCombo());
+        if (!isFinanciamientoCombo()) {
+          $('#equipo2').val(null).trigger('change');
+          $('#equipo1 option, #equipo2 option').prop('disabled', false);
+        }
+        toggleVenta();
+        refreshEquipoLocks();
+        recalcPrecioVenta();
+      });
+
+      $('#forma_pago_enganche').on('change', function() {
+        $('#mixto_detalle').toggle($(this).val() === 'Mixto' && isFinanciamiento());
+      });
 
       function toggleVenta() {
         const esFin = isFinanciamiento();
@@ -552,7 +587,11 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
         }
       }
 
-      $('#equipo1, #equipo2').on('change', refreshEquipoLocks);
+      $('#equipo1, #equipo2').on('change', function() {
+        refreshEquipoLocks();
+        recalcPrecioVenta();
+      });
+
       $('#equipo2').on('select2:select', function(e) {
         const v1 = $('#equipo1').val();
         const elegido = e.params.data.id;
@@ -560,31 +599,18 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
           $(this).val(null).trigger('change');
         }
         refreshEquipoLocks();
+        recalcPrecioVenta();
       });
+
       $('#equipo1').on('select2:select', function() {
         refreshEquipoLocks();
+        recalcPrecioVenta();
       });
 
+      // ===== Carga de equipos por sucursal (se redefine más abajo) =====
       function cargarEquipos(sucursalId) {
-        $.ajax({
-          url: 'ajax_productos_por_sucursal.php',
-          method: 'POST',
-          data: {
-            id_sucursal: sucursalId
-          },
-          success: function(response) {
-            $('#equipo1, #equipo2').html(response).val('').trigger('change');
-            refreshEquipoLocks();
-          },
-          error: function(xhr) {
-            const msg = xhr.responseText || 'Error cargando inventario';
-            $('#equipo1, #equipo2').html('<option value="">' + msg + '</option>').trigger('change');
-            refreshEquipoLocks();
-          }
-        });
+        /* se redefine más abajo */
       }
-
-      cargarEquipos($('#id_sucursal').val());
 
       // ===== Cambio de sucursal: aviso + consulta candado en caliente =====
       $('#id_sucursal').on('change', function() {
@@ -751,12 +777,8 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
         $('#form_venta')[0].submit();
       });
 
-      function cargarEquipos(sucursalId) {
-        /* se redefine más abajo */ }
-
-      // Inicial
+      // Inicial: definimos cargarEquipos REAL aquí para que siempre refresque precio también
       function initEquipos() {
-        // Re-define cargarEquipos aquí para mantener orden
         cargarEquipos = function(sucursalId) {
           $.ajax({
             url: 'ajax_productos_por_sucursal.php',
@@ -767,17 +789,20 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
             success: function(response) {
               $('#equipo1, #equipo2').html(response).val('').trigger('change');
               refreshEquipoLocks();
+              recalcPrecioVenta();
             },
             error: function(xhr) {
               const msg = xhr.responseText || 'Error cargando inventario';
               $('#equipo1, #equipo2').html('<option value="">' + msg + '</option>').trigger('change');
               refreshEquipoLocks();
+              recalcPrecioVenta();
             }
           });
         };
 
         cargarEquipos($('#id_sucursal').val());
         refreshEquipoLocks();
+        recalcPrecioVenta();
       }
       initEquipos();
     });

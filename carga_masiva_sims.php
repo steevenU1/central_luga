@@ -142,14 +142,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'previ
                         [$operador, $opValido] = normalizarOperador($opRaw);
 
                         $estatus = 'OK'; $motivo = 'Listo para insertar';
-                        if ($iccid === '') { $estatus='Ignorada'; $motivo='ICCID vacío'; }
-                        elseif ($id_sucursal === 0) { $estatus='Ignorada'; $motivo='Sucursal no encontrada'; }
-                        elseif (!$opValido) { $estatus='Ignorada'; $motivo='Operador inválido'; }
-                        else {
+                        if ($iccid === '') {
+                            $estatus='Ignorada'; 
+                            $motivo='ICCID vacío'; 
+                        } elseif ($id_sucursal === 0) { 
+                            $estatus='Ignorada'; 
+                            $motivo='Sucursal no encontrada'; 
+                        } elseif (!$opValido) { 
+                            $estatus='Ignorada'; 
+                            $motivo='Operador inválido'; 
+                        } else {
                             $stmtDup = $conn->prepare("SELECT id FROM inventario_sims WHERE iccid=? LIMIT 1");
                             $stmtDup->bind_param("s", $iccid);
-                            $stmtDup->execute(); $stmtDup->store_result();
-                            if ($stmtDup->num_rows > 0) { $estatus='Ignorada'; $motivo='Duplicado en base'; }
+                            $stmtDup->execute(); 
+                            $stmtDup->store_result();
+                            if ($stmtDup->num_rows > 0) { 
+                                $estatus='Ignorada'; 
+                                $motivo='Duplicado en base'; 
+                            }
                             $stmtDup->close();
                         }
 
@@ -157,9 +167,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'previ
                         if ($estatus === 'OK') $contador['ok']++; else $contador['ignoradas']++;
                         if (count($previewRows) < PREVIEW_LIMIT) {
                             $previewRows[] = [
-                                'iccid'=>$iccid,'dn'=>$dn,'caja'=>$caja,'lote'=>$lote,
-                                'nombre_sucursal'=>$sucNom,'operador'=>$operador,
-                                'estatus'=>$estatus,'motivo'=>$motivo
+                                'iccid'=>$iccid,
+                                'dn'=>$dn,
+                                'caja'=>$caja,
+                                'lote'=>$lote,
+                                'nombre_sucursal'=>$sucNom,
+                                'operador'=>$operador,
+                                'estatus'=>$estatus,
+                                'motivo'=>$motivo
                             ];
                         }
                     }
@@ -189,7 +204,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'inser
     $out = fopen('php://output', 'w');
     fputcsv($out, ['iccid','dn','caja','lote','sucursal','operador','estatus_final','motivo']);
 
-    // Nuevo: incluye columna LOTE (nullable)
     $sqlInsert = "INSERT INTO inventario_sims (iccid,dn,caja_id,lote,id_sucursal,operador,estatus,fecha_ingreso)
                   VALUES (?,?,?,?,?,?,'Disponible',NOW())";
     $stmtInsert = $conn->prepare($sqlInsert);
@@ -210,15 +224,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'inser
         $id_sucursal = $sucNom === '' ? $idEulalia : getSucursalIdPorNombre($conn, $sucNom, $sucursalCache);
         [$operador, $opValido] = normalizarOperador($opRaw);
 
-        $estatusFinal='Ignorada'; $motivo='N/A';
+        $estatusFinal='Ignorada'; 
+        $motivo='N/A';
 
-        if ($iccid===''){ $motivo='ICCID vacío'; }
-        elseif ($id_sucursal===0){ $motivo='Sucursal no encontrada'; }
-        elseif (!$opValido){ $motivo='Operador inválido'; }
-        else {
+        if ($iccid===''){ 
+            $motivo='ICCID vacío'; 
+        } elseif ($id_sucursal===0){ 
+            $motivo='Sucursal no encontrada'; 
+        } elseif (!$opValido){ 
+            $motivo='Operador inválido'; 
+        } else {
             $stmtDup=$conn->prepare("SELECT id FROM inventario_sims WHERE iccid=? LIMIT 1");
             $stmtDup->bind_param("s",$iccid);
-            $stmtDup->execute(); $stmtDup->store_result();
+            $stmtDup->execute(); 
+            $stmtDup->store_result();
 
             if($stmtDup->num_rows>0){
                 $motivo='Duplicado';
@@ -232,7 +251,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'inser
                 $stmtInsert->bind_param("ssssis", $iccid, $dnParam, $caja, $loteParam, $id_sucursal, $operador);
 
                 if($stmtInsert->execute()){
-                    $estatusFinal='Insertada'; $motivo='OK';
+                    $estatusFinal='Insertada'; 
+                    $motivo='OK';
                 } else {
                     $motivo='Error inserción';
                 }
@@ -242,7 +262,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'inser
 
         fputcsv($out, [$iccid,$dn,$caja,$lote,$sucNom,$operador,$estatusFinal,$motivo]);
     }
-    fclose($fh); fclose($out);
+    fclose($fh); 
+    fclose($out);
     @unlink($tmpPath);
     unset($_SESSION['carga_sims_tmp'],$_SESSION['confirm_token']);
     exit;
@@ -282,18 +303,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'inser
                 <button class="btn btn-primary">👀 Vista Previa</button>
             </form>
         </div>
+
     <?php elseif (($_POST['action'] ?? '') === 'preview'): ?>
         <div class="card p-4 shadow-sm bg-white">
             <h5>Vista Previa</h5>
-            <p>Total filas: <b><?= $contador['total'] ?></b> | OK: <b class="text-success"><?= $contador['ok'] ?></b> | Ignoradas: <b class="text-danger"><?= $contador['ignoradas'] ?></b></p>
+            <p>
+                Total filas: <b><?= $contador['total'] ?></b> | 
+                OK: <b class="text-success"><?= $contador['ok'] ?></b> | 
+                Ignoradas: <b class="text-danger"><?= $contador['ignoradas'] ?></b>
+            </p>
             <div class="table-responsive">
                 <table class="table table-bordered table-sm">
                     <thead class="table-light">
-                      <tr><th>ICCID</th><th>DN</th><th>Caja</th><th>Lote</th><th>Sucursal</th><th>Operador</th><th>Estatus</th><th>Motivo</th></tr>
+                      <tr>
+                        <th>ICCID</th>
+                        <th>DN</th>
+                        <th>Caja</th>
+                        <th>Lote</th>
+                        <th>Sucursal</th>
+                        <th>Operador</th>
+                        <th>Estatus</th>
+                        <th>Motivo</th>
+                      </tr>
                     </thead>
                     <tbody>
                     <?php foreach ($previewRows as $r): ?>
-                        <tr class="<?= ($r['estatus']==='OK')?'':'table-warning' ?>">
+                        <tr class="<?= ($r['estatus']==='OK') ? '' : 'table-warning' ?>">
                             <td><?= htmlspecialchars($r['iccid']) ?></td>
                             <td><?= htmlspecialchars($r['dn']) ?></td>
                             <td><?= htmlspecialchars($r['caja']) ?></td>
@@ -307,28 +342,111 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'inser
                     </tbody>
                 </table>
             </div>
-            <form method="POST" class="mt-3">
+
+            <!-- Form de inserción: lo mandamos a un iframe oculto -->
+            <form method="POST" class="mt-3" id="formInsertar" target="hidden_iframe">
                 <input type="hidden" name="action" value="insertar">
                 <input type="hidden" name="confirm_token" value="<?= htmlspecialchars($_SESSION['confirm_token'] ?? '') ?>">
-                <div class="alert alert-warning">Se insertarán hasta <b class="text-success"><?= $contador['ok'] ?></b> registros válidos.</div>
+                <div class="alert alert-warning">
+                    Se insertarán hasta 
+                    <b class="text-success"><?= $contador['ok'] ?></b> registros válidos.
+                    También se descargará un archivo con el detalle de la carga.
+                </div>
                 <div class="form-check mb-2">
                     <input class="form-check-input" type="checkbox" value="1" id="confirm_ok" name="confirm_ok">
-                    <label class="form-check-label" for="confirm_ok">Entiendo y deseo continuar.</label>
+                    <label class="form-check-label" for="confirm_ok">
+                        Entiendo y deseo continuar con la carga.
+                    </label>
                 </div>
                 <input type="text" class="form-control mb-2" name="confirm_word" placeholder="Escribe CARGAR">
                 <button class="btn btn-success" id="btnConfirm" disabled>✅ Confirmar e Insertar</button>
                 <a href="carga_masiva_sims.php" class="btn btn-outline-secondary">Cancelar</a>
             </form>
-            <script>
-            const chk=document.getElementById('confirm_ok'),
-                  word=document.querySelector('[name=confirm_word]'),
-                  btn=document.getElementById('btnConfirm');
-            function toggle(){btn.disabled=!(chk.checked && word.value.trim()==='CARGAR');}
-            chk.onchange=toggle; word.oninput=toggle; toggle();
-            </script>
         </div>
     <?php endif; ?>
 </div>
+
+<!-- Iframe oculto para recibir la respuesta de la carga (CSV) -->
+<iframe name="hidden_iframe" id="hidden_iframe" style="display:none;"></iframe>
+
+<!-- Modal de 'Ya quedó' -->
+<div class="modal fade" id="modalCargaOK" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">✅ Carga de SIMs completada</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+      </div>
+      <div class="modal-body">
+        <p class="mb-0">
+          Listo 🙌<br>
+          La <b>carga masiva de SIMs</b> se está procesando y se generó el archivo de reporte con todo el detalle.<br>
+          Revisa el archivo que se descargó para confirmar qué SIMs se insertaron, cuáles se ignoraron y los posibles duplicados. 🔍
+        </p>
+      </div>
+      <div class="modal-footer">
+        <a href="carga_masiva_sims.php" class="btn btn-outline-secondary">
+          Cargar otro archivo
+        </a>
+        <button type="button" class="btn btn-primary" id="btnEntendido">
+            ¡Entendido!
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- JS de Bootstrap + lógica del modal -->
+<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script> -->
+<script>
+(function(){
+    // Habilitar / deshabilitar botón Confirmar
+    const chk  = document.getElementById('confirm_ok');
+    const word = document.querySelector('[name=confirm_word]');
+    const btn  = document.getElementById('btnConfirm');
+
+    function toggleBtn(){
+        if (!btn || !word || !chk) return;
+        btn.disabled = !(chk.checked && word.value.trim() === 'CARGAR');
+    }
+
+    if (chk && word && btn) {
+        chk.addEventListener('change', toggleBtn);
+        word.addEventListener('input', toggleBtn);
+        toggleBtn();
+    }
+
+    // Mostrar modal y bloquear doble envío al hacer submit
+    const form   = document.getElementById('formInsertar');
+
+    if (form) {
+        form.addEventListener('submit', function(){
+            // Bloquear doble envío
+            if (btn) {
+                btn.disabled = true;
+                btn.innerText = 'Procesando carga...';
+            }
+            if (chk) chk.disabled = true;
+            if (word) word.readOnly = true;
+
+            // Mostrar modal "YA QUEDÓ" (mientras se descarga el CSV)
+            const modalEl = document.getElementById('modalCargaOK');
+            if (modalEl && window.bootstrap) {
+                const modal = new bootstrap.Modal(modalEl);
+                modal.show();
+            }
+        });
+    }
+
+    // Botón ¡Entendido!: recarga la página para limpiar la vista
+    const btnEntendido = document.getElementById('btnEntendido');
+    if (btnEntendido) {
+        btnEntendido.addEventListener('click', function () {
+            window.location.href = 'carga_masiva_sims.php';
+        });
+    }
+})();
+</script>
 
 </body>
 </html>
