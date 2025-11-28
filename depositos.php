@@ -6,7 +6,6 @@ if (!isset($_SESSION['id_usuario']) || $_SESSION['rol'] != 'Admin') {
 }
 
 require_once __DIR__ . '/db.php';
-require_once __DIR__ . '/navbar.php';
 
 /* =======================
    Helpers
@@ -28,6 +27,7 @@ function csv_escape($v){
     $needs = strpbrk($v, ",\"\t") !== false;
     return $needs ? '"' . str_replace('"','""',$v) . '"' : $v;
 }
+
 function renderDetalleCorteHTML(mysqli $conn, int $idCorte): string {
     // Cobros
     $qc = $conn->prepare("
@@ -127,7 +127,11 @@ function renderDetalleCorteHTML(mysqli $conn, int $idCorte): string {
                 <td class="text-end">$<?= number_format($d['monto_depositado'],2) ?></td>
                 <td><?= htmlspecialchars($d['banco']) ?></td>
                 <td><code><?= htmlspecialchars($d['referencia']) ?></code></td>
-                <td><span class="badge <?= $d['estado']==='Validado'?'bg-success':'bg-warning text-dark' ?>"><?= htmlspecialchars($d['estado']) ?></span></td>
+                <td>
+                  <span class="badge <?= $d['estado']==='Validado'?'bg-success':'bg-warning text-dark' ?>">
+                    <?= htmlspecialchars($d['estado']) ?>
+                  </span>
+                </td>
                 <td>
                   <?php if (!empty($d['comprobante_archivo'])): ?>
                     <button class="btn btn-outline-primary btn-sm js-ver"
@@ -139,9 +143,14 @@ function renderDetalleCorteHTML(mysqli $conn, int $idCorte): string {
                 </td>
                 <td class="text-center">
                   <?php if ($d['estado'] !== 'Validado'): ?>
-                    <form method="POST" class="d-inline" onsubmit="return confirmarValidacion(<?= (int)$d['id'] ?>, '<?= htmlspecialchars($d['sucursal'],ENT_QUOTES) ?>', '<?= number_format($d['monto_depositado'],2) ?>');">
+                    <!-- Validación por AJAX desde el modal -->
+                    <form method="POST"
+                          class="d-inline js-validar-deposito-modal"
+                          data-id="<?= (int)$d['id'] ?>"
+                          data-sucursal="<?= htmlspecialchars($d['sucursal'],ENT_QUOTES) ?>"
+                          data-monto="<?= number_format($d['monto_depositado'],2) ?>">
                       <input type="hidden" name="id_deposito" value="<?= (int)$d['id'] ?>">
-                      <button name="accion" value="Validar" class="btn btn-success btn-sm">
+                      <button type="submit" name="accion" value="Validar" class="btn btn-success btn-sm">
                         Validar
                       </button>
                     </form>
@@ -171,8 +180,14 @@ if (!hasColumn($conn, 'depositos_sucursal', 'comentario_admin')) {
 }
 
 /* =======================
-   AJAX detalle de corte
+   AJAX flag (para POST y GET)
    ======================= */
+$esAjax = !empty($_SERVER['HTTP_X_REQUESTED_WITH']) &&
+          strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest';
+
+/* ======================================================
+   1) AJAX DETALLE DE CORTE (GET) — SIN NAVBAR
+   ====================================================== */
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'detalle_corte') {
     $id = (int)($_GET['id'] ?? 0);
     header('Content-Type: text/html; charset=UTF-8');
@@ -184,16 +199,20 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'detalle_corte') {
     exit;
 }
 
-/* =======================
-   Export CSV del corte
-   ======================= */
+/* ======================================================
+   2) EXPORT CSV DEL CORTE (GET) — SIN NAVBAR
+   ====================================================== */
 if (isset($_GET['export']) && $_GET['export'] === 'csv_corte') {
     $id = (int)($_GET['id'] ?? 0);
     if ($id <= 0) {
-        die('Corte inválido');
+        http_response_code(400);
+        echo 'Corte inválido';
+        exit;
     }
+
     $meta = $conn->query("
-      SELECT cc.id, s.nombre AS sucursal, cc.fecha_operacion, cc.fecha_corte, cc.total_efectivo, cc.total_tarjeta, cc.total_comision_especial, cc.total_general
+      SELECT cc.id, s.nombre AS sucursal, cc.fecha_operacion, cc.fecha_corte,
+             cc.total_efectivo, cc.total_tarjeta, cc.total_comision_especial, cc.total_general
       FROM cortes_caja cc
       INNER JOIN sucursales s ON s.id = cc.id_sucursal
       WHERE cc.id = {$id}
@@ -226,9 +245,15 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv_corte') {
     $rowsDep = $qd->get_result()->fetch_all(MYSQLI_ASSOC);
     $qd->close();
 
+    while (ob_get_level()) { ob_end_clean(); }
+
     header('Content-Type: text/csv; charset=UTF-8');
     header('Content-Disposition: attachment; filename="corte_'.$id.'_detalle.csv"');
+    header('Pragma: no-cache');
+    header('Expires: 0');
+
     $out = fopen('php://output', 'w');
+    fputs($out, "\xEF\xBB\xBF"); // BOM
 
     if ($meta) {
         fputs($out, "Corte,".csv_escape($meta['id']).",Sucursal,".csv_escape($meta['sucursal']).",Fecha Operación,".csv_escape($meta['fecha_operacion']).",Fecha Corte,".csv_escape($meta['fecha_corte'])."\r\n");
@@ -256,51 +281,77 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv_corte') {
     exit;
 }
 
-/* =======================
-   POST acciones
-   ======================= */
+/* ======================================================
+   3) POST (Validar / Guardar comentario) — PRIMERO, ANTES DE NAVBAR
+   ====================================================== */
 $msg = '';
-$esAjax = !empty($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['id_deposito'], $_POST['accion'])) {
     $idDeposito = intval($_POST['id_deposito']);
     $accion     = $_POST['accion'];
 
     if ($accion === 'Validar') {
+        $ok = false;
+
+        // 1) Marcar depósito como validado
         $stmt = $conn->prepare("
             UPDATE depositos_sucursal
-            SET estado='Validado', id_admin_valida=?, actualizado_en=NOW()
-            WHERE id=? AND estado='Pendiente'
+            SET estado='Validado',
+                id_admin_valida = ?,
+                actualizado_en  = NOW()
+            WHERE id = ? AND estado = 'Pendiente'
         ");
         $stmt->bind_param("ii", $_SESSION['id_usuario'], $idDeposito);
         $stmt->execute();
+        $ok = true;
+        $stmt->close();
 
-        // Cierre de corte si procede
-        $sqlCorte = "
-            SELECT ds.id_corte, cc.total_efectivo,
-                   IFNULL(SUM(ds2.monto_depositado),0) AS suma_depositos
-            FROM depositos_sucursal ds
-            INNER JOIN cortes_caja cc ON cc.id = ds.id_corte
-            INNER JOIN depositos_sucursal ds2 ON ds2.id_corte = ds.id_corte AND ds2.estado='Validado'
-            WHERE ds.id = ?
-            GROUP BY ds.id_corte
-        ";
-        $stmtCorte = $conn->prepare($sqlCorte);
-        $stmtCorte->bind_param("i", $idDeposito);
-        $stmtCorte->execute();
-        $corteData = $stmtCorte->get_result()->fetch_assoc();
+        // 2) Cierre de corte si procede
+        if ($ok) {
+            $sqlCorte = "
+                SELECT ds.id_corte, cc.total_efectivo,
+                       IFNULL(SUM(ds2.monto_depositado),0) AS suma_depositos
+                FROM depositos_sucursal ds
+                INNER JOIN cortes_caja cc ON cc.id = ds.id_corte
+                INNER JOIN depositos_sucursal ds2
+                        ON ds2.id_corte = ds.id_corte
+                       AND ds2.estado  = 'Validado'
+                WHERE ds.id = ?
+                GROUP BY ds.id_corte
+            ";
+            $stmtCorte = $conn->prepare($sqlCorte);
+            $stmtCorte->bind_param("i", $idDeposito);
+            $stmtCorte->execute();
+            $corteData = $stmtCorte->get_result()->fetch_assoc();
+            $stmtCorte->close();
 
-        if ($corteData && $corteData['suma_depositos'] >= $corteData['total_efectivo']) {
-            $stmtClose = $conn->prepare("
-                UPDATE cortes_caja
-                SET estado='Cerrado', depositado=1, monto_depositado=?, fecha_deposito=NOW()
-                WHERE id=?
-            ");
-            $stmtClose->bind_param("di", $corteData['suma_depositos'], $corteData['id_corte']);
-            $stmtClose->execute();
+            if ($corteData && $corteData['suma_depositos'] >= $corteData['total_efectivo']) {
+                $stmtClose = $conn->prepare("
+                    UPDATE cortes_caja
+                    SET estado          = 'Cerrado',
+                        depositado      = 1,
+                        monto_depositado = ?,
+                        fecha_deposito   = NOW()
+                    WHERE id = ?
+                ");
+                $stmtClose->bind_param("di", $corteData['suma_depositos'], $corteData['id_corte']);
+                $stmtClose->execute();
+                $stmtClose->close();
+            }
         }
 
-        $msg = "<div class='alert alert-success mb-3'>✅ Depósito validado correctamente.</div>";
+        if ($esAjax) {
+            header('Content-Type: application/json; charset=UTF-8');
+            echo json_encode([
+                'ok'      => $ok,
+                'message' => $ok ? 'Depósito validado correctamente.' : 'No se pudo validar el depósito.'
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
+        } else {
+            $msg = $ok
+              ? "<div class='alert alert-success mb-3'>✅ Depósito validado correctamente.</div>"
+              : "<div class='alert alert-danger mb-3'>❌ No se pudo validar el depósito.</div>";
+        }
 
     } elseif ($accion === 'GuardarComentario') {
         $comentario = trim($_POST['comentario_admin'] ?? '');
@@ -321,6 +372,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['id_deposito'], $_POST
         }
     }
 }
+
+/* ======================================================
+   4) A PARTIR DE AQUÍ YA PODEMOS PINTAR NAVBAR + HTML
+   ====================================================== */
+require_once __DIR__ . '/navbar.php';
 
 /* =======================
    Consultas principales
@@ -466,7 +522,6 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
     @media (max-width: 992px){
       .comment-cell textarea{ min-width: 160px; }
     }
-    /* Overlay de carga */
     .loading-backdrop{
       position: fixed; inset:0; background: rgba(15,23,42,.35);
       display:none; align-items:center; justify-content:center; z-index: 2000;
@@ -481,23 +536,19 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
     }
     @keyframes spin{ to { transform: rotate(360deg);} }
 
-    /* Spinner en visor de comprobante */
     #visorWrap{ position: relative; }
     #visorSpinner{
       position:absolute; inset:0; display:none; align-items:center; justify-content:center; background: rgba(255,255,255,.65);
       z-index: 5;
     }
 
-    /* === Modal Detalle de Corte: 80% viewport === */
     #detalleCorteModal .modal-dialog { max-width: 80vw; }
     #detalleCorteModal .modal-content { height: 80vh; }
     #detalleCorteModal .modal-body { overflow: auto; }
 
-    /* Ocultar cualquier navbar que se cuele en el contenido inyectado del modal */
     #detalleCorteModal .navbar,
     #detalleCorteBody .navbar { display:none !important; height:0 !important; overflow:hidden !important; }
 
-    /* Cabeceras fijas dentro del modal */
     #detalleCorteModal table thead th{
       position: sticky; top: 0; background:#0f172a; color:#fff; z-index: 2;
     }
@@ -635,6 +686,7 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
                     </td>
 
                     <td class="text-center">
+                      <!-- Validación normal (vista principal) -->
                       <form method="POST" class="d-inline" onsubmit="return confirmarValidacion(<?= (int)$p['id_deposito'] ?>, '<?= htmlspecialchars($p['sucursal'],ENT_QUOTES) ?>', '<?= number_format($p['monto_depositado'],2) ?>');">
                         <input type="hidden" name="id_deposito" value="<?= (int)$p['id_deposito'] ?>">
                         <button name="accion" value="Validar" class="btn btn-success btn-sm">
@@ -923,17 +975,15 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
   </div>
 </div>
 
-<!-- Modal Detalle de Corte (80% viewport, sin navbar) -->
+<!-- Modal Detalle de Corte -->
 <div class="modal fade" id="detalleCorteModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable"><!-- tamaño controlado por CSS -->
+  <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
     <div class="modal-content">
       <div class="modal-header">
         <h5 class="modal-title"><i class="bi bi-list-ul me-1"></i> Detalle del corte</h5>
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
       </div>
-      <div class="modal-body" id="detalleCorteBody">
-        <!-- contenido por AJAX -->
-      </div>
+      <div class="modal-body" id="detalleCorteBody"></div>
       <div class="modal-footer">
         <button class="btn btn-outline-secondary" data-bs-dismiss="modal">Cerrar</button>
       </div>
@@ -963,7 +1013,6 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
-  // Historial: toggle fechas cuando se selecciona semana
   const semanaInput = document.querySelector('input[name="semana"]');
   const desdeInput  = document.querySelector('input[name="desde"]');
   const hastaInput  = document.querySelector('input[name="hasta"]');
@@ -978,7 +1027,6 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
     });
   }
 
-  // Visor modal con spinner
   const visorModal  = document.getElementById('visorModal');
   const visorFrame  = document.getElementById('visorFrame');
   const btnAbrir    = document.getElementById('btnAbrirNueva');
@@ -1004,13 +1052,11 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
     });
   }
 
-  // Confirmación al validar depósito (UX)
   function confirmarValidacion(id, sucursal, monto){
     return confirm(`¿Validar el depósito #${id} de ${sucursal} por $${monto}?`);
   }
   window.confirmarValidacion = confirmarValidacion;
 
-  // Guardar comentario por AJAX (modal rápido)
   const okModalEl = document.getElementById('comentarioOkModal');
   const okModal = (window.bootstrap && okModalEl) ? new bootstrap.Modal(okModalEl, {backdrop: 'static', keyboard: false}) : null;
 
@@ -1041,7 +1087,6 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
     }, {passive:false});
   });
 
-  // Modal Detalle de Corte (AJAX) + Overlay Cargando
   const detalleModalEl = document.getElementById('detalleCorteModal');
   const detalleBody = document.getElementById('detalleCorteBody');
   const loadingBackdrop = document.getElementById('loadingBackdrop');
@@ -1049,25 +1094,63 @@ $pendMonto = 0.0; foreach ($pendientes as $p) { $pendMonto += (float)$p['monto_d
 
   function showLoading(show){ if (loadingBackdrop) loadingBackdrop.style.display = show ? 'flex' : 'none'; }
 
+  function wireDetalleHandlers() {
+    detalleBody.querySelectorAll('.js-ver').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const src = btn.getAttribute('data-src');
+        if (document.getElementById('visorSpinner')) document.getElementById('visorSpinner').style.display = 'flex';
+        document.getElementById('visorFrame').src = src;
+        document.getElementById('btnAbrirNueva').href  = src;
+        new bootstrap.Modal(document.getElementById('visorModal')).show();
+      });
+    });
+
+    detalleBody.querySelectorAll('.js-validar-deposito-modal').forEach(form => {
+      form.addEventListener('submit', async (ev) => {
+        ev.preventDefault();
+        const id      = form.dataset.id;
+        const sucursal= form.dataset.sucursal || '';
+        const monto   = form.dataset.monto || '';
+
+        if (!confirm(`¿Validar el depósito #${id} de ${sucursal} por $${monto}?`)) return;
+
+        const fd = new FormData(form);
+        if (!fd.get('accion')) fd.append('accion', 'Validar');
+
+        showLoading(true);
+        try{
+          const resp = await fetch(location.href, {
+            method: 'POST',
+            headers: {'X-Requested-With':'XMLHttpRequest'},
+            body: fd
+          });
+          let data = null;
+          try { data = await resp.json(); } catch(e){}
+
+          if (data && data.ok) {
+            alert(data.message || 'Depósito validado correctamente.');
+            location.reload();
+          } else {
+            alert((data && data.message) || 'No se pudo validar el depósito.');
+          }
+        }catch(err){
+          console.error(err);
+          alert('Error de red al validar el depósito.');
+        }finally{
+          showLoading(false);
+        }
+      });
+    });
+  }
+
   async function cargarDetalleCorte(idCorte){
     showLoading(true);
     try{
       const resp = await fetch(`?ajax=detalle_corte&id=${encodeURIComponent(idCorte)}`, {headers:{'X-Requested-With':'XMLHttpRequest'}});
       const html = await resp.text();
-      // Por si el servidor devuelve accidentalmente un navbar, queda oculto por CSS
       detalleBody.innerHTML = html;
+      wireDetalleHandlers();
       if (detalleModal) detalleModal.show();
-
-      // Re-wire botones "Ver" del HTML inyectado
-      detalleBody.querySelectorAll('.js-ver').forEach(btn => {
-        btn.addEventListener('click', () => {
-          const src = btn.getAttribute('data-src');
-          if (document.getElementById('visorSpinner')) document.getElementById('visorSpinner').style.display = 'flex';
-          document.getElementById('visorFrame').src = src;
-          document.getElementById('btnAbrirNueva').href  = src;
-          new bootstrap.Modal(document.getElementById('visorModal')).show();
-        });
-      });
     }catch(err){
       console.error(err);
       detalleBody.innerHTML = '<div class="alert alert-danger">No se pudo cargar el detalle del corte.</div>';

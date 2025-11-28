@@ -230,9 +230,10 @@ $grpOperacion  = [
   'mantenimiento_admin.php',
   'gestionar_usuarios.php',
   'zona_asistencias.php',
-  'nomina_mi_semana.php',
+  'nomina_mi_semana_v2.php',
   'panel_operador.php',
   'recargas_portal.php', // ✅ NUEVO: para resaltar el parent
+  'cortes_zona.php'
 ];
 $grpRH         = ['reporte_nomina_v2.php', 'reporte_nomina_gerentes_zona.php', 'admin_expedientes.php', 'admin_asistencias.php', 'productividad_ejecutivo.php'];
 $grpOperativos = [
@@ -878,7 +879,7 @@ function item_active(string $f, string $c): string
             <?php endif; ?>
 
             <?php if (in_array($rolUsuario, ['Gerente', 'Ejecutivo'], true) && $esSucursalPropia): ?>
-              <li><a class="dropdown-item <?= item_active('nomina_mi_semana.php', $current) ?>" href="nomina_mi_semana.php">Mi nómina</a></li>
+              <li><a class="dropdown-item <?= item_active('nomina_mi_semana_v2.php', $current) ?>" href="nomina_mi_semana_v2.php">Mi nómina</a></li>
             <?php endif; ?>
 
             <?php if (in_array($rolUsuario, ['Ejecutivo', 'Gerente'])): ?>
@@ -900,6 +901,11 @@ function item_active(string $f, string $c): string
               </li>
               <li class="dropdown-header">Zona (GZ)</li>
               <li><a class="dropdown-item <?= item_active('zona_asistencias.php', $current) ?>" href="zona_asistencias.php"><i class="bi bi-people-fill me-1"></i>Asistencias de zona</a></li>
+              <li>
+                <a class="dropdown-item <?= item_active('cortes_zona.php', $current) ?>" href="cortes_zona.php">
+                <i class="bi bi-journal-check me-1"></i>Monitoreo cortes de caja
+                </a>
+             </li>
             <?php endif; ?>
 
             <?php if (in_array($rolUsuario, ['Gerente', 'GerenteZona', 'GerenteSucursal', 'Admin', 'Super'])): ?>
