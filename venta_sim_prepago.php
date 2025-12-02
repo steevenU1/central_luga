@@ -11,7 +11,10 @@
        * Portabilidad + Bait = 10, Portabilidad + ATT = 5
        * Otros = 0
    - tipo_sim se toma del inventario y se normaliza a {Bait, ATT}.
+   - Ahora también amarramos la venta a cliente:
+       * id_cliente, nombre_cliente, numero_cliente (teléfono)
 */
+
 session_start();
 if (!isset($_SESSION['id_usuario'])) { header("Location: index.php"); exit(); }
 
@@ -140,10 +143,17 @@ require_once __DIR__ . '/candado_captura.php';
 abortar_si_captura_bloqueada(); // por defecto bloquea POST
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && (($_POST['accion'] ?? '') !== 'alta_sim')) {
+
     $idSim       = (int)($_POST['id_sim'] ?? 0);
     $tipoVenta   = trim($_POST['tipo_venta'] ?? '');
     $precio      = (float)($_POST['precio'] ?? 0);
     $comentarios = trim($_POST['comentarios'] ?? '');
+
+    // 🔗 Datos de cliente desde el formulario (igual lógica que nueva_venta)
+    $idCliente       = (int)($_POST['id_cliente'] ?? 0);
+    $nombreCliente   = trim($_POST['nombre_cliente'] ?? '');
+    $telefonoCliente = preg_replace('/\D+/', '', (string)($_POST['telefono_cliente'] ?? '')); // solo dígitos
+    $correoCliente   = trim($_POST['correo_cliente'] ?? '');
 
     // 1) Verificar SIM y OBTENER operador DESDE INVENTARIO (ignorar POST)
     $sql = "SELECT id, iccid, operador
@@ -165,9 +175,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (($_POST['accion'] ?? '') !== 'alta
         if ($tipoVenta === 'Regalo') {
             if (round($precio, 2) != 0.00) {
                 $mensaje = '<div class="alert alert-danger">Para "Regalo" el precio debe ser 0.</div>';
-        }   } else {
+            }
+        } else {
             if ($precio <= 0) {
                 $mensaje = '<div class="alert alert-danger">El precio debe ser mayor a 0 para Nueva/Portabilidad.</div>';
+            }
+        }
+
+        // Validaciones mínimas de cliente para Portabilidad (igual espíritu que nueva_venta)
+        if ($mensaje === '' && strcasecmp($tipoVenta, 'Portabilidad') === 0) {
+            if ($idCliente <= 0) {
+                $mensaje = '<div class="alert alert-danger">Debes seleccionar un cliente para Portabilidad.</div>';
+            } elseif ($telefonoCliente === '' || !preg_match('/^\d{10}$/', $telefonoCliente)) {
+                $mensaje = '<div class="alert alert-danger">El cliente debe tener un teléfono válido de 10 dígitos.</div>';
             }
         }
 
@@ -176,22 +196,53 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (($_POST['accion'] ?? '') !== 'alta
             $comisionEjecutivo = calcComisionEjecutivoSIM($rolUsuario, $tipoVenta, $tipoSim);
             $comisionGerente   = calcComisionGerenteSIM($tipoVenta, $tipoSim);
 
-            // 3) Insertar venta (campos que existen según tu captura de pantalla)
-            $sqlVenta = "INSERT INTO ventas_sims
-                (tipo_venta, tipo_sim, comentarios, precio_total,
-                 comision_ejecutivo, comision_gerente, id_usuario, id_sucursal, fecha_venta)
-                VALUES (?,?,?,?,?,?,?,?, NOW())";
-            $stmt = $conn->prepare($sqlVenta);
-            $stmt->bind_param("sssddiii",
-                $tipoVenta,              // enum('Nueva','Portabilidad','Regalo','Pospago')
-                $tipoSim,                // enum('Bait','ATT')
-                $comentarios,
-                $precio,
-                $comisionEjecutivo,
-                $comisionGerente,
-                $idUsuario,
-                $idSucursal
-            );
+            // 3) Insertar venta, detectando si la tabla ya tiene columnas de cliente
+            $numeroCliente = $telefonoCliente; // mapeamos teléfono a numero_cliente
+
+            $tieneColsCliente = columnExists($conn, 'ventas_sims', 'id_cliente')
+                             && columnExists($conn, 'ventas_sims', 'numero_cliente')
+                             && columnExists($conn, 'ventas_sims', 'nombre_cliente');
+
+            if ($tieneColsCliente) {
+                $sqlVenta = "INSERT INTO ventas_sims
+                    (tipo_venta, tipo_sim, numero_cliente, nombre_cliente, comentarios, precio_total,
+                     comision_ejecutivo, comision_gerente, id_usuario, id_sucursal, id_cliente, fecha_venta)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?, NOW())";
+                $stmt = $conn->prepare($sqlVenta);
+                $stmt->bind_param(
+                    "ssssddiiiii",
+                    $tipoVenta,           // 1
+                    $tipoSim,             // 2
+                    $numeroCliente,       // 3
+                    $nombreCliente,       // 4
+                    $comentarios,         // 5
+                    $precio,              // 6
+                    $comisionEjecutivo,   // 7
+                    $comisionGerente,     // 8
+                    $idUsuario,           // 9
+                    $idSucursal,          // 10
+                    $idCliente            // 11
+                );
+            } else {
+                // Fallback por si aún no se migran columnas (comportamiento anterior)
+                $sqlVenta = "INSERT INTO ventas_sims
+                    (tipo_venta, tipo_sim, comentarios, precio_total,
+                     comision_ejecutivo, comision_gerente, id_usuario, id_sucursal, fecha_venta)
+                    VALUES (?,?,?,?,?,?,?,?, NOW())";
+                $stmt = $conn->prepare($sqlVenta);
+                $stmt->bind_param(
+                    "sssddiii",
+                    $tipoVenta,
+                    $tipoSim,
+                    $comentarios,
+                    $precio,
+                    $comisionEjecutivo,
+                    $comisionGerente,
+                    $idUsuario,
+                    $idSucursal
+                );
+            }
+
             $stmt->execute();
             $idVenta = (int)$stmt->insert_id;
             $stmt->close();
@@ -219,7 +270,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (($_POST['accion'] ?? '') !== 'alta
     }
 }
 
-/* ===== Util: verifica columna (para detalle opcional) ===== */
+/* ===== Util: verifica columna (para detalle opcional y columnas de cliente) ===== */
 function columnExists(mysqli $conn, string $table, string $column): bool {
   $t = $conn->real_escape_string($table);
   $c = $conn->real_escape_string($column);
@@ -290,6 +341,23 @@ $stmt->close();
     .badge-soft{background:#eef2ff; color:#1e40af; border:1px solid #dbeafe;}
     .list-compact{margin:0; padding-left:1rem;} .list-compact li{margin-bottom:.25rem;}
     .readonly-hint{background:#f1f5f9;}
+
+    .cliente-summary-label{
+      font-size:.85rem;
+      text-transform:uppercase;
+      letter-spacing:.08em;
+      color:#64748b;
+      margin-bottom:.25rem;
+    }
+    .cliente-summary-main{
+      font-weight:600;
+      font-size:1.05rem;
+      color:#111827;
+    }
+    .cliente-summary-sub{
+      font-size:.9rem;
+      color:#6b7280;
+    }
   </style>
 </head>
 <body class="bg-light">
@@ -309,7 +377,7 @@ $stmt->close();
   <div class="d-flex align-items-center justify-content-between mb-3">
     <div>
       <h2 class="page-title mb-1"><i class="bi bi-sim me-2"></i>Venta de SIM Prepago</h2>
-      <div class="help-text">Selecciona la SIM y confirma los datos en el modal antes de enviar.</div>
+      <div class="help-text">Selecciona la SIM, vincula al cliente y confirma los datos en el modal antes de enviar.</div>
     </div>
   </div>
 
@@ -328,7 +396,45 @@ $stmt->close();
 
   <form method="POST" class="card card-elev p-3 mb-4" id="formVentaSim" novalidate>
     <input type="hidden" name="accion" value="venta">
+
+    <!-- 🔗 Cliente seleccionado (igual que nueva_venta, pero para SIM) -->
+    <input type="hidden" name="id_cliente" id="id_cliente" value="">
+    <input type="hidden" name="nombre_cliente" id="nombre_cliente" value="">
+    <input type="hidden" name="telefono_cliente" id="telefono_cliente" value="">
+    <input type="hidden" name="correo_cliente" id="correo_cliente" value="">
+
     <div class="card-body">
+
+      <div class="section-title"><i class="bi bi-people"></i> Datos del cliente</div>
+      <div class="row g-3 mb-3">
+        <div class="col-md-8">
+          <div class="border rounded-3 p-3 bg-light">
+            <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+              <div>
+                <div class="cliente-summary-label">Cliente seleccionado</div>
+                <div class="cliente-summary-main" id="cliente_resumen_nombre">
+                  Ninguno seleccionado
+                </div>
+                <div class="cliente-summary-sub" id="cliente_resumen_detalle">
+                  Usa el botón <strong>Buscar / crear cliente</strong> para seleccionar uno.
+                </div>
+              </div>
+              <div class="text-end">
+                <span class="badge rounded-pill text-bg-secondary" id="badge_tipo_cliente">
+                  <i class="bi bi-person-dash me-1"></i> Sin cliente
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="col-md-4 d-flex align-items-center justify-content-md-end">
+          <button type="button" class="btn btn-outline-primary w-100" id="btn_open_modal_clientes">
+            <i class="bi bi-search me-1"></i> Buscar / crear cliente
+          </button>
+        </div>
+      </div>
+
+      <hr class="my-4">
 
       <div class="section-title"><i class="bi bi-collection"></i> Selección de SIM</div>
       <div class="row g-3 mb-3">
@@ -462,7 +568,7 @@ $stmt->close();
           <strong>Validación de identidad:</strong> verifica que se registrará con el <u>usuario correcto</u> y en la <u>sucursal correcta</u>.
         </div>
 
-        <div class="row g-3">
+        <div class="row g-3 mb-3">
           <div class="col-md-6">
             <div class="card border-0 shadow-sm h-100">
               <div class="card-body">
@@ -470,6 +576,7 @@ $stmt->close();
                 <ul class="list-compact">
                   <li><strong>Usuario:</strong> <span id="conf_usuario"><?= htmlspecialchars($nombreUser) ?></span></li>
                   <li><strong>Sucursal:</strong> <span id="conf_sucursal"><?= htmlspecialchars($nomSucursal) ?></span></li>
+                  <li><strong>Cliente:</strong> <span id="conf_cliente">—</span></li>
                 </ul>
               </div>
             </div>
@@ -507,22 +614,121 @@ $stmt->close();
   </div>
 </div>
 
+<!-- Modal de clientes: buscar / seleccionar / crear (misma lógica que nueva_venta) -->
+<div class="modal fade" id="modalClientes" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header bg-light">
+        <h5 class="modal-title">
+          <i class="bi bi-people me-2 text-primary"></i>Buscar o crear cliente
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+      </div>
+      <div class="modal-body">
+        <!-- Buscador -->
+        <div class="mb-3">
+          <label class="form-label">Buscar por nombre, teléfono o código de cliente</label>
+          <div class="input-group">
+            <input type="text" class="form-control" id="cliente_buscar_q" placeholder="Ej. LUCIA, 5587967699 o CL-40-000001">
+            <button class="btn btn-primary" type="button" id="btn_buscar_modal">
+              <i class="bi bi-search"></i> Buscar
+            </button>
+          </div>
+          <div class="form-text">
+            La búsqueda se realiza a nivel <strong>global.</strong>
+          </div>
+        </div>
+
+        <hr>
+
+        <!-- Resultados -->
+        <div class="mb-2 d-flex justify-content-between align-items-center">
+          <span class="fw-semibold">Resultados</span>
+          <span class="text-muted small" id="lbl_resultados_clientes">Sin buscar aún.</span>
+        </div>
+        <div class="table-responsive mb-3">
+          <table class="table table-sm align-middle">
+            <thead class="table-light">
+              <tr>
+                <th>Código</th>
+                <th>Nombre</th>
+                <th>Teléfono</th>
+                <th>Correo</th>
+                <th>Fecha alta</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="tbody_clientes">
+              <!-- JS -->
+            </tbody>
+          </table>
+        </div>
+
+        <hr>
+
+        <!-- Crear nuevo cliente -->
+        <div class="mb-2">
+          <button class="btn btn-outline-success btn-sm" type="button" data-bs-toggle="collapse" data-bs-target="#collapseNuevoCliente">
+            <i class="bi bi-person-plus me-1"></i> Crear nuevo cliente
+          </button>
+        </div>
+        <div class="collapse" id="collapseNuevoCliente">
+          <div class="border rounded-3 p-3 bg-light">
+            <div class="row g-3">
+              <div class="col-md-4">
+                <label class="form-label">Nombre completo</label>
+                <input type="text" class="form-control" id="nuevo_nombre">
+              </div>
+              <div class="col-md-4">
+                <label class="form-label">Teléfono (10 dígitos)</label>
+                <input type="text" class="form-control" id="nuevo_telefono">
+              </div>
+              <div class="col-md-4">
+                <label class="form-label">Correo</label>
+                <input type="email" class="form-control" id="nuevo_correo">
+              </div>
+            </div>
+            <div class="mt-3 text-end">
+              <button type="button" class="btn btn-success" id="btn_guardar_nuevo_cliente">
+                <i class="bi bi-check2-circle me-1"></i> Guardar y seleccionar
+              </button>
+            </div>
+            <div class="form-text">
+              El cliente se creará en la sucursal de esta venta (<?= htmlspecialchars($nomSucursal) ?>).
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">
+          Cerrar
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- JS -->
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
+<!-- Bootstrap bundle suele venir desde navbar.php; si no, descomenta: -->
+<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
 
 <script>
 $(function(){
-  const modalConfirm = new bootstrap.Modal(document.getElementById('modalConfirmacion'));
-  const $form   = $('#formVentaSim');
-  const $simSel = $('#selectSim');
-  const $precio = $('#precio');
-  const $tipo   = $('#tipo_venta');
-  const $coment = $('#comentarios');
+  const modalConfirm  = new bootstrap.Modal(document.getElementById('modalConfirmacion'));
+  const modalClientes = new bootstrap.Modal(document.getElementById('modalClientes'));
+
+  const $form        = $('#formVentaSim');
+  const $simSel      = $('#selectSim');
+  const $precio      = $('#precio');
+  const $tipo        = $('#tipo_venta');
+  const $coment      = $('#comentarios');
   const $tipoSimView = $('#tipoSimView');
 
-  // Select2
+  const idSucursal = <?= (int)$idSucursal ?>;
+
+  // Select2 SIMs
   $simSel.select2({
     placeholder: '-- Selecciona SIM --',
     width: '100%',
@@ -552,7 +758,147 @@ $(function(){
   ajustarAyudaPrecio();
   $('#tipo_venta').on('change', ajustarAyudaPrecio);
 
-  // Validación + Modal
+  // ========= LÓGICA DE CLIENTE (copiada del patrón de nueva_venta) =========
+  function limpiarCliente() {
+    $('#id_cliente').val('');
+    $('#nombre_cliente').val('');
+    $('#telefono_cliente').val('');
+    $('#correo_cliente').val('');
+
+    $('#cliente_resumen_nombre').text('Ninguno seleccionado');
+    $('#cliente_resumen_detalle').html('Usa el botón <strong>Buscar / crear cliente</strong> para seleccionar uno.');
+    $('#badge_tipo_cliente')
+      .removeClass('text-bg-success')
+      .addClass('text-bg-secondary')
+      .html('<i class="bi bi-person-dash me-1"></i> Sin cliente');
+  }
+
+  function setClienteSeleccionado(c) {
+    $('#id_cliente').val(c.id || '');
+    $('#nombre_cliente').val(c.nombre || '');
+    $('#telefono_cliente').val(c.telefono || '');
+    $('#correo_cliente').val(c.correo || '');
+
+    const nombre = c.nombre || '(Sin nombre)';
+    const detParts = [];
+    if (c.telefono) detParts.push('Tel: ' + c.telefono);
+    if (c.codigo_cliente) detParts.push('Código: ' + c.codigo_cliente);
+    if (c.correo) detParts.push('Correo: ' + c.correo);
+
+    $('#cliente_resumen_nombre').text(nombre);
+    $('#cliente_resumen_detalle').text(detParts.join(' · ') || 'Sin más datos.');
+
+    $('#badge_tipo_cliente')
+      .removeClass('text-bg-secondary')
+      .addClass('text-bg-success')
+      .html('<i class="bi bi-person-check me-1"></i> Cliente seleccionado');
+  }
+
+  // Abrir modal clientes
+  $('#btn_open_modal_clientes').on('click', function() {
+    $('#cliente_buscar_q').val('');
+    $('#tbody_clientes').empty();
+    $('#lbl_resultados_clientes').text('Sin buscar aún.');
+    $('#collapseNuevoCliente').removeClass('show');
+    modalClientes.show();
+  });
+
+  // Buscar clientes en modal
+  $('#btn_buscar_modal').on('click', function() {
+    const q = $('#cliente_buscar_q').val().trim();
+
+    if (!q) {
+      alert('Escribe algo para buscar (nombre, teléfono o código).');
+      return;
+    }
+
+    $.post('ajax_clientes_buscar_modal.php', {
+      q: q,
+      id_sucursal: idSucursal
+    }, function(res) {
+      if (!res || !res.ok) {
+        alert(res && res.message ? res.message : 'No se pudo buscar clientes.');
+        return;
+      }
+
+      const clientes = res.clientes || [];
+      const $tbody = $('#tbody_clientes');
+      $tbody.empty();
+
+      if (clientes.length === 0) {
+        $('#lbl_resultados_clientes').text('Sin resultados. Puedes crear un cliente nuevo.');
+        return;
+      }
+
+      $('#lbl_resultados_clientes').text('Se encontraron ' + clientes.length + ' cliente(s).');
+
+      clientes.forEach(function(c) {
+        const $tr = $('<tr>');
+        $tr.append($('<td>').text(c.codigo_cliente || '—'));
+        $tr.append($('<td>').text(c.nombre || ''));
+        $tr.append($('<td>').text(c.telefono || ''));
+        $tr.append($('<td>').text(c.correo || ''));
+        $tr.append($('<td>').text(c.fecha_alta || ''));
+        const $btnSel = $('<button type="button" class="btn btn-sm btn-primary">')
+          .html('<i class="bi bi-check2-circle me-1"></i> Seleccionar')
+          .data('cliente', c)
+          .on('click', function() {
+            const cliente = $(this).data('cliente');
+            setClienteSeleccionado(cliente);
+            modalClientes.hide();
+          });
+        $tr.append($('<td>').append($btnSel));
+        $tbody.append($tr);
+      });
+    }, 'json').fail(function() {
+      alert('Error al buscar en la base de clientes.');
+    });
+  });
+
+  // Guardar nuevo cliente desde modal
+  $('#btn_guardar_nuevo_cliente').on('click', function() {
+    const nombre = $('#nuevo_nombre').val().trim();
+    let tel = $('#nuevo_telefono').val().trim();
+    const correo = $('#nuevo_correo').val().trim();
+
+    if (!nombre) {
+      alert('Captura el nombre del cliente.');
+      return;
+    }
+    tel = tel.replace(/\D+/g, '');
+    if (!/^\d{10}$/.test(tel)) {
+      alert('El teléfono debe tener exactamente 10 dígitos.');
+      return;
+    }
+
+    $.post('ajax_crear_cliente.php', {
+      nombre: nombre,
+      telefono: tel,
+      correo: correo,
+      id_sucursal: idSucursal
+    }, function(res) {
+      if (!res || !res.ok) {
+        alert(res && res.message ? res.message : 'No se pudo guardar el cliente.');
+        return;
+      }
+
+      const c = res.cliente || {};
+      setClienteSeleccionado(c);
+      modalClientes.hide();
+
+      // Limpiar formulario de nuevo cliente
+      $('#nuevo_nombre').val('');
+      $('#nuevo_telefono').val('');
+      $('#nuevo_correo').val('');
+      $('#collapseNuevoCliente').removeClass('show');
+
+      alert(res.message || 'Cliente creado y vinculado.');
+    }, 'json').fail(function(xhr) {
+      alert('Error al guardar el cliente: ' + (xhr.responseText || 'desconocido'));
+    });
+  });
+
+  // ========= Validación + Modal =========
   let allowSubmit = false;
 
   function validar() {
@@ -569,6 +915,20 @@ $(function(){
     } else {
       if (isNaN(precio) || precio <= 0) errores.push('El precio debe ser mayor a 0 para Nueva/Portabilidad.');
     }
+
+    // Reglas de cliente (amarrar Portabilidad mínimo a cliente)
+    const idCliente   = $('#id_cliente').val();
+    const telCliente  = ($('#telefono_cliente').val() || '').trim();
+
+    if (tipo === 'Portabilidad') {
+      if (!idCliente) errores.push('Debes seleccionar un cliente para Portabilidad.');
+      if (!telCliente) {
+        errores.push('El cliente debe tener teléfono registrado.');
+      } else if (!/^\d{10}$/.test(telCliente)) {
+        errores.push('El teléfono del cliente debe tener 10 dígitos.');
+      }
+    }
+
     return errores;
   }
 
@@ -585,6 +945,10 @@ $(function(){
     $('#conf_tipo').text(tipo);
     $('#conf_precio').text(precio.toFixed(2));
     $('#conf_comentarios').text(comentarios || '—');
+
+    // Cliente en el modal
+    const nombreCliente = $('#cliente_resumen_nombre').text() || '—';
+    $('#conf_cliente').text(nombreCliente);
   }
 
   $form.on('submit', function(e){
@@ -599,6 +963,9 @@ $(function(){
     $('#btn_submit').prop('disabled', true).text('Enviando...');
     allowSubmit = true; modalConfirm.hide(); $form[0].submit();
   });
+
+  // Estado inicial: sin cliente
+  limpiarCliente();
 });
 </script>
 

@@ -2,7 +2,10 @@
 // procesar_venta_accesorios.php — LUGA / Central 2.0
 // Opción A: descuenta SOLO cantidad sin tocar estatus.
 // Inserta detalle en la tabla existente: detalle_venta_accesorio (singular) o detalle_venta_accesorios (plural).
-// NUEVO: si accesorios_regalo_modelos.vender=0 => solo permite operación cuando ES_REGALO=1.
+// NUEVO:
+//   - Recibe id_cliente, nombre_cliente y telefono (oculto).
+//   - Si existe columna id_cliente en ventas_accesorios, la llena.
+//   - Mantiene lógica de regalo / whitelist / stock.
 
 session_start();
 if (!isset($_SESSION['id_usuario'])) { header('Location: index.php'); exit(); }
@@ -74,6 +77,7 @@ function es_solo_regalo(mysqli $conn, int $idProducto): bool {
 
 /* ---------------- Entradas ---------------- */
 $TAG_ACCES    = normalizar_tag($_POST['tag'] ?? '');
+$ID_CLIENTE   = (int)($_POST['id_cliente'] ?? 0);
 $NOMBRE       = trim((string)($_POST['nombre_cliente'] ?? ''));
 $TELEFONO     = trim((string)($_POST['telefono'] ?? ''));
 $FORMA_PAGO   = trim((string)($_POST['forma_pago'] ?? 'Efectivo'));
@@ -90,7 +94,12 @@ $PREC = array_map('floatval', (array)($_POST['linea_precio'] ?? []));
 /* ---------------- Validaciones básicas ---------------- */
 if ($ID_SUCURSAL <= 0)                   die('Sucursal inválida.');
 if ($TAG_ACCES === '')                   die('TAG de la venta de accesorios es requerido.');
+if ($ID_CLIENTE <= 0)                    die('Cliente inválido (id_cliente faltante).');
 if ($NOMBRE === '' || $TELEFONO === '')  die('Nombre y teléfono son requeridos.');
+$telNorm = preg_replace('/\D+/', '', $TELEFONO);
+if (!preg_match('/^\d{10}$/', $telNorm)) die('El teléfono del cliente debe tener exactamente 10 dígitos.');
+$TELEFONO = $telNorm;
+
 if (count($IDS) === 0)                   die('Debes agregar al menos una línea.');
 if (count($IDS) !== count($CANT) || count($IDS) !== count($PREC)) die('Líneas mal formadas.');
 
@@ -236,8 +245,20 @@ try{
   $bind = "sssii sddd s"; $bind = str_replace(' ','',$bind);
   $params = [$TAG_ACCES, $NOMBRE, $TELEFONO, $ID_SUCURSAL, $ID_USUARIO, $FORMA_PAGO, $EFECTIVO, $TARJETA, $total, $COMENTARIOS];
 
-  if (column_exists($conn,'ventas_accesorios','es_regalo')) { $cols.=", es_regalo";  $vals.=", ?"; $bind.="i"; $params[]=(int)$ES_REGALO; }
-  if (column_exists($conn,'ventas_accesorios','tag_equipo')) { $cols.=", tag_equipo"; $vals.=", ?"; $bind.="s"; $params[]=$TAG_EQUIPO; }
+  // NUEVO: id_cliente si existe la columna
+  if (column_exists($conn,'ventas_accesorios','id_cliente')) {
+    $cols  .= ", id_cliente";
+    $vals  .= ", ?";
+    $bind  .= "i";
+    $params[] = $ID_CLIENTE;
+  }
+
+  if ($has_es_regalo_col){
+    $cols.=", es_regalo";  $vals.=", ?"; $bind.="i"; $params[]=(int)$ES_REGALO;
+  }
+  if ($has_tag_equipo_col){
+    $cols.=", tag_equipo"; $vals.=", ?"; $bind.="s"; $params[]=$TAG_EQUIPO;
+  }
 
   $sql = "INSERT INTO ventas_accesorios ($cols) VALUES ($vals)";
   $st = $conn->prepare($sql);
@@ -252,7 +273,7 @@ try{
 
   if ($tblDetalle === '') throw new Exception('No existe tabla de detalle para accesorios.');
 
-  // Columnas disponibles en tu screenshot: descripcion_snapshot, cantidad, precio_unitario, subtotal
+  // Columnas disponibles: descripcion_snapshot, cantidad, precio_unitario, subtotal
   $tieneDescripcion = column_exists($conn, $tblDetalle, 'descripcion_snapshot');
   $tieneSubtotal    = column_exists($conn, $tblDetalle, 'subtotal');
 

@@ -1,7 +1,4 @@
 <?php
-// nueva_venta.php — Central LUGA
-// Versión con confirmación + envío por AJAX + modal de resultado (incluye tarjeta de lealtad).
-
 // ✅ Iniciamos sesión aquí porque moveremos el include del navbar más abajo
 if (session_status() === PHP_SESSION_NONE) {
   session_start();
@@ -201,6 +198,29 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
     .alert-candado {
       border-left: 6px solid #dc3545;
     }
+
+    .cliente-summary-label {
+      font-size: .85rem;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      color: #64748b;
+      margin-bottom: .25rem;
+    }
+
+    .cliente-summary-main {
+      font-weight: 600;
+      font-size: 1.05rem;
+      color: #111827;
+    }
+
+    .cliente-summary-sub {
+      font-size: .9rem;
+      color: #6b7280;
+    }
+
+    .text-success-soft {
+      color: #15803d;
+    }
   </style>
 </head>
 
@@ -253,6 +273,14 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
     <form method="POST" action="procesar_venta.php" id="form_venta" novalidate data-locked="<?= $bloquearInicial ? '1' : '0' ?>">
       <input type="hidden" name="id_usuario" value="<?= $id_usuario ?>">
 
+      <!-- 🔗 Cliente seleccionado -->
+      <input type="hidden" name="id_cliente" id="id_cliente" value="">
+      <input type="hidden" name="nombre_cliente" id="nombre_cliente" value="">
+      <input type="hidden" name="telefono_cliente" id="telefono_cliente" value="">
+      <input type="hidden" name="correo_cliente" id="correo_cliente" value="">
+      <!-- 🔗 Monto de cupón aplicado (para backend) -->
+      <input type="hidden" name="monto_cupon" id="monto_cupon" value="0">
+
       <div class="card card-elev mb-4">
         <div class="card-body">
 
@@ -289,37 +317,41 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
           <hr class="my-4">
 
           <div class="section-title"><i class="bi bi-people"></i> Datos del cliente</div>
+
+          <!-- Vista compacta del cliente + botón para abrir modal -->
+          <div class="row g-3 mb-3">
+            <div class="col-md-8">
+              <div class="border rounded-3 p-3 bg-light">
+                <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+                  <div>
+                    <div class="cliente-summary-label">Cliente seleccionado</div>
+                    <div class="cliente-summary-main" id="cliente_resumen_nombre">
+                      Ninguno seleccionado
+                    </div>
+                    <div class="cliente-summary-sub" id="cliente_resumen_detalle">
+                      Usa el botón <strong>Buscar / crear cliente</strong> para seleccionar uno.
+                    </div>
+                  </div>
+                  <div class="text-end">
+                    <span class="badge rounded-pill text-bg-secondary" id="badge_tipo_cliente">
+                      <i class="bi bi-person-dash me-1"></i> Sin cliente
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="col-md-4 d-flex align-items-center justify-content-md-end">
+              <button type="button" class="btn btn-outline-primary w-100" id="btn_open_modal_clientes">
+                <i class="bi bi-search me-1"></i> Buscar / crear cliente
+              </button>
+            </div>
+          </div>
+
+          <!-- TAG sigue en el formulario porque lo usamos en financiamiento -->
           <div class="row g-3 mb-2">
             <div class="col-md-4" id="tag_field">
               <label for="tag" class="form-label">TAG (ID del crédito)</label>
               <input type="text" name="tag" id="tag" class="form-control" placeholder="Ej. PJ-123ABC">
-            </div>
-            <div class="col-md-4">
-              <label class="form-label">Nombre del Cliente</label>
-              <input type="text" name="nombre_cliente" id="nombre_cliente" class="form-control" placeholder="Nombre y apellidos">
-            </div>
-            <div class="col-md-4">
-              <label class="form-label">Teléfono del Cliente</label>
-              <input type="text" name="telefono_cliente" id="telefono_cliente" class="form-control" placeholder="10 dígitos">
-            </div>
-          </div>
-
-          <!-- 🔹 Fila extra: código de referido + activación de tarjeta de lealtad -->
-          <div class="row g-3 mb-2 align-items-end">
-            <div class="col-md-4">
-              <label class="form-label">Código de referido (opcional)</label>
-              <input type="text" name="codigo_referido" id="codigo_referido" class="form-control" placeholder="Ej. LUGA-XYZ123">
-              <div class="form-text">Si el cliente viene recomendado, captura el código de su tarjeta de lealtad.</div>
-            </div>
-            <div class="col-md-4">
-              <label class="form-label d-block">Tarjeta de lealtad</label>
-              <input type="hidden" name="crear_tarjeta_lealtad" id="crear_tarjeta_lealtad" value="0">
-              <button type="button" class="btn btn-outline-success w-100" id="btn_lealtad_toggle">
-                <i class="bi bi-stars me-1"></i> Activar tarjeta de lealtad
-              </button>
-              <div id="lealtad_status" class="form-text text-success d-none">
-                Se generará una tarjeta digital al registrar la venta.
-              </div>
             </div>
           </div>
 
@@ -344,10 +376,13 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
           <div class="row g-3 mb-2">
             <div class="col-md-4">
               <label class="form-label req">Precio de Venta Total ($)</label>
-              <!-- 🔒 Ahora solo lectura: se llena desde precios de lista/combo -->
+              <!-- 🔒 Solo lectura: se llena desde precios de lista/combo y aplica cupón si hay -->
               <input type="number" step="0.01" min="0.01" name="precio_venta" id="precio_venta"
-                     class="form-control" placeholder="0.00" required readonly>
+                class="form-control" placeholder="0.00" required readonly>
               <div class="form-text">Se calcula automáticamente según los equipos seleccionados.</div>
+              <div class="form-text text-success-soft d-none" id="txt_cupon_info">
+                Cupón aplicado: -$<span id="lbl_cupon_monto">0.00</span> MXN
+              </div>
             </div>
             <div class="col-md-4" id="enganche_field">
               <label class="form-label">Enganche ($)</label>
@@ -442,8 +477,6 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
                     <li class="d-none" id="li_enganche"><strong>Enganche:</strong> $<span id="conf_enganche">0.00</span></li>
                     <li class="d-none" id="li_financiera"><strong>Financiera:</strong> <span id="conf_financiera">—</span></li>
                     <li class="d-none" id="li_tag"><strong>TAG:</strong> <span id="conf_tag">—</span></li>
-                    <li class="d-none" id="li_codigo_ref"><strong>Código referido:</strong> <span id="conf_codigo_ref">—</span></li>
-                    <li class="d-none" id="li_lealtad"><strong>Lealtad:</strong> <span id="conf_lealtad">—</span></li>
                   </ul>
                 </div>
               </div>
@@ -467,31 +500,128 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
     </div>
   </div>
 
-  <!-- Modal resultado de la venta (éxito / error + tarjeta de lealtad) -->
-  <div class="modal fade" id="modalResultadoVenta" tabindex="-1" aria-hidden="true">
+  <!-- Modal de cupón de descuento -->
+  <div class="modal fade" id="modalCupon" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-md modal-dialog-centered">
       <div class="modal-content">
         <div class="modal-header bg-light">
-          <h5 class="modal-title" id="resultado_titulo">
-            <i class="bi bi-info-circle me-2 text-primary"></i>Resultado de la venta
+          <h5 class="modal-title">
+            <i class="bi bi-ticket-perforated text-success me-2"></i>
+            Cupón de descuento disponible
           </h5>
           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
         </div>
         <div class="modal-body">
-          <div id="resultado_mensaje"></div>
-          <div id="resultado_tarjeta_wrap" class="mt-3 d-none">
-            <hr>
-            <p class="mb-2">
-              <i class="bi bi-stars me-1"></i>
-              <strong>Tarjeta de lealtad generada para este cliente.</strong>
-            </p>
-            <a href="#" target="_blank" id="resultado_tarjeta_link" class="btn btn-success w-100">
-              <i class="bi bi-credit-card-2-front me-1"></i> Ver tarjeta de lealtad
-            </a>
+          <p class="mb-2">
+            El producto seleccionado tiene un <strong>cupón de descuento</strong> por:
+          </p>
+          <h4 class="text-success">
+            $<span id="modal_cupon_monto">0.00</span> MXN
+          </h4>
+          <p class="mt-3 mb-0 small text-muted">
+            Si aplicas el cupón, el total de la venta se actualizará con este descuento.
+          </p>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" id="btn_no_aplicar_cupon" data-bs-dismiss="modal">
+            No aplicar
+          </button>
+          <button type="button" class="btn btn-success" id="btn_aplicar_cupon">
+            Aplicar cupón
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal de clientes: buscar / seleccionar / crear -->
+  <div class="modal fade" id="modalClientes" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header bg-light">
+          <h5 class="modal-title">
+            <i class="bi bi-people me-2 text-primary"></i>Buscar o crear cliente
+          </h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+        </div>
+        <div class="modal-body">
+          <!-- Buscador -->
+          <div class="mb-3">
+            <label class="form-label">Buscar por nombre, teléfono o código de cliente</label>
+            <div class="input-group">
+              <input type="text" class="form-control" id="cliente_buscar_q" placeholder="Ej. LUCIA, 5587967699 o CL-40-000001">
+              <button class="btn btn-primary" type="button" id="btn_buscar_modal">
+                <i class="bi bi-search"></i> Buscar
+              </button>
+            </div>
+            <div class="form-text">
+              La búsqueda se realiza a nivel <strong>global.</strong>
+            </div>
+          </div>
+
+          <hr>
+
+          <!-- Resultados -->
+          <div class="mb-2 d-flex justify-content-between align-items-center">
+            <span class="fw-semibold">Resultados</span>
+            <span class="text-muted small" id="lbl_resultados_clientes">Sin buscar aún.</span>
+          </div>
+          <div class="table-responsive mb-3">
+            <table class="table table-sm align-middle">
+              <thead class="table-light">
+                <tr>
+                  <th>Código</th>
+                  <th>Nombre</th>
+                  <th>Teléfono</th>
+                  <th>Correo</th>
+                  <th>Fecha alta</th>
+                  <th>Sucursal</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="tbody_clientes">
+                <!-- JS -->
+              </tbody>
+            </table>
+          </div>
+
+          <hr>
+
+          <!-- Crear nuevo cliente -->
+          <div class="mb-2">
+            <button class="btn btn-outline-success btn-sm" type="button" data-bs-toggle="collapse" data-bs-target="#collapseNuevoCliente">
+              <i class="bi bi-person-plus me-1"></i> Crear nuevo cliente
+            </button>
+          </div>
+          <div class="collapse" id="collapseNuevoCliente">
+            <div class="border rounded-3 p-3 bg-light">
+              <div class="row g-3">
+                <div class="col-md-4">
+                  <label class="form-label req">Nombre completo</label>
+                  <input type="text" class="form-control" id="nuevo_nombre">
+                </div>
+                <div class="col-md-4">
+                  <label class="form-label req">Teléfono (10 dígitos)</label>
+                  <input type="text" class="form-control" id="nuevo_telefono">
+                </div>
+                <div class="col-md-4">
+                  <label class="form-label">Correo</label>
+                  <input type="email" class="form-control" id="nuevo_correo">
+                </div>
+              </div>
+              <div class="mt-3 text-end">
+                <button type="button" class="btn btn-success" id="btn_guardar_nuevo_cliente">
+                  <i class="bi bi-check2-circle me-1"></i> Guardar y seleccionar
+                </button>
+              </div>
+              <div class="form-text">
+                El cliente se creará en la sucursal seleccionada en el formulario.
+              </div>
+            </div>
           </div>
         </div>
         <div class="modal-footer">
-          <button class="btn btn-outline-secondary" data-bs-dismiss="modal">
+          <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">
             Cerrar
           </button>
         </div>
@@ -499,7 +629,7 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
     </div>
   </div>
 
-  <!-- NOTA: el bundle de Bootstrap normalmente ya va en navbar.php; si no, descomenta: -->
+  <!-- Si no tienes el bundle en navbar, descomenta: -->
   <!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
 
   <script>
@@ -507,17 +637,12 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
       const idSucursalUsuario = <?= $id_sucursal_usuario ?>;
       const mapaSucursales = <?= json_encode($mapSuc, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
       const modalConfirm = new bootstrap.Modal(document.getElementById('modalConfirmacion'));
-      const modalResultado = new bootstrap.Modal(document.getElementById('modalResultadoVenta'));
+      const modalClientes = new bootstrap.Modal(document.getElementById('modalClientes'));
+      const modalCupon = new bootstrap.Modal(document.getElementById('modalCupon'));
 
-      function escapeHtml(text) {
-        if (typeof text !== 'string') return '';
-        return text
-          .replace(/&/g, "&amp;")
-          .replace(/</g, "&lt;")
-          .replace(/>/g, "&gt;")
-          .replace(/"/g, "&quot;")
-          .replace(/'/g, "&#039;");
-      }
+      // Estado del cupón
+      let cuponDisponible = 0; // monto configurado
+      let cuponAplicado = false; // si el usuario lo aceptó
 
       // ==== 🔒 Helpers de candado (UI) ====
       function setLockedUI(locked, msgHtml) {
@@ -541,9 +666,9 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
 
       // Estado inicial según PHP
       <?php if ($bloquearInicial): ?>
-      setLockedUI(true);
+        setLockedUI(true);
       <?php else: ?>
-      setLockedUI(false);
+        setLockedUI(false);
       <?php endif; ?>
 
       // Select2
@@ -562,7 +687,181 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
         return $('#tipo_venta').val() === 'Financiamiento+Combo';
       }
 
-      // 🔹 Nuevo: recalcular precio total según equipos y tipo
+      // ====== Cliente seleccionado (helpers) ======
+      function limpiarCliente() {
+        $('#id_cliente').val('');
+        $('#nombre_cliente').val('');
+        $('#telefono_cliente').val('');
+        $('#correo_cliente').val('');
+
+        $('#cliente_resumen_nombre').text('Ninguno seleccionado');
+        $('#cliente_resumen_detalle').html('Usa el botón <strong>Buscar / crear cliente</strong> para seleccionar uno.');
+        $('#badge_tipo_cliente')
+          .removeClass('text-bg-success')
+          .addClass('text-bg-secondary')
+          .html('<i class="bi bi-person-dash me-1"></i> Sin cliente');
+      }
+
+      function setClienteSeleccionado(c) {
+        $('#id_cliente').val(c.id || '');
+        $('#nombre_cliente').val(c.nombre || '');
+        $('#telefono_cliente').val(c.telefono || '');
+        $('#correo_cliente').val(c.correo || '');
+
+        const nombre = c.nombre || '(Sin nombre)';
+        const detParts = [];
+        if (c.telefono) detParts.push('Tel: ' + c.telefono);
+        if (c.codigo_cliente) detParts.push('Código: ' + c.codigo_cliente);
+        if (c.correo) detParts.push('Correo: ' + c.correo);
+
+        $('#cliente_resumen_nombre').text(nombre);
+        $('#cliente_resumen_detalle').text(detParts.join(' · ') || 'Sin más datos.');
+
+        $('#badge_tipo_cliente')
+          .removeClass('text-bg-secondary')
+          .addClass('text-bg-success')
+          .html('<i class="bi bi-person-check me-1"></i> Cliente seleccionado');
+      }
+
+      // Abrir modal clientes
+      $('#btn_open_modal_clientes').on('click', function() {
+        $('#cliente_buscar_q').val('');
+        $('#tbody_clientes').empty();
+        $('#lbl_resultados_clientes').text('Sin buscar aún.');
+        $('#collapseNuevoCliente').removeClass('show');
+        modalClientes.show();
+      });
+
+      // Buscar clientes en modal
+      $('#btn_buscar_modal').on('click', function() {
+        const q = $('#cliente_buscar_q').val().trim();
+        const idSucursal = $('#id_sucursal').val();
+
+        if (!q) {
+          alert('Escribe algo para buscar (nombre, teléfono o código).');
+          return;
+        }
+
+        $.post('ajax_clientes_buscar_modal.php', {
+          q: q,
+          id_sucursal: idSucursal
+        }, function(res) {
+          if (!res || !res.ok) {
+            alert(res && res.message ? res.message : 'No se pudo buscar clientes.');
+            return;
+          }
+
+          const clientes = res.clientes || [];
+          const $tbody = $('#tbody_clientes');
+          $tbody.empty();
+
+          if (clientes.length === 0) {
+            $('#lbl_resultados_clientes').text('Sin resultados. Puedes crear un cliente nuevo.');
+            return;
+          }
+
+          $('#lbl_resultados_clientes').text('Se encontraron ' + clientes.length + ' cliente(s).');
+
+          clientes.forEach(function(c) {
+            const $tr = $('<tr>');
+
+            // 🔹 Resaltar clientes de la sucursal del usuario
+            if (parseInt(c.id_sucursal, 10) === idSucursalUsuario) {
+              $tr.addClass('table-success'); // verde suave
+            }
+
+            $tr.append($('<td>').text(c.codigo_cliente || '—'));
+            $tr.append($('<td>').text(c.nombre || ''));
+            $tr.append($('<td>').text(c.telefono || ''));
+            $tr.append($('<td>').text(c.correo || ''));
+            $tr.append($('<td>').text(c.fecha_alta || ''));
+
+            // 🔹 Nueva columna: Sucursal
+            $tr.append($('<td>').text(c.sucursal_nombre || '—'));
+
+            const $btnSel = $('<button type="button" class="btn btn-sm btn-primary">')
+              .html('<i class="bi bi-check2-circle me-1"></i> Seleccionar')
+              .data('cliente', c)
+              .on('click', function() {
+                const cliente = $(this).data('cliente');
+                setClienteSeleccionado(cliente);
+                modalClientes.hide();
+              });
+
+            $tr.append($('<td>').append($btnSel));
+            $tbody.append($tr);
+          });
+        }, 'json').fail(function() {
+          alert('Error al buscar en la base de clientes.');
+        });
+      });
+
+      // 🔹 Permitir buscar con Enter en el campo de búsqueda
+      $('#cliente_buscar_q').on('keydown', function(e) {
+        if (e.key === 'Enter') {
+          e.preventDefault(); // evita que el enter cierre el modal o envíe algo raro
+          $('#btn_buscar_modal').click();
+        }
+      });
+
+      // Guardar nuevo cliente desde modal
+      $('#btn_guardar_nuevo_cliente').on('click', function() {
+        const nombre = $('#nuevo_nombre').val().trim();
+        let tel = $('#nuevo_telefono').val().trim();
+        const correo = $('#nuevo_correo').val().trim();
+        const idSucursal = $('#id_sucursal').val();
+
+        if (!nombre) {
+          alert('Captura el nombre del cliente.');
+          return;
+        }
+        tel = tel.replace(/\D+/g, '');
+        if (!/^\d{10}$/.test(tel)) {
+          alert('El teléfono debe tener exactamente 10 dígitos.');
+          return;
+        }
+
+        $.post('ajax_crear_cliente.php', {
+          nombre: nombre,
+          telefono: tel,
+          correo: correo,
+          id_sucursal: idSucursal
+        }, function(res) {
+          if (!res || !res.ok) {
+            alert(res && res.message ? res.message : 'No se pudo guardar el cliente.');
+            return;
+          }
+
+          const c = res.cliente || {};
+          setClienteSeleccionado(c);
+          modalClientes.hide();
+
+          // Limpiar formulario de nuevo cliente
+          $('#nuevo_nombre').val('');
+          $('#nuevo_telefono').val('');
+          $('#nuevo_correo').val('');
+          $('#collapseNuevoCliente').removeClass('show');
+
+          alert(res.message || 'Cliente creado y vinculado.');
+        }, 'json').fail(function(xhr) {
+          alert('Error al guardar el cliente: ' + (xhr.responseText || 'desconocido'));
+        });
+      });
+
+      // ======= CUPÓN: helpers visuales =======
+      function actualizarInfoCupon() {
+        if (cuponAplicado && cuponDisponible > 0) {
+          $('#txt_cupon_info').removeClass('d-none');
+          $('#lbl_cupon_monto').text(cuponDisponible.toFixed(2));
+          $('#monto_cupon').val(cuponDisponible.toFixed(2));
+        } else {
+          $('#txt_cupon_info').addClass('d-none');
+          $('#lbl_cupon_monto').text('0.00');
+          $('#monto_cupon').val('0');
+        }
+      }
+
+      // 🔹 Recalcular precio total según equipos y tipo (aplica cupón si está aceptado)
       function recalcPrecioVenta() {
         let total = 0;
 
@@ -581,6 +880,12 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
             total += precio2;
           }
         }
+
+        // Aplicar cupón si el usuario aceptó
+        if (cuponAplicado && cuponDisponible > 0) {
+          total = total - cuponDisponible;
+        }
+        if (total < 0) total = 0;
 
         if (total > 0) {
           $('#precio_venta').val(total.toFixed(2));
@@ -614,8 +919,6 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
         $('#label_forma_pago').text(esFin ? 'Forma de Pago Enganche' : 'Forma de Pago');
 
         $('#tag').prop('required', esFin);
-        $('#nombre_cliente').prop('required', esFin);
-        $('#telefono_cliente').prop('required', esFin);
         $('#enganche').prop('required', esFin);
         $('#plazo_semanas').prop('required', esFin);
         $('#financiera').prop('required', esFin);
@@ -653,7 +956,51 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
         }
       }
 
-      $('#equipo1, #equipo2').on('change', function() {
+      // Cambio de equipo principal: aquí revisamos cupón
+      $('#equipo1').on('change', function() {
+        const idInv = $('#equipo1').val();
+
+        // Resetear estado de cupón
+        cuponDisponible = 0;
+        cuponAplicado = false;
+        actualizarInfoCupon();
+
+        if (!idInv) {
+          refreshEquipoLocks();
+          recalcPrecioVenta();
+          return;
+        }
+
+        // Consultar cupón por AJAX
+        $.ajax({
+          url: 'ajax_cupon_producto.php',
+          method: 'POST',
+          dataType: 'json',
+          data: {
+            id_inventario: idInv
+          },
+          success: function(res) {
+            console.log('Cupon response:', res);
+            let d = 0;
+            if (res && res.ok) {
+              d = parseFloat(res.monto_cupon) || 0;
+            }
+            if (d > 0) {
+              cuponDisponible = d;
+              $('#modal_cupon_monto').text(d.toFixed(2));
+              modalCupon.show();
+            }
+            refreshEquipoLocks();
+            recalcPrecioVenta();
+          },
+          error: function() {
+            refreshEquipoLocks();
+            recalcPrecioVenta();
+          }
+        });
+      });
+
+      $('#equipo2').on('change', function() {
         refreshEquipoLocks();
         recalcPrecioVenta();
       });
@@ -673,27 +1020,25 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
         recalcPrecioVenta();
       });
 
-      // ===== Botón toggle tarjeta de lealtad =====
-      $('#btn_lealtad_toggle').on('click', function() {
-        const $hidden = $('#crear_tarjeta_lealtad');
-        const activo = $hidden.val() === '1';
-
-        if (activo) {
-          $hidden.val('0');
-          $('#lealtad_status').addClass('d-none');
-          $(this).removeClass('btn-success').addClass('btn-outline-success');
-          $(this).html('<i class="bi bi-stars me-1"></i> Activar tarjeta de lealtad');
-        } else {
-          $hidden.val('1');
-          $('#lealtad_status').removeClass('d-none');
-          $(this).removeClass('btn-outline-success').addClass('btn-success');
-          $(this).html('<i class="bi bi-stars me-1"></i> Tarjeta de lealtad activada');
+      // Botones del modal de cupón
+      $('#btn_aplicar_cupon').on('click', function() {
+        if (cuponDisponible > 0) {
+          cuponAplicado = true;
+          actualizarInfoCupon();
+          recalcPrecioVenta();
         }
+        modalCupon.hide();
+      });
+
+      $('#btn_no_aplicar_cupon').on('click', function() {
+        cuponAplicado = false;
+        actualizarInfoCupon();
+        recalcPrecioVenta();
       });
 
       // ===== Carga de equipos por sucursal (se redefine más abajo) =====
       function cargarEquipos(sucursalId) {
-        /* se redefine más abajo */
+        /* redefinido en initEquipos */
       }
 
       // ===== Cambio de sucursal: aviso + consulta candado en caliente =====
@@ -714,9 +1059,9 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
 
           if (res.bloquear) {
             const html = `
-              <strong>Captura bloqueada.</strong> ${res.motivo}
-              <div class="small">Genera el corte de <strong>${res.ayer}</strong> para continuar.</div>
-            `;
+          <strong>Captura bloqueada.</strong> ${res.motivo}
+          <div class="small">Genera el corte de <strong>${res.ayer}</strong> para continuar.</div>
+        `;
             setLockedUI(true, html);
           } else {
             setLockedUI(false);
@@ -733,7 +1078,7 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
         const errores = [];
         const esFin = isFinanciamiento();
 
-        const nombre = $('#nombre_cliente').val().trim();
+        const idCliente = $('#id_cliente').val();
         const tel = $('#telefono_cliente').val().trim();
         const tag = $('#tag').val().trim();
         const tipo = $('#tipo_venta').val();
@@ -757,9 +1102,9 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
         }
 
         if (esFin) {
-          if (!nombre) errores.push('Ingresa el nombre del cliente (Financiamiento).');
-          if (!tel) errores.push('Ingresa el teléfono del cliente (Financiamiento).');
-          if (tel && !/^\d{10}$/.test(tel)) errores.push('El teléfono debe tener 10 dígitos.');
+          if (!idCliente) errores.push('Debes seleccionar un cliente para ventas de financiamiento.');
+          if (!tel) errores.push('El cliente seleccionado debe tener teléfono.');
+          if (tel && !/^\d{10}$/.test(tel)) errores.push('El teléfono del cliente debe tener 10 dígitos.');
           if (!tag) errores.push('El TAG (ID del crédito) es obligatorio.');
           if (isNaN(eng) || eng < 0) errores.push('El enganche es obligatorio (puede ser 0, no negativo).');
           if (!plazo || plazo <= 0) errores.push('El plazo en semanas debe ser mayor a 0.');
@@ -772,7 +1117,7 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
             if ((eng || 0).toFixed(2) !== (ef + tj).toFixed(2)) errores.push('Efectivo + Tarjeta debe igualar al Enganche.');
           }
         } else {
-          if (tel && !/^\d{10}$/.test(tel)) errores.push('El teléfono debe tener 10 dígitos.');
+          if (tel && !/^\d{10}$/.test(tel)) errores.push('El teléfono del cliente debe tener 10 dígitos.');
         }
 
         return errores;
@@ -820,30 +1165,14 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
         } else {
           $('#li_enganche, #li_financiera, #li_tag').addClass('d-none');
         }
-
-        // Código referido
-        const refCode = ($('#codigo_referido').val() || '').trim();
-        if (refCode) {
-          $('#conf_codigo_ref').text(refCode);
-          $('#li_codigo_ref').removeClass('d-none');
-        } else {
-          $('#li_codigo_ref').addClass('d-none');
-        }
-
-        // Info de lealtad
-        const lealtadActiva = $('#crear_tarjeta_lealtad').val() === '1';
-        if (lealtadActiva) {
-          $('#conf_lealtad').text('Se generará tarjeta de lealtad para este cliente.');
-          $('#li_lealtad').removeClass('d-none');
-        } else {
-          $('#li_lealtad').addClass('d-none');
-        }
       }
 
       $('#form_venta').on('submit', function(e) {
         if ($('#form_venta').attr('data-locked') === '1') {
           e.preventDefault();
-          $('html, body').animate({ scrollTop: 0 }, 300);
+          $('html, body').animate({
+            scrollTop: 0
+          }, 300);
           return;
         }
 
@@ -854,7 +1183,10 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
         if (errores.length > 0) {
           $('#errores').removeClass('d-none')
             .html('<strong>Corrige lo siguiente:</strong><ul class="mb-0"><li>' + errores.join('</li><li>') + '</li></ul>');
-          window.scrollTo({ top: 0, behavior: 'smooth' });
+          window.scrollTo({
+            top: 0,
+            behavior: 'smooth'
+          });
           return;
         }
 
@@ -863,79 +1195,11 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
         modalConfirm.show();
       });
 
-      // Enviar por AJAX al confirmar en el modal
       $('#btn_confirmar_envio').on('click', function() {
         $('#btn_submit').prop('disabled', true).text('Enviando...');
-
-        const datos = $('#form_venta').serializeArray();
-        datos.push({ name: 'ajax', value: '1' });
-
-        $.ajax({
-          url: 'procesar_venta.php',
-          method: 'POST',
-          data: $.param(datos),
-          dataType: 'json'
-        }).done(function(res) {
-          modalConfirm.hide();
-          $('#btn_submit').prop('disabled', false).html('<i class="bi bi-check2-circle me-2"></i> Registrar Venta');
-
-          // Si algo salió mal o no se recibió estructura esperada
-          if (!res || res.status !== 'ok') {
-            const msg = res && res.message ? res.message : 'Ocurrió un error al registrar la venta.';
-            $('#resultado_titulo').text('Error al registrar la venta');
-            $('#resultado_mensaje').html('<div class="alert alert-danger mb-0">' + escapeHtml(msg) + '</div>');
-            $('#resultado_tarjeta_wrap').addClass('d-none');
-            modalResultado.show();
-            return;
-          }
-
-          // Éxito
-          $('#resultado_titulo').text('Venta registrada correctamente');
-
-          let html = '';
-          if (res.id_venta) {
-            html += '<p>Venta registrada con ID <strong>#' + escapeHtml(String(res.id_venta)) + '</strong>.</p>';
-          } else {
-            html += '<p>La venta se registró correctamente.</p>';
-          }
-
-          const com = parseFloat(res.comision || 0);
-          html += '<p>Comisión generada: <strong>$' + com.toFixed(2) + '</strong>.</p>';
-
-          $('#resultado_mensaje').html(html);
-
-          if (res.url_tarjeta) {
-            $('#resultado_tarjeta_link').attr('href', res.url_tarjeta);
-            $('#resultado_tarjeta_wrap').removeClass('d-none');
-          } else {
-            $('#resultado_tarjeta_wrap').addClass('d-none');
-          }
-
-          // Limpiar formulario para siguiente venta
-          $('#form_venta')[0].reset();
-          $('#equipo1, #equipo2').val(null).trigger('change');
-          $('#crear_tarjeta_lealtad').val('0');
-          $('#lealtad_status').addClass('d-none');
-          $('#btn_lealtad_toggle')
-            .removeClass('btn-success').addClass('btn-outline-success')
-            .html('<i class="bi bi-stars me-1"></i> Activar tarjeta de lealtad');
-          toggleVenta();
-          recalcPrecioVenta();
-
-          modalResultado.show();
-        }).fail(function(xhr) {
-          modalConfirm.hide();
-          $('#btn_submit').prop('disabled', false).html('<i class="bi bi-check2-circle me-2"></i> Registrar Venta');
-
-          let msg = 'Error de comunicación con el servidor.';
-          if (xhr && xhr.responseText) {
-            msg += '<br><small>' + escapeHtml(xhr.responseText) + '</small>';
-          }
-          $('#resultado_titulo').text('Error al registrar la venta');
-          $('#resultado_mensaje').html('<div class="alert alert-danger mb-0">' + msg + '</div>');
-          $('#resultado_tarjeta_wrap').addClass('d-none');
-          modalResultado.show();
-        });
+        permitSubmit = true;
+        modalConfirm.hide();
+        $('#form_venta')[0].submit();
       });
 
       // Inicial: definimos cargarEquipos REAL aquí para que siempre refresque precio también
@@ -949,12 +1213,23 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
             },
             success: function(response) {
               $('#equipo1, #equipo2').html(response).val('').trigger('change');
+
+              // Resetear cupón al cambiar de sucursal
+              cuponDisponible = 0;
+              cuponAplicado = false;
+              actualizarInfoCupon();
+
               refreshEquipoLocks();
               recalcPrecioVenta();
             },
             error: function(xhr) {
               const msg = xhr.responseText || 'Error cargando inventario';
               $('#equipo1, #equipo2').html('<option value="">' + msg + '</option>').trigger('change');
+
+              cuponDisponible = 0;
+              cuponAplicado = false;
+              actualizarInfoCupon();
+
               refreshEquipoLocks();
               recalcPrecioVenta();
             }
@@ -966,6 +1241,9 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
         recalcPrecioVenta();
       }
       initEquipos();
+
+      // De inicio, sin cliente
+      limpiarCliente();
     });
   </script>
 

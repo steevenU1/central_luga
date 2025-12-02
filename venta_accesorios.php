@@ -6,6 +6,8 @@
 // - Bloqueo venta normal si vender=0 (solo-regalo).
 // - Prod-safe: vender casteado, estatus normalizado y JS Set numérico.
 // - Modal de CONFIRMACIÓN previa al envío (resumen de líneas/pago).
+// - NUEVO: Selección de CLIENTE (buscar / crear) usando ajax_clientes_buscar_modal.php y ajax_crear_cliente.php
+//          Se envía id_cliente + nombre_cliente + telefono (oculto) a procesar_venta_accesorios.php
 
 // Anti cache (especialmente útil en prod con proxies/opcache)
 header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
@@ -20,6 +22,20 @@ date_default_timezone_set('America/Mexico_City');
 
 function h($s){ return htmlspecialchars($s ?? '', ENT_QUOTES, 'UTF-8'); }
 function normalizar_tag($s){ $s = strtoupper(trim((string)$s)); return preg_replace('/\s+/', ' ', $s); }
+
+/**
+ * Genera un TAG aleatorio de 7 caracteres (letras mayúsculas + dígitos),
+ * pensado para TAG de accesorio. Es solo valor por defecto y el usuario puede editarlo.
+ */
+function generar_tag_accesorio(): string {
+  $chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // quitamos 0,1,I,O para evitar confusiones
+  $len   = strlen($chars);
+  $tag   = '';
+  for ($i = 0; $i < 7; $i++) {
+    $tag .= $chars[random_int(0, $len - 1)];
+  }
+  return $tag;
+}
 
 /** Busca venta de equipo por TAG, regresa [id_venta, id_sucursal] o [0,0] (referencia futura) */
 function buscar_venta_equipo_por_tag(mysqli $conn, string $tag): array {
@@ -53,6 +69,9 @@ if ($sucursalNombre === '' && $ID_SUCURSAL > 0) {
 }
 if ($sucursalNombre === '') $sucursalNombre = 'Sucursal #'.$ID_SUCURSAL;
 
+/* --- TAG auto-generado para accesorios (editable) --- */
+$TAG_AUTO_ACCESORIO = generar_tag_accesorio();
+
 /* --- Whitelist de accesorios elegibles para REGALO --- */
 $regaloPermitidos = [];
 $tblCheck = $conn->query("SHOW TABLES LIKE 'accesorios_regalo_modelos'");
@@ -76,9 +95,9 @@ if ($tblCheck && $tblCheck->num_rows > 0) {
 }
 $soloRegaloIds = array_values(array_unique(array_filter($soloRegaloIds)));
 
-/* --- Catálogo con stock disponible (tolerante a estatus) --- */
-$soloSucursal = !in_array($ROL, ['Admin','Logistica','GerenteZona'], true);
-$params = [];
+/* --- Catálogo con stock disponible SOLO en la sucursal actual --- */
+/*    Regla fija: aunque seas Admin/Logistica/GerenteZona, la venta solo usa
+      el inventario de la sucursal donde estás logueado ($ID_SUCURSAL). */
 $sql = "
   SELECT 
     p.id AS id_producto,
@@ -98,16 +117,15 @@ $sql = "
       UPPER(COALESCE(p.tipo_producto,'')) IN ('ACCESORIO','ACCESORIOS')
       OR (COALESCE(p.imei1,'')='' AND COALESCE(p.imei2,'')='')
     )
-";
-if ($soloSucursal) { $sql .= " AND i.id_sucursal = ? "; $params[] = $ID_SUCURSAL; }
-$sql .= "
+    AND i.id_sucursal = ?
   GROUP BY p.id, p.marca, p.modelo, p.color, p.precio_lista
   HAVING stock_disp > 0
   ORDER BY nombre ASC
 ";
+
 $stmt = $conn->prepare($sql);
 if ($stmt === false) { die('Error preparando SQL de accesorios: '.$conn->error); }
-if ($params) { $types = str_repeat('i', count($params)); $stmt->bind_param($types, ...$params); }
+$stmt->bind_param('i', $ID_SUCURSAL);
 $stmt->execute();
 $res = $stmt->get_result();
 $accesorios = $res ? $res->fetch_all(MYSQLI_ASSOC) : [];
@@ -141,6 +159,22 @@ $accesorios = $res ? $res->fetch_all(MYSQLI_ASSOC) : [];
   .badge-solo{background:#ffc1071a;border:1px solid #ffc10755;color:#b58100}
   .badge-eleg{background:#1987541a;border:1px solid #19875455;color:#0f5132}
   .badge-noe{background:#6c757d1a;border:1px solid #6c757d55;color:#495057}
+  .cliente-summary-label {
+    font-size:.8rem;
+    text-transform:uppercase;
+    letter-spacing:.08em;
+    color:#64748b;
+    margin-bottom:.25rem;
+  }
+  .cliente-summary-main {
+    font-weight:600;
+    font-size:1.05rem;
+    color:#111827;
+  }
+  .cliente-summary-sub {
+    font-size:.9rem;
+    color:#6b7280;
+  }
 </style>
 </head>
 <body>
@@ -150,28 +184,29 @@ $accesorios = $res ? $res->fetch_all(MYSQLI_ASSOC) : [];
       <h3 class="mb-0">Venta de Accesorios</h3>
       <span class="badge rounded-pill text-secondary badge-soft">Sucursal: <?= h($sucursalNombre) ?></span>
     </div>
-    <div><a href="dashboard_luga.php" class="btn btn-outline-secondary btn-sm">Volver</a></div>
+    <div><a href="dashboard_unificado.php" class="btn btn-outline-secondary btn-sm">Volver</a></div>
   </div>
 
   <form id="frmVenta" action="procesar_venta_accesorios.php" method="post" class="card card-ghost p-3">
     <input type="hidden" name="id_sucursal" value="<?= (int)$ID_SUCURSAL ?>">
     <input type="hidden" name="es_regalo" id="es_regalo" value="0">
 
+    <!-- 🔗 Cliente seleccionado -->
+    <input type="hidden" name="id_cliente" id="id_cliente" value="">
+    <input type="hidden" name="nombre_cliente" id="nombre_cliente" value="">
+    <!-- name="telefono" para compatibilidad con backend -->
+    <input type="hidden" name="telefono" id="telefono_cliente" value="">
+    <input type="hidden" name="correo_cliente" id="correo_cliente" value="">
+
     <!-- Encabezado -->
     <div class="row g-3 align-items-end">
       <div class="col-md-3">
         <label class="form-label section-title">TAG (venta de accesorios)</label>
-        <input type="text" name="tag" id="tag" class="form-control" maxlength="50" required>
-      </div>
-      <div class="col-md-4">
-        <label class="form-label section-title">Nombre del cliente</label>
-        <input type="text" name="nombre_cliente" id="nombre_cliente" class="form-control" required>
+        <!-- TAG autogenerado pero editable -->
+        <input type="text" name="tag" id="tag" class="form-control" maxlength="50" required
+               value="<?= h($TAG_AUTO_ACCESORIO) ?>">
       </div>
       <div class="col-md-3">
-        <label class="form-label section-title">Teléfono (10 dígitos)</label>
-        <input type="text" name="telefono" id="telefono" pattern="^[0-9]{10}$" title="10 dígitos" class="form-control" required>
-      </div>
-      <div class="col-md-2">
         <label class="form-label section-title">Sucursal</label>
         <input type="text" class="form-control" value="<?=h($sucursalNombre)?>" readonly>
       </div>
@@ -190,6 +225,38 @@ $accesorios = $res ? $res->fetch_all(MYSQLI_ASSOC) : [];
         <label class="form-label section-title">TAG de la venta de equipo</label>
         <input type="text" name="tag_equipo" id="tag_equipo" class="form-control" maxlength="50" placeholder="Ej. LUGA-241101-ABC">
         <div class="form-text">Se valida que el equipo comprado habilite este regalo y que no se haya usado antes.</div>
+      </div>
+    </div>
+
+    <!-- Cliente -->
+    <hr class="my-3">
+
+    <div class="section-title">Datos del cliente</div>
+    <div class="row g-3 mb-3">
+      <div class="col-md-8">
+        <div class="border rounded-3 p-3 bg-light">
+          <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+            <div>
+              <div class="cliente-summary-label">Cliente seleccionado</div>
+              <div class="cliente-summary-main" id="cliente_resumen_nombre">
+                Ninguno seleccionado
+              </div>
+              <div class="cliente-summary-sub" id="cliente_resumen_detalle">
+                Usa el botón <strong>Buscar / crear cliente</strong> para seleccionar uno.
+              </div>
+            </div>
+            <div class="text-end">
+              <span class="badge rounded-pill text-bg-secondary" id="badge_tipo_cliente">
+                Sin cliente
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-4 d-flex align-items-center justify-content-md-end">
+        <button type="button" class="btn btn-outline-primary w-100" id="btn_open_modal_clientes">
+          Buscar / crear cliente
+        </button>
       </div>
     </div>
 
@@ -307,10 +374,6 @@ $accesorios = $res ? $res->fetch_all(MYSQLI_ASSOC) : [];
           <strong>TAG de venta de equipo:</strong> <span id="cfTagEq">—</span>
         </div>
 
-        <div class="alert alert-warning mt-3 d-none" id="cfAlertRegalo">
-          <strong>Importante:</strong> en modo regalo el precio debe ser $0.00, cantidad = 1 y el accesorio debe estar habilitado.
-        </div>
-
         <div class="small text-muted mt-2">
           Revisa que los datos sean correctos. Al confirmar se registrará la venta y se generará el ticket.
         </div>
@@ -342,6 +405,100 @@ $accesorios = $res ? $res->fetch_all(MYSQLI_ASSOC) : [];
   </div>
 </div>
 
+<!-- Modal de clientes: buscar / seleccionar / crear -->
+<div class="modal fade" id="modalClientes" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header bg-light">
+        <h5 class="modal-title">
+          Buscar o crear cliente
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+      </div>
+      <div class="modal-body">
+        <!-- Buscador -->
+        <div class="mb-3">
+          <label class="form-label">Buscar por nombre, teléfono o código de cliente</label>
+          <div class="input-group">
+            <input type="text" class="form-control" id="cliente_buscar_q" placeholder="Ej. LUCIA, 5587967699 o CL-40-000001">
+            <button class="btn btn-primary" type="button" id="btn_buscar_modal">
+              Buscar
+            </button>
+          </div>
+          <div class="form-text">
+            La búsqueda se realiza a nivel <strong>global</strong>.
+          </div>
+        </div>
+
+        <hr>
+
+        <!-- Resultados -->
+        <div class="mb-2 d-flex justify-content-between align-items-center">
+          <span class="fw-semibold">Resultados</span>
+          <span class="text-muted small" id="lbl_resultados_clientes">Sin buscar aún.</span>
+        </div>
+        <div class="table-responsive mb-3">
+          <table class="table table-sm align-middle">
+            <thead class="table-light">
+              <tr>
+                <th>Código</th>
+                <th>Nombre</th>
+                <th>Teléfono</th>
+                <th>Correo</th>
+                <th>Fecha alta</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="tbody_clientes">
+              <!-- JS -->
+            </tbody>
+          </table>
+        </div>
+
+        <hr>
+
+        <!-- Crear nuevo cliente -->
+        <div class="mb-2">
+          <button class="btn btn-outline-success btn-sm" type="button" data-bs-toggle="collapse" data-bs-target="#collapseNuevoCliente">
+            Crear nuevo cliente
+          </button>
+        </div>
+        <div class="collapse" id="collapseNuevoCliente">
+          <div class="border rounded-3 p-3 bg-light">
+            <div class="row g-3">
+              <div class="col-md-4">
+                <label class="form-label">Nombre completo *</label>
+                <input type="text" class="form-control" id="nuevo_nombre">
+              </div>
+              <div class="col-md-4">
+                <label class="form-label">Teléfono (10 dígitos) *</label>
+                <input type="text" class="form-control" id="nuevo_telefono">
+              </div>
+              <div class="col-md-4">
+                <label class="form-label">Correo</label>
+                <input type="email" class="form-control" id="nuevo_correo">
+              </div>
+            </div>
+            <div class="mt-3 text-end">
+              <button type="button" class="btn btn-success" id="btn_guardar_nuevo_cliente">
+                Guardar y seleccionar
+              </button>
+            </div>
+            <div class="form-text">
+              El cliente se creará en la sucursal actual.
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">
+          Cerrar
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 // Datos del backend
 const accesorios = <?php echo json_encode($accesorios, JSON_UNESCAPED_UNICODE); ?>;
@@ -360,11 +517,18 @@ const esRegaloInp = document.getElementById('es_regalo');
 const grpTagEquipo= document.getElementById('grpTagEquipo');
 const tagEquipo   = document.getElementById('tag_equipo');
 
-// Campos encabezado para confirm
-const tagInput       = document.getElementById('tag');
-const nombreCliente  = document.getElementById('nombre_cliente');
-const telefono       = document.getElementById('telefono');
-const comentarios    = document.getElementById('comentarios');
+// Campos cliente (hidden + resumen)
+const idClienteInput   = document.getElementById('id_cliente');
+const nombreCliente    = document.getElementById('nombre_cliente');
+const telClienteInput  = document.getElementById('telefono_cliente');
+const correoCliente    = document.getElementById('correo_cliente');
+const lblCliNombre     = document.getElementById('cliente_resumen_nombre');
+const lblCliDetalle    = document.getElementById('cliente_resumen_detalle');
+const badgeTipoCliente = document.getElementById('badge_tipo_cliente');
+
+// Encabezado para confirm
+const tagInput    = document.getElementById('tag');
+const comentarios = document.getElementById('comentarios');
 
 // Confirm modal elements
 let confirmModal = null;
@@ -377,9 +541,13 @@ const cfTotal  = document.getElementById('cfTotal');
 const cfForma  = document.getElementById('cfForma');
 const cfEf     = document.getElementById('cfEf');
 const cfTa     = document.getElementById('cfTa');
-const cfTagEqWrap = document.getElementById('cfTagEqWrap');
-const cfTagEq  = document.getElementById('cfTagEq');
-const cfAlertRegalo = document.getElementById('cfAlertRegalo');
+const cfPagoWrap   = document.getElementById('cfPagoWrap');
+const cfTagEqWrap  = document.getElementById('cfTagEqWrap');
+const cfTagEq      = document.getElementById('cfTagEq');
+const cfAlertRegalo = document.getElementById('cfAlertRegalo') || null;
+
+// Modal clientes
+let modalClientes = null;
 
 function money(n){ return new Intl.NumberFormat('es-MX',{style:'currency',currency:'MXN'}).format(Number(n||0)); }
 function isRegalo(){ return chkRegalo.checked === true; }
@@ -389,6 +557,44 @@ async function fetchJSON(url, options){
   const text = await resp.text();
   try { return JSON.parse(text); }
   catch(e){ throw new Error(text || 'Respuesta inválida'); }
+}
+
+/* ======== Cliente: helpers ======== */
+function limpiarCliente(){
+  idClienteInput.value = '';
+  nombreCliente.value  = '';
+  telClienteInput.value = '';
+  correoCliente.value  = '';
+
+  lblCliNombre.textContent = 'Ninguno seleccionado';
+  lblCliDetalle.innerHTML = 'Usa el botón <strong>Buscar / crear cliente</strong> para seleccionar uno.';
+  badgeTipoCliente.classList.remove('text-bg-success');
+  badgeTipoCliente.classList.add('text-bg-secondary');
+  badgeTipoCliente.textContent = 'Sin cliente';
+}
+
+function setClienteSeleccionado(c){
+  const cid   = c.id || c.id_cliente || 0;
+  const nom   = c.nombre || '';
+  const tel   = c.telefono || '';
+  const mail  = c.correo || c.email || '';
+  const codigo= c.codigo_cliente || '';
+
+  idClienteInput.value   = cid ? String(cid) : '';
+  nombreCliente.value    = nom;
+  telClienteInput.value  = tel;
+  correoCliente.value    = mail;
+
+  lblCliNombre.textContent = nom || '(Sin nombre)';
+  const detParts = [];
+  if (tel)    detParts.push('Tel: ' + tel);
+  if (codigo) detParts.push('Código: ' + codigo);
+  if (mail)   detParts.push('Correo: ' + mail);
+  lblCliDetalle.textContent = detParts.join(' · ') || 'Sin más datos.';
+
+  badgeTipoCliente.classList.remove('text-bg-secondary');
+  badgeTipoCliente.classList.add('text-bg-success');
+  badgeTipoCliente.textContent = 'Cliente seleccionado';
 }
 
 /* -------- Buscador tipo “portal” -------- */
@@ -577,7 +783,7 @@ function armarConfirmacion(){
   cfModo.className = 'badge ' + (isRegalo() ? 'bg-success-subtle text-success' : 'bg-primary-subtle text-primary');
   cfTag.textContent = (tagInput.value || '—');
   cfCliente.textContent = (nombreCliente.value || '—');
-  cfTelefono.textContent = (telefono.value || '—');
+  cfTelefono.textContent = (telClienteInput.value || '—');
 
   // Líneas
   cfBody.innerHTML = '';
@@ -604,14 +810,14 @@ function armarConfirmacion(){
 
   // Pago / TAG equipo
   if (isRegalo()){
-    cfPagoWrap.classList.add('d-none');
+    if (cfPagoWrap) cfPagoWrap.classList.add('d-none');
     cfTagEqWrap.classList.remove('d-none');
     cfTagEq.textContent = (tagEquipo.value || '—');
-    cfAlertRegalo.classList.remove('d-none');
+    if (cfAlertRegalo) cfAlertRegalo.classList.remove('d-none');
   } else {
-    cfPagoWrap.classList.remove('d-none');
+    if (cfPagoWrap) cfPagoWrap.classList.remove('d-none');
     cfTagEqWrap.classList.add('d-none');
-    cfAlertRegalo.classList.add('d-none');
+    if (cfAlertRegalo) cfAlertRegalo.classList.add('d-none');
     cfForma.textContent = formaPago.value;
     cfEf.textContent = money(Number(inpEf.value||0));
     cfTa.textContent = money(Number(inpTa.value||0));
@@ -620,12 +826,25 @@ function armarConfirmacion(){
 
 /* -------- Envío y ticket con confirmación previa -------- */
 const frm=document.getElementById('frmVenta');
-let envioConfirmado = false;
 
 frm.addEventListener('submit', async (ev)=>{
   ev.preventDefault();
 
-  // Primera validación
+  // 💡 Validar cliente primero
+  const idCli = (idClienteInput.value || '').trim();
+  let telCli  = (telClienteInput.value || '').trim().replace(/\D+/g,'');
+  if (!idCli){
+    alert('Debes seleccionar o crear un cliente antes de guardar la venta.');
+    return;
+  }
+  if (!/^\d{10}$/.test(telCli)){
+    alert('El teléfono del cliente debe tener exactamente 10 dígitos.');
+    return;
+  }
+  // normalizamos tel
+  telClienteInput.value = telCli;
+
+  // Líneas / pagos
   if(!validarLineasBasico()) return;
 
   // Si es regalo, validación backend previa (TAG equipo)
@@ -666,6 +885,7 @@ document.getElementById('btnConfirmarVenta').addEventListener('click', async ()=
       const frame=document.getElementById('ticketFrame'); frame.src=finalURL;
       const modal=new bootstrap.Modal(document.getElementById('ticketModal')); modal.show();
       frm.reset(); tbody.innerHTML=''; addRow(); recalc(); esRegaloInp.value='0'; grpTagEquipo.classList.add('d-none');
+      limpiarCliente();
     }else{
       const txt=await resp.text(); alert('No se pudo completar la venta:\n'+txt);
     }
@@ -677,8 +897,136 @@ document.getElementById('btnPrintTicket').addEventListener('click', ()=>{
   const f=document.getElementById('ticketFrame'); try{ f.contentWindow.focus(); f.contentWindow.print(); }catch(e){}
 });
 
+/* -------- Modal de clientes: eventos -------- */
+document.getElementById('btn_open_modal_clientes').addEventListener('click', ()=>{
+  const inpBuscar = document.getElementById('cliente_buscar_q');
+  const tbodyCli  = document.getElementById('tbody_clientes');
+  const lblRes    = document.getElementById('lbl_resultados_clientes');
+  inpBuscar.value = '';
+  tbodyCli.innerHTML = '';
+  lblRes.textContent = 'Sin buscar aún.';
+  document.getElementById('collapseNuevoCliente')?.classList.remove('show');
+  if (!modalClientes){
+    modalClientes = new bootstrap.Modal(document.getElementById('modalClientes'));
+  }
+  modalClientes.show();
+});
+
+document.getElementById('btn_buscar_modal').addEventListener('click', async ()=>{
+  const q = (document.getElementById('cliente_buscar_q').value || '').trim();
+  const tbodyCli  = document.getElementById('tbody_clientes');
+  const lblRes    = document.getElementById('lbl_resultados_clientes');
+
+  if (!q){
+    alert('Escribe algo para buscar (nombre, teléfono o código).');
+    return;
+  }
+  const params = new URLSearchParams();
+  params.append('q', q);
+  params.append('id_sucursal', '<?= (int)$ID_SUCURSAL ?>');
+
+  try{
+    const res = await fetchJSON('ajax_clientes_buscar_modal.php', {
+      method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      body: params.toString()
+    });
+    if (!res || !res.ok){
+      alert(res && res.message ? res.message : 'No se pudo buscar clientes.');
+      return;
+    }
+    const clientes = res.clientes || [];
+    tbodyCli.innerHTML = '';
+    if (clientes.length === 0){
+      lblRes.textContent = 'Sin resultados. Puedes crear un cliente nuevo.';
+      return;
+    }
+    lblRes.textContent = 'Se encontraron ' + clientes.length + ' cliente(s).';
+
+    clientes.forEach(c=>{
+      const tr = document.createElement('tr');
+      const tdCod = document.createElement('td'); tdCod.textContent = c.codigo_cliente || '—';
+      const tdNom = document.createElement('td'); tdNom.textContent = c.nombre || '';
+      const tdTel = document.createElement('td'); tdTel.textContent = c.telefono || '';
+      const tdCor = document.createElement('td'); tdCor.textContent = c.correo || '';
+      const tdFec = document.createElement('td'); tdFec.textContent = c.fecha_alta || '';
+      const tdAcc = document.createElement('td');
+      const btnSel = document.createElement('button');
+      btnSel.type = 'button';
+      btnSel.className = 'btn btn-sm btn-primary';
+      btnSel.textContent = 'Seleccionar';
+      btnSel.addEventListener('click', ()=>{
+        setClienteSeleccionado(c);
+        modalClientes?.hide();
+      });
+      tdAcc.appendChild(btnSel);
+
+      tr.appendChild(tdCod);
+      tr.appendChild(tdNom);
+      tr.appendChild(tdTel);
+      tr.appendChild(tdCor);
+      tr.appendChild(tdFec);
+      tr.appendChild(tdAcc);
+      tbodyCli.appendChild(tr);
+    });
+
+  }catch(e){
+    alert('Error al buscar en la base de clientes: ' + (e?.message||e));
+  }
+});
+
+document.getElementById('btn_guardar_nuevo_cliente').addEventListener('click', async ()=>{
+  const nombre = (document.getElementById('nuevo_nombre').value || '').trim();
+  let tel      = (document.getElementById('nuevo_telefono').value || '').trim();
+  const correo = (document.getElementById('nuevo_correo').value || '').trim();
+
+  if (!nombre){
+    alert('Captura el nombre del cliente.');
+    return;
+  }
+  tel = tel.replace(/\D+/g,'');
+  if (!/^\d{10}$/.test(tel)){
+    alert('El teléfono debe tener exactamente 10 dígitos.');
+    return;
+  }
+
+  const params = new URLSearchParams();
+  params.append('nombre', nombre);
+  params.append('telefono', tel);
+  params.append('correo', correo);
+  params.append('id_sucursal', '<?= (int)$ID_SUCURSAL ?>');
+
+  try{
+    const res = await fetchJSON('ajax_crear_cliente.php', {
+      method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      body: params.toString()
+    });
+    if (!res || !res.ok){
+      alert(res && res.message ? res.message : 'No se pudo guardar el cliente.');
+      return;
+    }
+    const c = res.cliente || {};
+    setClienteSeleccionado(c);
+    modalClientes?.hide();
+
+    document.getElementById('nuevo_nombre').value = '';
+    document.getElementById('nuevo_telefono').value = '';
+    document.getElementById('nuevo_correo').value = '';
+    document.getElementById('collapseNuevoCliente')?.classList.remove('show');
+
+    alert(res.message || 'Cliente creado y vinculado.');
+  }catch(e){
+    alert('Error al guardar el cliente: ' + (e?.message||e));
+  }
+});
+
 /* Estado inicial */
-function init(){ addRow(); recalc(); }
+function init(){
+  addRow(); 
+  recalc(); 
+  limpiarCliente();
+}
 init();
 </script>
 <!-- Si no cargas Bootstrap bundle en navbar/global, descomenta: -->

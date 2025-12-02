@@ -1,18 +1,30 @@
 <?php
-/* venta_sim_pospago.php — Venta pospago + alta rápida de SIM (mismo archivo)
-   Comisiones pospago (BAIT) — reglas FIJAS:
-   - comision_ejecutivo:
-       * Si rol = Gerente → 0
-       * 339: Con=220 / Sin=200
-       * 289: Con=180 / Sin=150
-       * 249: Con=140 / Sin=120
-       * 199: Con=120 / Sin=100
-   - comision_gerente:
-       * 339: Con=80 / Sin=70
-       * 289: Con=60 / Sin=50
-       * 249: Con=40 / Sin=30
-       * 199: Con=30 / Sin=20
-*/
+/* venta_sim_pospago.php — Venta pospago + alta rápida de SIM (Central LUGA)
+ *
+ * Reglas de comisiones:
+ * - EJECUTIVO (campo `comision`):
+ *     Equipos: [1–3499]=75, [3500–5499]=100, [5500+]=150
+ *     Módem/MiFi: 50
+ *     Combo: 75 fijo
+ * - GERENTE (campo `comision`):
+ *     Tabla Gerente: [1–3499]=25, [3500–5499]=75, [5500+]=100, Módem=25
+ * - `comision_gerente`:
+ *     Normal: No combo → tabla Gerente; Combo → 75 fijo.
+ *     ⚠️ Ajuste: SI el vendedor es GERENTE, entonces `comision_gerente = 0`.
+ *
+ * Para POSPAGO BAIT usamos comisiones fijas:
+ * - Ejecutivo (si rol != Gerente):
+ *     339: Con=220 / Sin=200
+ *     289: Con=180 / Sin=150
+ *     249: Con=140 / Sin=120
+ *     199: Con=120 / Sin=100
+ * - Gerente:
+ *     339: Con=80 / Sin=70
+ *     289: Con=60 / Sin=50
+ *     249: Con=40 / Sin=30
+ *     199: Con=30 / Sin=20
+ */
+
 session_start();
 if (!isset($_SESSION['id_usuario'])) { header("Location: index.php"); exit(); }
 
@@ -39,7 +51,11 @@ $planesPospago = [
 ================================ */
 function tipos_mysqli(array $vals): string {
   $t = '';
-  foreach ($vals as $v) { $t .= is_int($v) ? 'i' : (is_float($v) ? 'd' : 's'); }
+  foreach ($vals as $v) {
+    if (is_int($v))      { $t .= 'i'; }
+    elseif (is_float($v)){ $t .= 'd'; }
+    else                 { $t .= 's'; }
+  }
   return $t;
 }
 function redir(string $msg, array $extra = []) {
@@ -76,7 +92,7 @@ function calcComisionGerentePospago(int $planMonto, string $modalidad): float {
   if (!isset($tabla[$planMonto])) return 0.0;
   return $con ? $tabla[$planMonto]['con'] : $tabla[$planMonto]['sin'];
 }
-/** Verifica columna (para detalle opcional) */
+/** Verifica columna (para detalle opcional, etc.) */
 function columnExists(mysqli $conn, string $table, string $column): bool {
   $t = $conn->real_escape_string($table);
   $c = $conn->real_escape_string($column);
@@ -156,13 +172,23 @@ if (($_SERVER['REQUEST_METHOD'] === 'POST') && (($_POST['accion'] ?? '') === 've
   abortar_si_captura_bloqueada();
 
   $esEsim         = isset($_POST['es_esim']) ? 1 : 0;
-  $idSim          = isset($_POST['id_sim']) && $_POST['id_sim'] !== '' ? (int)$_POST['id_sim'] : 0;
+  $idSim          = (isset($_POST['id_sim']) && $_POST['id_sim'] !== '') ? (int)$_POST['id_sim'] : 0;
   $plan           = $_POST['plan'] ?? '';
   $modalidad      = $_POST['modalidad'] ?? 'Sin equipo';
-  $idVentaEquipo  = ($_POST['id_venta_equipo'] ?? '') !== '' ? (int)$_POST['id_venta_equipo'] : null;
-  $nombreCliente  = trim($_POST['nombre_cliente'] ?? '');
-  $numeroCliente  = trim($_POST['numero_cliente'] ?? '');
+
+  // 🔗 Venta de equipo relacionada: NULL si viene vacío para no romper FK
+  $idVentaEquipo  = (isset($_POST['id_venta_equipo']) && $_POST['id_venta_equipo'] !== '')
+                      ? (int)$_POST['id_venta_equipo']
+                      : null;
+
   $comentarios    = trim($_POST['comentarios'] ?? '');
+
+  // Cliente desde hidden (patrón nueva_venta)
+  $idCliente       = (isset($_POST['id_cliente']) && $_POST['id_cliente'] !== '') ? (int)$_POST['id_cliente'] : 0;
+  $nombreCliente   = trim($_POST['nombre_cliente'] ?? '');
+  $telefonoCliente = trim($_POST['telefono_cliente'] ?? '');
+  // Por compatibilidad, número_cliente puede venir por separado (desde hidden numero_cliente_hidden)
+  $numeroCliente   = trim($_POST['numero_cliente'] ?? $telefonoCliente);
 
   $planesPospago = [
     "Plan Bait 199" => 199,
@@ -175,11 +201,12 @@ if (($_SERVER['REQUEST_METHOD'] === 'POST') && (($_POST['accion'] ?? '') === 've
   if (!$plan || $precioPlan <= 0) {
     $mensaje = '<div class="alert alert-danger">Selecciona un plan válido.</div>';
   }
-  if ($mensaje === '' && ($nombreCliente === '' || $numeroCliente === '')) {
-    $mensaje = '<div class="alert alert-danger">El nombre y el número del cliente son obligatorios.</div>';
+  // Cliente obligatorio para pospago
+  if ($mensaje === '' && (!$idCliente || $nombreCliente === '' || $numeroCliente === '')) {
+    $mensaje = '<div class="alert alert-danger">Debes seleccionar un cliente desde la base de datos (nombre y teléfono).</div>';
   }
   if ($mensaje === '' && !preg_match('/^\d{10}$/', $numeroCliente)) {
-    $mensaje = '<div class="alert alert-danger">El número del cliente debe tener exactamente 10 dígitos.</div>';
+    $mensaje = '<div class="alert alert-danger">El teléfono del cliente debe tener exactamente 10 dígitos.</div>';
   }
   if ($mensaje === '' && !$esEsim && $idSim <= 0) {
     $mensaje = '<div class="alert alert-danger">Debes seleccionar una SIM física si no es eSIM.</div>';
@@ -197,25 +224,47 @@ if (($_SERVER['REQUEST_METHOD'] === 'POST') && (($_POST['accion'] ?? '') === 've
     }
   }
 
+  // Si la modalidad es "Con equipo" puedes forzar que traiga id_venta_equipo (opcional, por si quieres obligarlo):
+  /*
+  if ($mensaje === '' && $modalidad === 'Con equipo' && !$idVentaEquipo) {
+    $mensaje = '<div class="alert alert-danger">Selecciona la venta de equipo relacionada.</div>';
+  }
+  */
+
   if ($mensaje === '') {
     // 💰 Comisiones fijas
     $comisionEjecutivo = calcComisionEjecutivoPospago($rolUsuario, (int)$precioPlan, $modalidad);
     $comisionGerente   = calcComisionGerentePospago((int)$precioPlan, $modalidad);
 
-    // Insert venta
+    // Como la columna id_venta_equipo tiene FK a ventas.id, mandamos NULL si no hay relación
+    // (asegúrate de que la columna en BD permita NULL).
+    if (!$idVentaEquipo) {
+      $idVentaEquipo = null;
+    }
+
     $sqlVenta = "INSERT INTO ventas_sims
       (tipo_venta, tipo_sim, comentarios, precio_total,
        comision_ejecutivo, comision_gerente,
        id_usuario, id_sucursal, fecha_venta,
-       es_esim, modalidad, id_venta_equipo, numero_cliente, nombre_cliente)
-      VALUES ('Pospago', 'Bait', ?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?)";
-    // tipo_sim = 'Bait' porque todos los planes especificados son BAIT
+       es_esim, modalidad, id_venta_equipo,
+       id_cliente, numero_cliente, nombre_cliente)
+      VALUES ('Pospago', 'Bait', ?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?)";
+
     $vals = [
-      $comentarios, $precioPlan,
-      $comisionEjecutivo, $comisionGerente,
-      $idUsuario, $idSucursal,
-      $esEsim, $modalidad, $idVentaEquipo, $numeroCliente, $nombreCliente
+      $comentarios,          // s
+      $precioPlan,           // d
+      $comisionEjecutivo,    // d
+      $comisionGerente,      // d
+      $idUsuario,            // i
+      $idSucursal,           // i
+      $esEsim,               // i
+      $modalidad,            // s
+      $idVentaEquipo,        // i (puede ser NULL)
+      $idCliente,            // i
+      $numeroCliente,        // s
+      $nombreCliente         // s
     ];
+
     $types = tipos_mysqli($vals);
     $stmt  = $conn->prepare($sqlVenta);
     $stmt->bind_param($types, ...$vals);
@@ -323,7 +372,22 @@ $stmt->close();
   .btn-gradient:disabled{opacity:.7;}
   .badge-soft{background:#eef2ff; color:#1e40af; border:1px solid #dbeafe;}
   .list-compact{margin:0; padding-left:1rem;} .list-compact li{margin-bottom:.25rem;}
-  .req-hint{font-size:.8rem;color:#dc3545;display:none;}
+  .cliente-summary-label {
+    font-size:.85rem;
+    text-transform:uppercase;
+    letter-spacing:.08em;
+    color:#64748b;
+    margin-bottom:.25rem;
+  }
+  .cliente-summary-main {
+    font-weight:600;
+    font-size:1.05rem;
+    color:#111827;
+  }
+  .cliente-summary-sub {
+    font-size:.9rem;
+    color:#6b7280;
+  }
 </style>
 
 </head>
@@ -343,7 +407,7 @@ $stmt->close();
   <div class="d-flex align-items-center justify-content-between mb-3">
     <div>
       <h2 class="page-title mb-1"><i class="bi bi-sim me-2"></i>Venta de SIM Pospago</h2>
-      <div class="help-text">Completa los datos y confirma en el modal antes de enviar.</div>
+      <div class="help-text">Completa los datos, selecciona el <strong>cliente desde la BD</strong> y confirma en el modal antes de enviar.</div>
     </div>
   </div>
 
@@ -362,6 +426,15 @@ $stmt->close();
 
   <form method="POST" class="card card-elev p-3 mb-4" id="formPospago" novalidate>
     <input type="hidden" name="accion" value="venta">
+
+    <!-- 🔗 Cliente seleccionado (patrón nueva_venta) -->
+    <input type="hidden" name="id_cliente" id="id_cliente" value="">
+    <input type="hidden" name="nombre_cliente" id="nombre_cliente" value="">
+    <input type="hidden" name="telefono_cliente" id="telefono_cliente" value="">
+    <!-- Por compatibilidad con campo numero_cliente en BD -->
+    <input type="hidden" name="numero_cliente" id="numero_cliente_hidden" value="">
+    <input type="hidden" name="correo_cliente" id="correo_cliente" value="">
+
     <div class="card-body">
 
       <div class="section-title"><i class="bi bi-collection"></i> Selección de SIM</div>
@@ -440,17 +513,37 @@ $stmt->close();
 
       <hr class="my-4">
 
-      <div class="section-title"><i class="bi bi-person-vcard"></i> Datos del cliente</div>
+      <div class="section-title"><i class="bi bi-people"></i> Datos del cliente</div>
       <div class="row g-3 mb-3">
-        <div class="col-md-4">
-          <label class="form-label">Nombre del cliente</label>
-          <input type="text" name="nombre_cliente" id="nombre_cliente" class="form-control" required>
+        <div class="col-md-8">
+          <div class="border rounded-3 p-3 bg-light">
+            <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+              <div>
+                <div class="cliente-summary-label">Cliente seleccionado</div>
+                <div class="cliente-summary-main" id="cliente_resumen_nombre">
+                  Ninguno seleccionado
+                </div>
+                <div class="cliente-summary-sub" id="cliente_resumen_detalle">
+                  Usa el botón <strong>Buscar / crear cliente</strong> para seleccionar uno.
+                </div>
+              </div>
+              <div class="text-end">
+                <span class="badge rounded-pill text-bg-secondary" id="badge_tipo_cliente">
+                  <i class="bi bi-person-dash me-1"></i> Sin cliente
+                </span>
+              </div>
+            </div>
+          </div>
         </div>
-        <div class="col-md-3">
-          <label class="form-label">Número telefónico</label>
-          <input type="text" name="numero_cliente" id="numero_cliente" class="form-control" placeholder="10 dígitos" required>
+        <div class="col-md-4 d-flex align-items-center justify-content-md-end">
+          <button type="button" class="btn btn-outline-primary w-100" id="btn_open_modal_clientes">
+            <i class="bi bi-search me-1"></i> Buscar / crear cliente
+          </button>
         </div>
-        <div class="col-md-5">
+      </div>
+
+      <div class="row g-3 mb-3">
+        <div class="col-md-12">
           <label class="form-label">Comentarios</label>
           <input type="text" name="comentarios" id="comentarios" class="form-control">
         </div>
@@ -514,6 +607,101 @@ $stmt->close();
   </div>
 </div>
 
+<!-- Modal de clientes: buscar / seleccionar / crear (patrón nueva_venta) -->
+<div class="modal fade" id="modalClientes" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header bg-light">
+        <h5 class="modal-title">
+          <i class="bi bi-people me-2 text-primary"></i>Buscar o crear cliente
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+      </div>
+      <div class="modal-body">
+        <!-- Buscador -->
+        <div class="mb-3">
+          <label class="form-label">Buscar por nombre, teléfono o código de cliente</label>
+          <div class="input-group">
+            <input type="text" class="form-control" id="cliente_buscar_q" placeholder="Ej. LUCIA, 5587967699 o CL-40-000001">
+            <button class="btn btn-primary" type="button" id="btn_buscar_modal">
+              <i class="bi bi-search"></i> Buscar
+            </button>
+          </div>
+          <div class="form-text">
+            La búsqueda se realiza a nivel <strong>global.</strong>
+          </div>
+        </div>
+
+        <hr>
+
+        <!-- Resultados -->
+        <div class="mb-2 d-flex justify-content-between align-items-center">
+          <span class="fw-semibold">Resultados</span>
+          <span class="text-muted small" id="lbl_resultados_clientes">Sin buscar aún.</span>
+        </div>
+        <div class="table-responsive mb-3">
+          <table class="table table-sm align-middle">
+            <thead class="table-light">
+              <tr>
+                <th>Código</th>
+                <th>Nombre</th>
+                <th>Teléfono</th>
+                <th>Correo</th>
+                <th>Fecha alta</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="tbody_clientes">
+              <!-- JS -->
+            </tbody>
+          </table>
+        </div>
+
+        <hr>
+
+        <!-- Crear nuevo cliente -->
+        <div class="mb-2">
+          <button class="btn btn-outline-success btn-sm" type="button" data-bs-toggle="collapse" data-bs-target="#collapseNuevoCliente">
+            <i class="bi bi-person-plus me-1"></i> Crear nuevo cliente
+          </button>
+        </div>
+        <div class="collapse" id="collapseNuevoCliente">
+          <div class="border rounded-3 p-3 bg-light">
+            <div class="row g-3">
+              <div class="col-md-4">
+                <label class="form-label">Nombre completo</label>
+                <input type="text" class="form-control" id="nuevo_nombre">
+              </div>
+              <div class="col-md-4">
+                <label class="form-label">Teléfono (10 dígitos)</label>
+                <input type="text" class="form-control" id="nuevo_telefono">
+              </div>
+              <div class="col-md-4">
+                <label class="form-label">Correo</label>
+                <input type="email" class="form-control" id="nuevo_correo">
+              </div>
+            </div>
+            <div class="mt-3 text-end">
+              <button type="button" class="btn btn-success" id="btn_guardar_nuevo_cliente">
+                <i class="bi bi-check2-circle me-1"></i> Guardar y seleccionar
+              </button>
+            </div>
+            <div class="form-text">
+              El cliente se creará en la sucursal actual.
+            </div>
+          </div>
+        </div>
+        <div class="small text-danger mt-2" id="nuevo_cliente_error"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">
+          Cerrar
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Modal de Confirmación de venta -->
 <div class="modal fade" id="modalConfirmacion" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
@@ -525,7 +713,7 @@ $stmt->close();
       <div class="modal-body">
         <div class="alert alert-info mb-3">
           <i class="bi bi-info-circle me-1"></i>
-          <strong>Validación de identidad:</strong> confirma el <u>usuario</u> y la <u>sucursal</u>.
+          <strong>Validación de identidad:</strong> confirma el <u>usuario</u>, la <u>sucursal</u> y el <u>cliente</u>.
         </div>
 
         <div class="row g-3">
@@ -538,6 +726,7 @@ $stmt->close();
                   <li><strong>Sucursal:</strong> <span id="conf_sucursal"><?= htmlspecialchars($nomSucursal) ?></span></li>
                   <li><strong>Tipo SIM:</strong> <span id="conf_tipo_sim">—</span></li>
                   <li class="d-none" id="li_iccid"><strong>ICCID:</strong> <span id="conf_iccid">—</span></li>
+                  <li><strong>Cliente en BD:</strong> <span id="conf_cliente_bd">No</span></li>
                 </ul>
               </div>
             </div>
@@ -578,9 +767,9 @@ $stmt->close();
 </div>
 
 <!-- JS -->
-<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
 <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
+<!-- Se asume que Bootstrap JS ya está cargado (por navbar u otra parte) -->
 
 <script>
 function toggleSimSelect() {
@@ -607,26 +796,207 @@ function setPrecio() {
 }
 
 $(function(){
-  const modalConfirm = new bootstrap.Modal(document.getElementById('modalConfirmacion'));
+  const modalConfirm      = new bootstrap.Modal(document.getElementById('modalConfirmacion'));
+  const modalClientes     = new bootstrap.Modal(document.getElementById('modalClientes'));
 
-  const $form   = $('#formPospago');
-  const $esim   = $('#es_esim');
-  const $simSel = $('#id_sim');
-  const $plan   = $('#plan');
-  const $precio = $('#precio');
-  const $modal  = $('#modalidad');
-  const $venta  = $('#id_venta_equipo');
-  const $nombre = $('#nombre_cliente');
-  const $numero = $('#numero_cliente');
-  const $coment = $('#comentarios');
+  const idSucursal = <?= (int)$idSucursal ?>;
 
-  $('.select2-sims').select2({ placeholder:'-- Selecciona SIM --', width:'100%', language:{ noResults:()=> 'Sin resultados', searching:()=> 'Buscando…' }});
-  $('.select2-ventas').select2({ placeholder:'-- Selecciona venta --', width:'100%', language:{ noResults:()=> 'Sin resultados', searching:()=> 'Buscando…' }});
+  const $form      = $('#formPospago');
+  const $esim      = $('#es_esim');
+  const $simSel    = $('#id_sim');
+  const $plan      = $('#plan');
+  const $precio    = $('#precio');
+  const $modal     = $('#modalidad');
+  const $venta     = $('#id_venta_equipo');
+  const $coment    = $('#comentarios');
+
+  const $idCliente       = $('#id_cliente');
+  const $nombreCliente   = $('#nombre_cliente');
+  const $telCliente      = $('#telefono_cliente');
+  const $telNumeroHidden = $('#numero_cliente_hidden');
+  const $correoCliente   = $('#correo_cliente');
+
+  const $clienteResumenNombre  = $('#cliente_resumen_nombre');
+  const $clienteResumenDetalle = $('#cliente_resumen_detalle');
+  const $badgeTipoCliente      = $('#badge_tipo_cliente');
+
+  const $nuevoNombre   = $('#nuevo_nombre');
+  const $nuevoTelefono = $('#nuevo_telefono');
+  const $nuevoCorreo   = $('#nuevo_correo');
+  const $nuevoErr      = $('#nuevo_cliente_error');
+
+  $('.select2-sims').select2({
+    placeholder:'-- Selecciona SIM --',
+    width:'100%',
+    language:{ noResults:()=> 'Sin resultados', searching:()=> 'Buscando…' }
+  });
+  $('.select2-ventas').select2({
+    placeholder:'-- Selecciona venta --',
+    width:'100%',
+    language:{ noResults:()=> 'Sin resultados', searching:()=> 'Buscando…' }
+  });
 
   <?php if ($selSimId): ?> $('#id_sim').trigger('change'); <?php endif; ?>
 
-  toggleSimSelect(); toggleEquipo(); setPrecio();
+  toggleSimSelect();
+  toggleEquipo();
+  setPrecio();
 
+  // ===== Helpers cliente (patrón nueva_venta) =====
+  function limpiarCliente() {
+    $idCliente.val('');
+    $nombreCliente.val('');
+    $telCliente.val('');
+    $telNumeroHidden.val('');
+    $correoCliente.val('');
+
+    $clienteResumenNombre.text('Ninguno seleccionado');
+    $clienteResumenDetalle.html('Usa el botón <strong>Buscar / crear cliente</strong> para seleccionar uno.');
+    $badgeTipoCliente
+      .removeClass('text-bg-success')
+      .addClass('text-bg-secondary')
+      .html('<i class="bi bi-person-dash me-1"></i> Sin cliente');
+  }
+
+  function setClienteSeleccionado(c) {
+    const id   = c.id || '';
+    const nom  = c.nombre || '';
+    const tel  = c.telefono || '';
+    const mail = c.correo || '';
+    const cod  = c.codigo_cliente || '';
+
+    $idCliente.val(id);
+    $nombreCliente.val(nom);
+    $telCliente.val(tel);
+    $telNumeroHidden.val(tel); // compatibilidad con numero_cliente
+    $correoCliente.val(mail);
+
+    const detParts = [];
+    if (tel)  detParts.push('Tel: ' + tel);
+    if (cod)  detParts.push('Código: ' + cod);
+    if (mail) detParts.push('Correo: ' + mail);
+
+    $clienteResumenNombre.text(nom || '(Sin nombre)');
+    $clienteResumenDetalle.text(detParts.join(' · ') || 'Sin más datos.');
+
+    $badgeTipoCliente
+      .removeClass('text-bg-secondary')
+      .addClass('text-bg-success')
+      .html('<i class="bi bi-person-check me-1"></i> Cliente seleccionado');
+  }
+
+  // Abrir modal clientes
+  $('#btn_open_modal_clientes').on('click', function() {
+    $('#cliente_buscar_q').val('');
+    $('#tbody_clientes').empty();
+    $('#lbl_resultados_clientes').text('Sin buscar aún.');
+    $('#collapseNuevoCliente').removeClass('show');
+    $nuevoErr.text('');
+    modalClientes.show();
+  });
+
+  // Buscar clientes en modal
+  $('#btn_buscar_modal').on('click', function() {
+    const q = $('#cliente_buscar_q').val().trim();
+    if (!q) {
+      alert('Escribe algo para buscar (nombre, teléfono o código).');
+      return;
+    }
+
+    $.post('ajax_clientes_buscar_modal.php', {
+      q: q,
+      id_sucursal: idSucursal
+    }, function(res) {
+      if (!res || !res.ok) {
+        alert(res && res.message ? res.message : 'No se pudo buscar clientes.');
+        return;
+      }
+
+      const clientes = res.clientes || [];
+      const $tbody = $('#tbody_clientes');
+      $tbody.empty();
+
+      if (clientes.length === 0) {
+        $('#lbl_resultados_clientes').text('Sin resultados. Puedes crear un cliente nuevo.');
+        return;
+      }
+
+      $('#lbl_resultados_clientes').text('Se encontraron ' + clientes.length + ' cliente(s).');
+
+      clientes.forEach(function(c) {
+        const $tr = $('<tr>');
+        $tr.append($('<td>').text(c.codigo_cliente || '—'));
+        $tr.append($('<td>').text(c.nombre || ''));
+        $tr.append($('<td>').text(c.telefono || ''));
+        $tr.append($('<td>').text(c.correo || ''));
+        $tr.append($('<td>').text(c.fecha_alta || ''));
+        const $btnSel = $('<button type="button" class="btn btn-sm btn-primary">')
+          .html('<i class="bi bi-check2-circle me-1"></i> Seleccionar')
+          .data('cliente', c)
+          .on('click', function() {
+            const cliente = $(this).data('cliente');
+            setClienteSeleccionado(cliente);
+            modalClientes.hide();
+          });
+        $tr.append($('<td>').append($btnSel));
+        $tbody.append($tr);
+      });
+    }, 'json').fail(function() {
+      alert('Error al buscar en la base de clientes.');
+    });
+  });
+
+  // Guardar nuevo cliente desde modal
+  $('#btn_guardar_nuevo_cliente').on('click', function() {
+    const nombre = $nuevoNombre.val().trim();
+    let tel      = $nuevoTelefono.val().trim();
+    const correo = $nuevoCorreo.val().trim();
+
+    $nuevoErr.text('');
+
+    if (!nombre) {
+      $nuevoErr.text('Captura el nombre del cliente.');
+      return;
+    }
+    tel = tel.replace(/\D+/g, '');
+    if (!/^\d{10}$/.test(tel)) {
+      $nuevoErr.text('El teléfono debe tener exactamente 10 dígitos.');
+      return;
+    }
+
+    $('#btn_guardar_nuevo_cliente').prop('disabled', true).text('Guardando...');
+
+    $.post('ajax_crear_cliente.php', {
+      nombre: nombre,
+      telefono: tel,
+      correo: correo,
+      id_sucursal: idSucursal
+    }, function(res) {
+      if (!res || !res.ok) {
+        $nuevoErr.text(res && res.message ? res.message : 'No se pudo guardar el cliente.');
+        $('#btn_guardar_nuevo_cliente').prop('disabled', false).text('Guardar y seleccionar');
+        return;
+      }
+
+      const c = res.cliente || {};
+      setClienteSeleccionado(c);
+      modalClientes.hide();
+
+      // Limpiar formulario de nuevo cliente
+      $nuevoNombre.val('');
+      $nuevoTelefono.val('');
+      $nuevoCorreo.val('');
+      $('#collapseNuevoCliente').removeClass('show');
+      $('#btn_guardar_nuevo_cliente').prop('disabled', false).text('Guardar y seleccionar');
+
+      alert(res.message || 'Cliente creado y vinculado.');
+    }, 'json').fail(function(xhr) {
+      $nuevoErr.text('Error al guardar el cliente: ' + (xhr.responseText || 'desconocido'));
+      $('#btn_guardar_nuevo_cliente').prop('disabled', false).text('Guardar y seleccionar');
+    });
+  });
+
+  // ===== Validación de formulario + modal de confirmación =====
   function validar(){
     const errs = [];
     const plan = $plan.val();
@@ -634,12 +1004,14 @@ $(function(){
     if (!plan) errs.push('Selecciona un plan.');
     if (isNaN(precio) || precio <= 0) errs.push('El precio/plan es inválido o 0.');
 
-    const nom = ($nombre.val() || '').trim();
-    if (!nom) errs.push('El nombre del cliente es obligatorio.');
-
-    const num = ($numero.val() || '').trim();
-    if (!num) { errs.push('El número del cliente es obligatorio.'); }
-    else if (!/^\d{10}$/.test(num)) { errs.push('El número del cliente debe tener 10 dígitos.'); }
+    // Cliente obligatorio
+    const idCli = ($idCliente.val() || '').trim();
+    const nomCli = ($nombreCliente.val() || '').trim();
+    const telCli = ($telCliente.val() || '').trim();
+    if (!idCli) errs.push('Debes seleccionar un cliente desde la base de datos.');
+    if (!nomCli) errs.push('El cliente debe tener nombre.');
+    if (!telCli) errs.push('El cliente debe tener teléfono.');
+    if (telCli && !/^\d{10}$/.test(telCli)) errs.push('El teléfono del cliente debe tener 10 dígitos.');
 
     const isEsim = $esim.is(':checked');
     if (!isEsim) {
@@ -657,19 +1029,31 @@ $(function(){
       $('#conf_iccid').text(iccid || '—');
       $('#li_iccid').removeClass('d-none');
     } else { $('#li_iccid').addClass('d-none'); }
+
     const planTxt = $plan.find(':selected').text() || '—';
     const precio  = parseFloat($precio.val()) || 0;
     $('#conf_plan').text(planTxt);
     $('#conf_precio').text(precio.toFixed(2));
     const modTxt = $modal.val() || '—';
     $('#conf_modalidad').text(modTxt);
+
     if (modTxt === 'Con equipo' && $venta.val()) {
       const descr = $venta.find(':selected').data('descrip') || ('#'+$venta.val());
       $('#conf_equipo').text(descr); $('#li_equipo').removeClass('d-none');
     } else { $('#li_equipo').addClass('d-none'); }
-    $('#conf_cliente').text(($nombre.val() || '—'));
-    $('#conf_numero').text(($numero.val() || '—'));
+
+    const nomCli = $nombreCliente.val() || '—';
+    const telCli = $telCliente.val() || '—';
+    $('#conf_cliente').text(nomCli);
+    $('#conf_numero').text(telCli);
     $('#conf_comentarios').text(($coment.val() || '—'));
+
+    const idCli = ($idCliente.val() || '').trim();
+    if (idCli) {
+      $('#conf_cliente_bd').text('Sí (#' + idCli + ')');
+    } else {
+      $('#conf_cliente_bd').text('No');
+    }
   }
 
   let allowSubmit = false;
@@ -677,13 +1061,23 @@ $(function(){
     if (allowSubmit) return;
     e.preventDefault();
     const errs = validar();
-    if (errs.length){ alert('Corrige lo siguiente:\n• ' + errs.join('\n• ')); return; }
-    poblarModal(); modalConfirm.show();
+    if (errs.length){
+      alert('Corrige lo siguiente:\n• ' + errs.join('\n• '));
+      return;
+    }
+    poblarModal();
+    modalConfirm.show();
   });
+
   $('#btn_confirmar_envio').on('click', function(){
     $('#btn_submit').prop('disabled', true).text('Enviando...');
-    allowSubmit = true; modalConfirm.hide(); $form[0].submit();
+    allowSubmit = true;
+    modalConfirm.hide();
+    $form[0].submit();
   });
+
+  // De inicio, sin cliente seleccionado
+  limpiarCliente();
 });
 </script>
 </body>
