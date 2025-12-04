@@ -15,7 +15,7 @@ if (!isset($_SESSION['id_usuario'])) { header("Location: index.php"); exit(); }
 require_once __DIR__.'/db.php';
 
 /* ============================
-   Mini API: validación AJAX de IMEI
+   Mini API: validación AJAX de IMEI (SOLO equipos)
 ============================ */
 if (isset($_GET['action']) && $_GET['action'] === 'check_imei') {
   header('Content-Type: application/json; charset=utf-8');
@@ -144,7 +144,7 @@ function ultimoSubtipo(mysqli $conn, ?string $codigoProd, string $marca, string 
 }
 
 /* ============================
-   Luhn
+   Luhn (para equipos)
 ============================ */
 if (!function_exists('luhn_ok')) {
   function luhn_ok(string $s): bool {
@@ -187,7 +187,7 @@ $det = $conn->query("
 if (!$enc || !$det) die("Registro no encontrado.");
 
 $pendientes      = max(0, (int)$det['cantidad'] - (int)$det['ingresadas']);
-$requiereImei    = (int)$det['requiere_imei'] === 1; // Equipos: true | Accesorios: false
+$requiereImei    = (int)$det['requiere_imei'] === 1; // Equipos: true | Accesorios sin IMEI: false
 $proveedorCompra = trim((string)($enc['proveedor_nombre'] ?? ''));
 if ($proveedorCompra !== '') { $proveedorCompra = mb_substr($proveedorCompra, 0, 120, 'UTF-8'); }
 
@@ -220,6 +220,10 @@ if (!empty($det['id_modelo'])) {
   $stm->close();
 }
 
+// 🔹 Nuevo: detectar si este renglón es ACCESORIO (con serie / código en IMEI)
+$tipoProdCat        = strtolower(trim((string)($cat['tipo_producto'] ?? '')));
+$esAccesorioConImei = ($tipoProdCat === 'accesorio');
+
 // Costos del detalle (base)
 $ivaPct      = (float)$det['iva_porcentaje'];  // %
 $costo       = (float)$det['precio_unitario']; // sin IVA
@@ -239,20 +243,20 @@ $colorDet  = (string)$det['color'];
 // Sugerencias precio
 $precioCat = isset($cat['precio_lista']) && $cat['precio_lista'] !== null ? (float)$cat['precio_lista'] : null;
 $baseIvaParaSugerencia = ($costoDtoIva !== null && $costoDtoIva > 0) ? $costoDtoIva : $costoConIva;
-$sugerencia = sugerirPrecioLista($conn, $codigoCat, $marcaDet, $modeloDet, $ramDet, $capDet, $baseIvaParaSugerencia, $precioCat);
-$precioSugerido = $sugerencia['precio'];
-$fuenteSugerido = $sugerencia['fuente'];
+$sugerencia      = sugerirPrecioLista($conn, $codigoCat, $marcaDet, $modeloDet, $ramDet, $capDet, $baseIvaParaSugerencia, $precioCat);
+$precioSugerido  = $sugerencia['precio'];
+$fuenteSugerido  = $sugerencia['fuente'];
 
 // Subtipo (auto)
-$ultimoST = ultimoSubtipo($conn, $codigoCat, $marcaDet, $modeloDet, $ramDet, $capDet);
+$ultimoST   = ultimoSubtipo($conn, $codigoCat, $marcaDet, $modeloDet, $ramDet, $capDet);
 $subtipoForm = $ultimoST['subtipo'] ?? ($cat['subtipo'] ?? null);
 
 // Para repoblar inputs si hubo error
-$errorMsg = "";
-$precioListaForm = number_format($precioSugerido, 2, '.', '');
-$oldImei1 = [];
-$oldImei2 = [];
-$oldCantSinImei = $pendientes;
+$errorMsg         = "";
+$precioListaForm  = number_format($precioSugerido, 2, '.', '');
+$oldImei1         = [];
+$oldImei2         = [];
+$oldCantSinImei   = $pendientes;
 
 /* ============================
    POST: guardar ingresos
@@ -266,32 +270,45 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
   $hasCantCol = true; // ya asegurada
 
   // Precio de lista por renglón
-  $precioListaForm = trim($_POST['precio_lista'] ?? '');
+  $precioListaForm      = trim($_POST['precio_lista'] ?? '');
   $precioListaCapturado = parse_money($precioListaForm);
   if ($precioListaCapturado === null || $precioListaCapturado <= 0) {
     $errorMsg = "Precio de lista inválido. Usa números, ejemplo: 3999.00";
   }
 
   if ($requiereImei) {
-    /* ======== EQUIPOS (con IMEI por unidad) ======== */
+    /* ======== EQUIPOS / ACCESORIOS CON SERIE (requiere_imei=1) ======== */
     $n = max(0, (int)($_POST['n'] ?? 0));
     if ($n <= 0) { header("Location: compras_ver.php?id=".$compraId); exit(); }
     if ($n > $pendientes) $n = $pendientes;
 
     // Guardar para repintar si hay error
     for ($i=0; $i<$n; $i++) {
-      $oldImei1[$i] = preg_replace('/\D+/', '', (string)($_POST['imei1'][$i] ?? ''));
-      $oldImei2[$i] = preg_replace('/\D+/', '', (string)($_POST['imei2'][$i] ?? ''));
+      if ($esAccesorioConImei) {
+        $oldImei1[$i] = trim((string)($_POST['imei1'][$i] ?? ''));
+        $oldImei2[$i] = trim((string)($_POST['imei2'][$i] ?? ''));
+      } else {
+        $oldImei1[$i] = preg_replace('/\D+/', '', (string)($_POST['imei1'][$i] ?? ''));
+        $oldImei2[$i] = preg_replace('/\D+/', '', (string)($_POST['imei2'][$i] ?? ''));
+      }
     }
 
-    // Duplicados en formulario
+    // Duplicados en formulario (IMEI/serie)
     if ($errorMsg === "") {
-      $seen = [];
+      $seen     = [];
       $dupsForm = [];
       for ($i=0; $i<$n; $i++) {
         foreach (['imei1','imei2'] as $col) {
-          $val = preg_replace('/\D+/', '', (string)($_POST[$col][$i] ?? ''));
-          if ($val !== '' && preg_match('/^\d{15}$/', $val)) {
+          $raw = trim((string)($_POST[$col][$i] ?? ''));
+          if ($esAccesorioConImei) {
+            // Serie / código alfanumérico (normalizamos a mayúsculas para comparar)
+            $val = strtoupper($raw);
+          } else {
+            // Equipos: solo dígitos
+            $val = preg_replace('/\D+/', '', $raw);
+          }
+
+          if ($val !== '') {
             if (!isset($seen[$val])) $seen[$val] = [];
             $seen[$val][] = $i+1;
           }
@@ -301,30 +318,67 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
         if (count($rowsIx) > 1) $dupsForm[$val] = $rowsIx;
       }
       if (!empty($dupsForm)) {
-        $msg = "Se detectaron IMEI duplicados en el formulario:\n";
+        $msg = "Se detectaron IMEI/series duplicados en el formulario:\n";
         foreach ($dupsForm as $val => $rowsIx) { $msg .= " - $val repetido en filas ".implode(', ', $rowsIx)."\n"; }
         $errorMsg = nl2br(esc($msg));
       }
     }
 
-    // Validación formato/Luhn/duplicados en BD
+    // Validación formato / Luhn / duplicados en BD
     if ($errorMsg === "") {
       for ($i=0; $i<$n && $errorMsg === ""; $i++) {
         foreach ([['col'=>'imei1','label'=>'IMEI1'], ['col'=>'imei2','label'=>'IMEI2']] as $spec) {
           $raw = trim((string)($_POST[$spec['col']][$i] ?? ''));
-          $val = preg_replace('/\D+/', '', $raw);
-          if ($spec['col']==='imei1') {
-            if ($val === '' || !preg_match('/^\d{15}$/', $val)) { $errorMsg = $spec['label']." inválido en la fila ".($i+1)." (15 dígitos)."; break; }
-            if (!luhn_ok($val)) { $errorMsg = $spec['label']." inválido (Luhn) en la fila ".($i+1)."."; break; }
+
+          if ($esAccesorioConImei) {
+            // Accesorio con serie: alfanumérico libre, solo normalizamos a mayúsculas
+            $val = strtoupper($raw);
           } else {
-            if ($val !== '' && !preg_match('/^\d{15}$/', $val)) { $errorMsg = $spec['label']." inválido en la fila ".($i+1)." (15 dígitos)."; break; }
-            if ($val !== '' && !luhn_ok($val)) { $errorMsg = $spec['label']." inválido (Luhn) en la fila ".($i+1)."."; break; }
+            // Equipo: sólo dígitos
+            $val = preg_replace('/\D+/', '', $raw);
           }
+
+          if ($spec['col'] === 'imei1') {
+            // IMEI1 / serie siempre requerido
+            if ($val === '') {
+              $errorMsg = $spec['label']." requerido en la fila ".($i+1).".";
+              break;
+            }
+            if (!$esAccesorioConImei) {
+              // Equipos: 15 dígitos + Luhn
+              if (!preg_match('/^\d{15}$/', $val)) {
+                $errorMsg = $spec['label']." inválido en la fila ".($i+1)." (15 dígitos).";
+                break;
+              }
+              if (!luhn_ok($val)) {
+                $errorMsg = $spec['label']." inválido (Luhn) en la fila ".($i+1).".";
+                break;
+              }
+            }
+          } else {
+            // IMEI2 / serie 2 opcional
+            if ($val !== '' && !$esAccesorioConImei) {
+              // Solo para equipos aplicamos regla 15 dígitos + Luhn
+              if (!preg_match('/^\d{15}$/', $val)) {
+                $errorMsg = $spec['label']." inválido en la fila ".($i+1)." (15 dígitos).";
+                break;
+              }
+              if (!luhn_ok($val)) {
+                $errorMsg = $spec['label']." inválido (Luhn) en la fila ".($i+1).".";
+                break;
+              }
+            }
+          }
+
           if ($val !== '') {
+            // Duplicado en BD (mismo valor, sea IMEI numérico o serie alfanumérica)
             $st = $conn->prepare("SELECT COUNT(*) c FROM productos WHERE imei1=? OR imei2=?");
             $st->bind_param("ss", $val, $val);
             $st->execute(); $st->bind_result($cdup); $st->fetch(); $st->close();
-            if ($cdup > 0) { $errorMsg = $spec['label']." duplicado en BD en la fila ".($i+1).": $val"; break; }
+            if ($cdup > 0) {
+              $errorMsg = $spec['label']." duplicado en BD en la fila ".($i+1).": $val";
+              break;
+            }
           }
         }
       }
@@ -334,9 +388,18 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
       $conn->begin_transaction();
       try {
         for ($i=0; $i<$n; $i++) {
-          $imei1 = preg_replace('/\D+/', '', (string)($_POST['imei1'][$i] ?? ''));
-          $imei2 = preg_replace('/\D+/', '', (string)($_POST['imei2'][$i] ?? ''));
-          if ($imei2 === '') $imei2 = null;
+          if ($esAccesorioConImei) {
+            // Guardamos la serie tal cual (normalizada a mayúsculas)
+            $imei1Raw = trim((string)($_POST['imei1'][$i] ?? ''));
+            $imei2Raw = trim((string)($_POST['imei2'][$i] ?? ''));
+            $imei1    = strtoupper($imei1Raw);
+            $imei2    = $imei2Raw === '' ? null : strtoupper($imei2Raw);
+          } else {
+            // Equipos: sólo dígitos
+            $imei1 = preg_replace('/\D+/', '', (string)($_POST['imei1'][$i] ?? ''));
+            $imei2 = preg_replace('/\D+/', '', (string)($_POST['imei2'][$i] ?? ''));
+            if ($imei2 === '') $imei2 = null;
+          }
 
           // Variables catálogo → pasar SIEMPRE como variables (no expresiones) para bind_param
           $bp_codigo_producto = $codigoCat;
@@ -376,7 +439,7 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
               tipo_producto, subtipo, gama, ciclo_vida, abc, operador, resurtible
             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
           $stmtP = $conn->prepare($sqlP);
-          if (!$stmtP) { throw new Exception('Prepare productos (equipos): '.$conn->error); }
+          if (!$stmtP) { throw new Exception('Prepare productos (equipos/accesorios con serie): '.$conn->error); }
 
           $stmtP->bind_param(
             "ssssssssddddsdssssssssssss",
@@ -487,7 +550,7 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
               tipo_producto, subtipo, gama, ciclo_vida, abc, operador, resurtible
             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
           $stmtP = $conn->prepare($sqlP);
-          if (!$stmtP) { throw new Exception('Prepare productos (accesorios): '.$conn->error); }
+          if (!$stmtP) { throw new Exception('Prepare productos (accesorios sin IMEI): '.$conn->error); }
 
           $stmtP->bind_param(
             "ssssssssddddsdssssssssssss",
@@ -516,7 +579,7 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
         $qInv->bind_param("ii", $idProducto, $enc['id_sucursal']);
         $qInv->execute(); $rInv = $qInv->get_result();
         if ($inv = $rInv->fetch_assoc()) {
-          $idInventario = (int)$inv['id'];
+          $idInventario  = (int)$inv['id'];
           $nuevaCantidad = (int)$inv['cantidad'] + $cant;
           $upInv = $conn->prepare("UPDATE inventario SET cantidad=? WHERE id=?");
           $upInv->bind_param("ii", $nuevaCantidad, $idInventario);
@@ -655,7 +718,7 @@ require_once __DIR__.'/navbar.php';
           </div>
 
           <?php if ($requiereImei): ?>
-            <!-- ===== EQUIPOS: captura por IMEI ===== -->
+            <!-- ===== EQUIPOS / ACCESORIOS CON SERIE: captura por IMEI/serie ===== -->
             <input type="hidden" name="n" value="<?= $pendientes ?>">
 
             <div class="table-responsive">
@@ -663,8 +726,8 @@ require_once __DIR__.'/navbar.php';
                 <thead>
                   <tr>
                     <th>#</th>
-                    <th style="min-width:220px">IMEI1 *</th>
-                    <th style="min-width:220px">IMEI2 (opcional)</th>
+                    <th style="min-width:220px">IMEI1 / Serie *</th>
+                    <th style="min-width:220px">IMEI2 / Serie 2 (opcional)</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -678,17 +741,28 @@ require_once __DIR__.'/navbar.php';
                           class="form-control imei-input imei1"
                           name="imei1[]"
                           required
-                          inputmode="numeric"
-                          minlength="15"
-                          maxlength="15"
-                          pattern="[0-9]{15}"
-                          placeholder="15 dígitos"
-                          title="Debe contener exactamente 15 dígitos"
+                          <?php if (!$esAccesorioConImei): ?>
+                            inputmode="numeric"
+                            minlength="15"
+                            maxlength="15"
+                            pattern="[0-9]{15}"
+                            placeholder="15 dígitos"
+                            title="Debe contener exactamente 15 dígitos"
+                          <?php else: ?>
+                            placeholder="Serie / código"
+                            title="Captura la serie o código del accesorio (letras y números)"
+                          <?php endif; ?>
                           autocomplete="off"
                           value="<?= esc($oldImei1[$i] ?? '') ?>"
                           <?= $i===0 ? 'autofocus' : '' ?>
                         >
-                        <div class="invalid-feedback small">Corrige el IMEI (15 dígitos, Luhn).</div>
+                        <div class="invalid-feedback small">
+                          <?php if (!$esAccesorioConImei): ?>
+                            Corrige el IMEI (15 dígitos, Luhn).
+                          <?php else: ?>
+                            Corrige la serie o código del accesorio.
+                          <?php endif; ?>
+                        </div>
                         <div class="form-text text-danger d-none" id="dupmsg-imei1-<?= $i ?>"></div>
                       </td>
                       <td>
@@ -697,16 +771,27 @@ require_once __DIR__.'/navbar.php';
                           data-index="<?= $i ?>"
                           class="form-control imei-input imei2"
                           name="imei2[]"
-                          inputmode="numeric"
-                          minlength="15"
-                          maxlength="15"
-                          pattern="[0-9]{15}"
-                          placeholder="15 dígitos (opcional)"
-                          title="Si lo capturas, deben ser 15 dígitos"
+                          <?php if (!$esAccesorioConImei): ?>
+                            inputmode="numeric"
+                            minlength="15"
+                            maxlength="15"
+                            pattern="[0-9]{15}"
+                            placeholder="15 dígitos (opcional)"
+                            title="Si lo capturas, deben ser 15 dígitos"
+                          <?php else: ?>
+                            placeholder="Serie / código (opcional)"
+                            title="Serie/código opcional para el accesorio"
+                          <?php endif; ?>
                           autocomplete="off"
                           value="<?= esc($oldImei2[$i] ?? '') ?>"
                         >
-                        <div class="invalid-feedback small">Corrige el IMEI (15 dígitos, Luhn) o déjalo vacío.</div>
+                        <div class="invalid-feedback small">
+                          <?php if (!$esAccesorioConImei): ?>
+                            Corrige el IMEI (15 dígitos, Luhn) o déjalo vacío.
+                          <?php else: ?>
+                            Corrige el valor o déjalo vacío.
+                          <?php endif; ?>
+                        </div>
                         <div class="form-text text-danger d-none" id="dupmsg-imei2-<?= $i ?>"></div>
                       </td>
                     </tr>
@@ -738,8 +823,8 @@ require_once __DIR__.'/navbar.php';
   </div>
 </div>
 
-<?php if ($requiereImei): ?>
-<!-- ===== UX: validación en vivo (formato, Luhn, duplicado en formulario y BD) solo para equipos ===== -->
+<?php if ($requiereImei && !$esAccesorioConImei): ?>
+<!-- ===== UX: validación en vivo (formato, Luhn, duplicado en formulario y BD) SOLO para EQUIPOS ===== -->
 <script>
 (function() {
   const form = document.getElementById('formIngreso');

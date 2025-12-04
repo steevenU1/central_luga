@@ -334,9 +334,9 @@ while ($row = $res3->fetch_assoc()) {
         </div>
       </div>
 
+      <!-- Fila 1: Detalle por modelo a todo el ancho -->
       <div class="row g-3">
-        <div class="col-lg-9">
-          <!-- Detalle (modelos) -->
+        <div class="col-12">
           <div class="card card-soft">
             <div class="card-body">
               <div class="d-flex justify-content-between align-items-center mb-2">
@@ -344,7 +344,7 @@ while ($row = $res3->fetch_assoc()) {
                   <h5 class="mb-0">Detalle por modelo</h5>
                   <div class="kicker">
                     Captura por <b>código o marca/modelo</b>. El IVA por renglón parte del valor default.
-                    Accesorios no requieren IMEI y permiten editar Color/Capacidad.
+                    Accesorios, por defecto, no requieren IMEI y permiten editar Color/Capacidad.
                   </div>
                 </div>
                 <div class="d-flex gap-2">
@@ -376,14 +376,20 @@ while ($row = $res3->fetch_assoc()) {
               </div>
 
               <div class="hint mt-2">
-                Tip: el sistema detecta <b>Accesorio</b> desde el catálogo y apaga IMEI automáticamente.
+                Tip: el sistema detecta <b>Accesorio</b> desde el catálogo y apaga IMEI automáticamente
+                (puedes reactivarlo manualmente si el accesorio lleva IMEI).
                 Activa “Desc.” para capturar <em>Costo Descuento</em> y <em>Costo Descuento c/IVA</em> del renglón.
               </div>
             </div>
           </div>
+        </div>
+      </div>
 
+      <!-- Fila 2: Otros cargos + Resumen -->
+      <div class="row g-3 mt-1">
+        <div class="col-lg-9">
           <!-- Otros cargos (opcional) -->
-          <div class="card card-soft mt-3">
+          <div class="card card-soft">
             <div class="card-body">
               <div class="d-flex justify-content-between align-items-center mb-2">
                 <div>
@@ -573,10 +579,24 @@ while ($row = $res3->fetch_assoc()) {
     </div>
   </div>
 
-  <!-- JS -->
-  <!-- Si no cargas Bootstrap JS en el navbar, descomenta esta línea: -->
-  <!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" crossorigin="anonymous"></script> -->
+  <!-- 🔔 Modal pequeño para accesorios -->
+  <div class="modal fade" id="modalAccesorio" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-sm">
+      <div class="modal-content">
+        <div class="modal-body py-3">
+          <p class="mb-1 fw-semibold">Este es un accesorio.</p>
+          <p class="mb-0 small text-muted">
+            Recuerda marcar la opción <strong>REQUIERE IMEI</strong> si es necesario.
+          </p>
+        </div>
+        <div class="modal-footer py-2">
+          <button type="button" class="btn btn-primary btn-sm" data-bs-dismiss="modal">Entendido</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
+  <!-- JS -->
   <script>
     // Datos PHP -> JS
     const modelos = <?= json_encode($modelos, JSON_UNESCAPED_UNICODE) ?>;
@@ -618,6 +638,9 @@ while ($row = $res3->fetch_assoc()) {
     const mdDtoCostoIva = document.getElementById('mdDtoCostoIva');
     const btnGuardarDto = document.getElementById('btnGuardarDto');
     const btnCancelarDto = document.getElementById('btnCancelarDto');
+
+    // 🔔 Modal Accesorio
+    const modalAccesorio = new bootstrap.Modal(document.getElementById('modalAccesorio'));
 
     let currentDtoRow = null; // <tr> activo para descuento
     let rowIdx = 0;
@@ -735,20 +758,30 @@ while ($row = $res3->fetch_assoc()) {
         if (!ramEl.value) ramEl.value = '—';
       }
 
-      // IMEI: accesorios no requieren
+      // IMEI: accesorios por defecto no requieren, pero respeta override manual
       const reqHidden = tr.querySelector('.reqi-hidden');
       const reqChk = tr.querySelector('.reqi');
-      if (isAcc) {
-        reqChk.checked = false;
-        reqHidden.value = '0';
-      } else {
-        reqChk.checked = true;
-        reqHidden.value = '1';
+      const auto = tr.dataset.reqAutoset !== '0'; // 0 => usuario ya lo tocó
+
+      if (auto) {
+        if (isAcc) {
+          reqChk.checked = false;
+          reqHidden.value = '0';
+        } else {
+          reqChk.checked = true;
+          reqHidden.value = '1';
+        }
       }
 
       // Chip visual del tipo en la celda del buscador
       const chip = tr.querySelector('.tipo-chip');
       chip.textContent = isAcc ? 'Accesorio' : 'Equipo';
+
+      // 🔔 Mostrar modal UNA sola vez por renglón cuando sea accesorio
+      if (isAcc && !tr.dataset.accessoryHintShown) {
+        tr.dataset.accessoryHintShown = '1';
+        modalAccesorio.show();
+      }
 
       // quita invalidez del buscador
       const mm = tr.querySelector('.mm-buscar');
@@ -778,6 +811,7 @@ while ($row = $res3->fetch_assoc()) {
       const idx = rowIdx++;
       const tr = document.createElement('tr');
       tr.className = 'renglon';
+      tr.dataset.reqAutoset = '1'; // 🔹 mientras sea 1, el sistema puede auto-ajustar IMEI según tipo
       tr.innerHTML = `
       <td class="col-codigo">
         <div class="position-relative">
@@ -825,11 +859,12 @@ while ($row = $res3->fetch_assoc()) {
     `;
       tbody.appendChild(tr);
 
-      // Al cambiar el checkbox visible, sincroniza el hidden
+      // Al cambiar el checkbox visible, sincroniza el hidden y marca override manual
       const reqChk = tr.querySelector('.reqi');
       const reqHidden = tr.querySelector('.reqi-hidden');
       reqChk.addEventListener('change', () => {
         reqHidden.value = reqChk.checked ? '1' : '0';
+        tr.dataset.reqAutoset = '0'; // 🔹 a partir de aquí, ya no auto-forzamos por tipo
       });
 
       tr.querySelectorAll('input,select').forEach(el => el.addEventListener('input', calcTotales));
@@ -996,7 +1031,7 @@ while ($row = $res3->fetch_assoc()) {
           const raw = (inp.value || '').trim();
           const rawNorm = norm(raw);
           let m = byCodigo[raw] || byCodigoNorm[rawNorm] || byEtiqueta[raw.toLowerCase()] || byEtiquetaNorm[rawNorm];
-          if (m) aplicarModeloEnRenglon(m, tr);
+          if (m) aplicarModeloEnRenglon(m, tr); // 🔹 ya respeta overrides de IMEI
         });
 
       // Validaciones por renglón
