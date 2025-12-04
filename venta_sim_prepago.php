@@ -1,6 +1,6 @@
 <?php
 /* venta_sim_prepago.php — Alta express de SIM (misma página) + venta normal
-   Reglas de comisiones SIMs (fijas):
+   Reglas de comisiones SIM (fijas):
    - comision_ejecutivo:
        * Si rol = Gerente → 0
        * Nueva + Bait = 10, Nueva + ATT = 5
@@ -191,6 +191,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (($_POST['accion'] ?? '') !== 'alta
             }
         }
 
+        // 🔴 NUEVA VALIDACIÓN: si la tabla maneja columnas de cliente, obligamos a que haya cliente SIEMPRE
+        $tieneColsCliente = columnExists($conn, 'ventas_sims', 'id_cliente')
+                         && columnExists($conn, 'ventas_sims', 'numero_cliente')
+                         && columnExists($conn, 'ventas_sims', 'nombre_cliente');
+
+        if ($mensaje === '' && $tieneColsCliente) {
+            if ($idCliente <= 0 || $nombreCliente === '') {
+                $mensaje = '<div class="alert alert-danger">Debes seleccionar un cliente antes de registrar la venta.</div>';
+            }
+        }
+
         if ($mensaje === '') {
             // 2) Comisiones fijas
             $comisionEjecutivo = calcComisionEjecutivoSIM($rolUsuario, $tipoVenta, $tipoSim);
@@ -198,10 +209,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (($_POST['accion'] ?? '') !== 'alta
 
             // 3) Insertar venta, detectando si la tabla ya tiene columnas de cliente
             $numeroCliente = $telefonoCliente; // mapeamos teléfono a numero_cliente
-
-            $tieneColsCliente = columnExists($conn, 'ventas_sims', 'id_cliente')
-                             && columnExists($conn, 'ventas_sims', 'numero_cliente')
-                             && columnExists($conn, 'ventas_sims', 'nombre_cliente');
 
             if ($tieneColsCliente) {
                 $sqlVenta = "INSERT INTO ventas_sims
@@ -758,7 +765,7 @@ $(function(){
   ajustarAyudaPrecio();
   $('#tipo_venta').on('change', ajustarAyudaPrecio);
 
-  // ========= LÓGICA DE CLIENTE (copiada del patrón de nueva_venta) =========
+  // ========= LÓGICA DE CLIENTE =========
   function limpiarCliente() {
     $('#id_cliente').val('');
     $('#nombre_cliente').val('');
@@ -916,12 +923,17 @@ $(function(){
       if (isNaN(precio) || precio <= 0) errores.push('El precio debe ser mayor a 0 para Nueva/Portabilidad.');
     }
 
-    // Reglas de cliente (amarrar Portabilidad mínimo a cliente)
-    const idCliente   = $('#id_cliente').val();
+    // 🔴 Reglas de cliente: SIEMPRE debe haber cliente seleccionado
+    const idCliente   = ($('#id_cliente').val() || '').trim();
+    const nombreCli   = ($('#nombre_cliente').val() || '').trim();
     const telCliente  = ($('#telefono_cliente').val() || '').trim();
 
+    if (!idCliente || !nombreCli) {
+      errores.push('Debes seleccionar un cliente para registrar la venta.');
+    }
+
+    // Para Portabilidad, teléfono obligatorio y válido
     if (tipo === 'Portabilidad') {
-      if (!idCliente) errores.push('Debes seleccionar un cliente para Portabilidad.');
       if (!telCliente) {
         errores.push('El cliente debe tener teléfono registrado.');
       } else if (!/^\d{10}$/.test(telCliente)) {

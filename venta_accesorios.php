@@ -6,106 +6,154 @@
 // - Bloqueo venta normal si vender=0 (solo-regalo).
 // - Prod-safe: vender casteado, estatus normalizado y JS Set numérico.
 // - Modal de CONFIRMACIÓN previa al envío (resumen de líneas/pago).
-// - NUEVO: Selección de CLIENTE (buscar / crear) usando ajax_clientes_buscar_modal.php y ajax_crear_cliente.php
-//          Se envía id_cliente + nombre_cliente + telefono (oculto) a procesar_venta_accesorios.php
+// - Selección de CLIENTE (buscar / crear) usando ajax_clientes_buscar_modal.php y ajax_crear_cliente.php
+// - MOSTRAR Y BUSCAR por NOMBRE + SERIE (IMEI ejemplo) en el buscador de accesorios.
 
-// Anti cache (especialmente útil en prod con proxies/opcache)
+// Anti cache
 header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
 header('Pragma: no-cache');
 
 session_start();
 if (!isset($_SESSION['id_usuario'])) { header('Location: index.php'); exit(); }
 
-require_once __DIR__.'/db.php';
-require_once __DIR__.'/navbar.php';
+require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/navbar.php';
+
+mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
 date_default_timezone_set('America/Mexico_City');
 
-function h($s){ return htmlspecialchars($s ?? '', ENT_QUOTES, 'UTF-8'); }
-function normalizar_tag($s){ $s = strtoupper(trim((string)$s)); return preg_replace('/\s+/', ' ', $s); }
+// 🔧 Aseguramos charset/collation de conexión
+if ($conn instanceof mysqli) {
+    $conn->set_charset('utf8mb4');
+    @$conn->query("SET collation_connection = 'utf8mb4_unicode_ci'");
+}
+
+// Helpers
+if (!function_exists('h')) {
+    function h($s){ return htmlspecialchars($s ?? '', ENT_QUOTES, 'UTF-8'); }
+}
+if (!function_exists('normalizar_tag')) {
+    function normalizar_tag($s){
+        $s = strtoupper(trim((string)$s));
+        return preg_replace('/\s+/', ' ', $s);
+    }
+}
 
 /**
  * Genera un TAG aleatorio de 7 caracteres (letras mayúsculas + dígitos),
  * pensado para TAG de accesorio. Es solo valor por defecto y el usuario puede editarlo.
  */
-function generar_tag_accesorio(): string {
-  $chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // quitamos 0,1,I,O para evitar confusiones
-  $len   = strlen($chars);
-  $tag   = '';
-  for ($i = 0; $i < 7; $i++) {
-    $tag .= $chars[random_int(0, $len - 1)];
-  }
-  return $tag;
+if (!function_exists('generar_tag_accesorio')) {
+    function generar_tag_accesorio(): string {
+        $chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // quitamos 0,1,I,O para evitar confusiones
+        $len   = strlen($chars);
+        $tag   = '';
+        for ($i = 0; $i < 7; $i++) {
+            $tag .= $chars[random_int(0, $len - 1)];
+        }
+        return $tag;
+    }
 }
 
-/** Busca venta de equipo por TAG, regresa [id_venta, id_sucursal] o [0,0] (referencia futura) */
-function buscar_venta_equipo_por_tag(mysqli $conn, string $tag): array {
-  $tag = normalizar_tag($tag);
-  if ($tag === '') return [0,0];
-  $sql = "SELECT v.id, v.id_sucursal FROM ventas v WHERE UPPER(TRIM(v.tag)) = UPPER(TRIM(?)) LIMIT 1";
-  $st = $conn->prepare($sql);
-  if (!$st) return [0,0];
-  $st->bind_param('s', $tag);
-  if (!$st->execute()) return [0,0];
-  $r = $st->get_result()->fetch_row();
-  return $r ? [(int)$r[0], (int)$r[1]] : [0,0];
+/** Busca venta de equipo por TAG, regresa [id_venta, id_sucursal] o [0,0]  */
+if (!function_exists('buscar_venta_equipo_por_tag')) {
+    function buscar_venta_equipo_por_tag(mysqli $conn, string $tag): array {
+        $tag = normalizar_tag($tag);
+        if ($tag === '') return [0,0];
+        $sql = "SELECT v.id, v.id_sucursal
+                FROM ventas v
+                WHERE UPPER(TRIM(v.tag)) = UPPER(TRIM(?))
+                LIMIT 1";
+        $st = $conn->prepare($sql);
+        if (!$st) return [0,0];
+        $st->bind_param('s', $tag);
+        if (!$st->execute()) return [0,0];
+        $r = $st->get_result()->fetch_row();
+        return $r ? [(int)$r[0], (int)$r[1]] : [0,0];
+    }
 }
 
 $ROL         = $_SESSION['rol'] ?? '';
 $ID_USUARIO  = (int)($_SESSION['id_usuario'] ?? 0);
 $ID_SUCURSAL = (int)($_SESSION['id_sucursal'] ?? 0);
-if (!in_array($ROL, ['Ejecutivo','Gerente','Admin','GerenteZona','Logistica'], true)) { header('Location: 403.php'); exit(); }
+if (!in_array($ROL, ['Ejecutivo','Gerente','Admin','GerenteZona','Logistica'], true)) {
+    header('Location: 403.php'); exit();
+}
 
 /* --- Nombre de sucursal con cache en sesión --- */
 $sucursalNombre = trim($_SESSION['sucursal_nombre'] ?? '');
 if ($sucursalNombre === '' && $ID_SUCURSAL > 0) {
-  if ($st = $conn->prepare("SELECT nombre FROM sucursales WHERE id=? LIMIT 1")) {
-    $st->bind_param('i', $ID_SUCURSAL);
-    $st->execute();
-    if ($row = $st->get_result()->fetch_assoc()) {
-      $sucursalNombre = $row['nombre'] ?: '';
-      if ($sucursalNombre !== '') $_SESSION['sucursal_nombre'] = $sucursalNombre;
+    if ($st = $conn->prepare("SELECT nombre FROM sucursales WHERE id=? LIMIT 1")) {
+        $st->bind_param('i', $ID_SUCURSAL);
+        $st->execute();
+        if ($row = $st->get_result()->fetch_assoc()) {
+            $sucursalNombre = $row['nombre'] ?: '';
+            if ($sucursalNombre !== '') $_SESSION['sucursal_nombre'] = $sucursalNombre;
+        }
     }
-  }
 }
 if ($sucursalNombre === '') $sucursalNombre = 'Sucursal #'.$ID_SUCURSAL;
 
 /* --- TAG auto-generado para accesorios (editable) --- */
 $TAG_AUTO_ACCESORIO = generar_tag_accesorio();
 
-/* --- Whitelist de accesorios elegibles para REGALO --- */
+/* --- Whitelist de accesorios elegibles para REGALO (por codigo_producto) --- */
 $regaloPermitidos = [];
 $tblCheck = $conn->query("SHOW TABLES LIKE 'accesorios_regalo_modelos'");
 if ($tblCheck && $tblCheck->num_rows > 0) {
-  if ($rs = $conn->query("SELECT id_producto FROM accesorios_regalo_modelos WHERE activo=1")) {
-    while ($r = $rs->fetch_assoc()) $regaloPermitidos[] = (int)$r['id_producto'];
-  }
+    // Todos los productos (p.id) cuyo codigo_producto está configurado como regalo
+    $sqlReg = "
+        SELECT DISTINCT p.id AS id_producto
+        FROM accesorios_regalo_modelos arm
+        JOIN productos p
+          ON p.codigo_producto COLLATE utf8mb4_unicode_ci
+           = arm.codigo_producto COLLATE utf8mb4_unicode_ci
+        WHERE arm.activo = 1
+    ";
+    if ($rs = $conn->query($sqlReg)) {
+        while ($r = $rs->fetch_assoc()) {
+            $regaloPermitidos[] = (int)$r['id_producto'];
+        }
+    }
 }
 $regaloPermitidos = array_values(array_unique(array_filter($regaloPermitidos)));
 
-/* --- IDs Solo-REGALO (vender=0) robusto a VARCHAR/NULL --- */
+/* --- IDs Solo-REGALO (vender=0) por codigo_producto --- */
 $soloRegaloIds = [];
 if ($tblCheck && $tblCheck->num_rows > 0) {
-  $sqlSolo = "SELECT id_producto
-                FROM accesorios_regalo_modelos
-               WHERE activo=1
-                 AND CAST(COALESCE(vender, 1) AS UNSIGNED)=0";
-  if ($rs2 = $conn->query($sqlSolo)) {
-    while ($r2 = $rs2->fetch_assoc()) $soloRegaloIds[] = (int)$r2['id_producto'];
-  }
+    $sqlSolo = "
+        SELECT DISTINCT p.id AS id_producto
+        FROM accesorios_regalo_modelos arm
+        JOIN productos p
+          ON p.codigo_producto COLLATE utf8mb4_unicode_ci
+           = arm.codigo_producto COLLATE utf8mb4_unicode_ci
+        WHERE arm.activo = 1
+          AND CAST(COALESCE(arm.vender, 1) AS UNSIGNED) = 0
+    ";
+    if ($rs2 = $conn->query($sqlSolo)) {
+        while ($r2 = $rs2->fetch_assoc()) {
+            $soloRegaloIds[] = (int)$r2['id_producto'];
+        }
+    }
 }
 $soloRegaloIds = array_values(array_unique(array_filter($soloRegaloIds)));
 
-/* --- Catálogo con stock disponible SOLO en la sucursal actual --- */
-/*    Regla fija: aunque seas Admin/Logistica/GerenteZona, la venta solo usa
-      el inventario de la sucursal donde estás logueado ($ID_SUCURSAL). */
+/* --- Catálogo con stock disponible SOLO en la sucursal actual ---
+     IMEI de ejemplo se toma de productos (imei1 / imei2), no del inventario. */
 $sql = "
   SELECT 
     p.id AS id_producto,
     TRIM(CONCAT(COALESCE(p.marca,''),' ',COALESCE(p.modelo,''),' ',COALESCE(p.color,''))) AS nombre,
     COALESCE(p.precio_lista,0) AS precio_sugerido,
+    MIN(
+      NULLIF(
+        COALESCE(p.imei1, p.imei2),
+        ''
+      )
+    ) AS imei_ejemplo,
     SUM(
       CASE
-        WHEN UPPER(TRIM(i.estatus))='DISPONIBLE'
+        WHEN UPPER(TRIM(i.estatus)) = 'DISPONIBLE'
         THEN COALESCE(i.cantidad,1)
         ELSE 0
       END
@@ -124,11 +172,26 @@ $sql = "
 ";
 
 $stmt = $conn->prepare($sql);
-if ($stmt === false) { die('Error preparando SQL de accesorios: '.$conn->error); }
+if ($stmt === false) {
+    die('Error preparando SQL de accesorios: '.$conn->error);
+}
 $stmt->bind_param('i', $ID_SUCURSAL);
 $stmt->execute();
 $res = $stmt->get_result();
 $accesorios = $res ? $res->fetch_all(MYSQLI_ASSOC) : [];
+
+/* --- Post-proceso: armamos nombre_mostrar con serie cuando exista --- */
+foreach ($accesorios as &$acc) {
+    $nombreBase = trim($acc['nombre'] ?? '');
+    $imeiEj     = trim($acc['imei_ejemplo'] ?? '');
+    $acc['imei'] = $imeiEj;
+    if ($imeiEj !== '') {
+        $acc['nombre_mostrar'] = ($nombreBase !== '' ? $nombreBase.' — '.$imeiEj : $imeiEj);
+    } else {
+        $acc['nombre_mostrar'] = $nombreBase;
+    }
+}
+unset($acc);
 ?>
 <!doctype html>
 <html lang="es">
@@ -191,10 +254,9 @@ $accesorios = $res ? $res->fetch_all(MYSQLI_ASSOC) : [];
     <input type="hidden" name="id_sucursal" value="<?= (int)$ID_SUCURSAL ?>">
     <input type="hidden" name="es_regalo" id="es_regalo" value="0">
 
-    <!-- 🔗 Cliente seleccionado -->
+    <!-- Cliente seleccionado -->
     <input type="hidden" name="id_cliente" id="id_cliente" value="">
     <input type="hidden" name="nombre_cliente" id="nombre_cliente" value="">
-    <!-- name="telefono" para compatibilidad con backend -->
     <input type="hidden" name="telefono" id="telefono_cliente" value="">
     <input type="hidden" name="correo_cliente" id="correo_cliente" value="">
 
@@ -202,13 +264,12 @@ $accesorios = $res ? $res->fetch_all(MYSQLI_ASSOC) : [];
     <div class="row g-3 align-items-end">
       <div class="col-md-3">
         <label class="form-label section-title">TAG (venta de accesorios)</label>
-        <!-- TAG autogenerado pero editable -->
         <input type="text" name="tag" id="tag" class="form-control" maxlength="50" required
                value="<?= h($TAG_AUTO_ACCESORIO) ?>">
       </div>
       <div class="col-md-3">
         <label class="form-label section-title">Sucursal</label>
-        <input type="text" class="form-control" value="<?=h($sucursalNombre)?>" readonly>
+        <input type="text" class="form-control" value="<?= h($sucursalNombre) ?>" readonly>
       </div>
 
       <div class="col-12">
@@ -502,7 +563,6 @@ $accesorios = $res ? $res->fetch_all(MYSQLI_ASSOC) : [];
 <script>
 // Datos del backend
 const accesorios = <?php echo json_encode($accesorios, JSON_UNESCAPED_UNICODE); ?>;
-// Fuerza numérico por si PHP entrega strings en prod
 const REGALO_PERMITIDOS = new Set((<?php echo json_encode($regaloPermitidos, JSON_UNESCAPED_UNICODE); ?>).map(Number));
 const SOLO_REGALO       = new Set((<?php echo json_encode($soloRegaloIds,   JSON_UNESCAPED_UNICODE); ?>).map(Number));
 
@@ -517,7 +577,7 @@ const esRegaloInp = document.getElementById('es_regalo');
 const grpTagEquipo= document.getElementById('grpTagEquipo');
 const tagEquipo   = document.getElementById('tag_equipo');
 
-// Campos cliente (hidden + resumen)
+// Cliente
 const idClienteInput   = document.getElementById('id_cliente');
 const nombreCliente    = document.getElementById('nombre_cliente');
 const telClienteInput  = document.getElementById('telefono_cliente');
@@ -526,11 +586,10 @@ const lblCliNombre     = document.getElementById('cliente_resumen_nombre');
 const lblCliDetalle    = document.getElementById('cliente_resumen_detalle');
 const badgeTipoCliente = document.getElementById('badge_tipo_cliente');
 
-// Encabezado para confirm
+// Confirm
 const tagInput    = document.getElementById('tag');
 const comentarios = document.getElementById('comentarios');
 
-// Confirm modal elements
 let confirmModal = null;
 const cfModo   = document.getElementById('cfModo');
 const cfTag    = document.getElementById('cfTag');
@@ -546,7 +605,6 @@ const cfTagEqWrap  = document.getElementById('cfTagEqWrap');
 const cfTagEq      = document.getElementById('cfTagEq');
 const cfAlertRegalo = document.getElementById('cfAlertRegalo') || null;
 
-// Modal clientes
 let modalClientes = null;
 
 function money(n){ return new Intl.NumberFormat('es-MX',{style:'currency',currency:'MXN'}).format(Number(n||0)); }
@@ -559,7 +617,7 @@ async function fetchJSON(url, options){
   catch(e){ throw new Error(text || 'Respuesta inválida'); }
 }
 
-/* ======== Cliente: helpers ======== */
+/* ======== Cliente helpers ======== */
 function limpiarCliente(){
   idClienteInput.value = '';
   nombreCliente.value  = '';
@@ -599,65 +657,133 @@ function setClienteSeleccionado(c){
 
 /* -------- Buscador tipo “portal” -------- */
 let FAST_PORTAL=null, FAST_OWNER=null, FAST_SELECT=null;
-function ensurePortal(){ if(FAST_PORTAL) return; FAST_PORTAL=document.createElement('div'); FAST_PORTAL.className='fast-portal'; document.body.appendChild(FAST_PORTAL);
-  document.addEventListener('click', (e)=>{ if(FAST_PORTAL.style.display!=='block') return; if(FAST_OWNER && (e.target===FAST_OWNER || FAST_PORTAL.contains(e.target))) return; closePortal();}, true);
-  window.addEventListener('scroll', ()=>repositionPortal(), true); window.addEventListener('resize', ()=>repositionPortal());
+function ensurePortal(){
+  if(FAST_PORTAL) return;
+  FAST_PORTAL=document.createElement('div');
+  FAST_PORTAL.className='fast-portal';
+  document.body.appendChild(FAST_PORTAL);
+  document.addEventListener('click', (e)=>{
+    if(FAST_PORTAL.style.display!=='block') return;
+    if(FAST_OWNER && (e.target===FAST_OWNER || FAST_PORTAL.contains(e.target))) return;
+    closePortal();
+  }, true);
+  window.addEventListener('scroll', ()=>repositionPortal(), true);
+  window.addEventListener('resize', ()=>repositionPortal());
 }
-function openPortal(forInput,selectEl){ ensurePortal(); FAST_OWNER=forInput; FAST_SELECT=selectEl; renderPortal(forInput.value); repositionPortal(); FAST_PORTAL.style.display='block'; }
-function closePortal(){ if(FAST_PORTAL) FAST_PORTAL.style.display='none'; FAST_OWNER=FAST_SELECT=null; }
-function repositionPortal(){ if(!FAST_PORTAL||!FAST_OWNER) return; const r=FAST_OWNER.getBoundingClientRect(); FAST_PORTAL.style.left=`${r.left}px`; FAST_PORTAL.style.top=`${r.bottom}px`; FAST_PORTAL.style.width=`${r.width}px`; }
+function openPortal(forInput,selectEl){
+  ensurePortal();
+  FAST_OWNER=forInput;
+  FAST_SELECT=selectEl;
+  renderPortal(forInput.value);
+  repositionPortal();
+  FAST_PORTAL.style.display='block';
+}
+function closePortal(){
+  if(FAST_PORTAL) FAST_PORTAL.style.display='none';
+  FAST_OWNER=FAST_SELECT=null;
+}
+function repositionPortal(){
+  if(!FAST_PORTAL||!FAST_OWNER) return;
+  const r=FAST_OWNER.getBoundingClientRect();
+  FAST_PORTAL.style.left=`${r.left}px`;
+  FAST_PORTAL.style.top =`${r.bottom}px`;
+  FAST_PORTAL.style.width=`${r.width}px`;
+}
 function renderPortal(q){
-  const term=(q||'').trim().toLowerCase();
-  const rows=accesorios.filter(a=>term===''||String(a.nombre||'').toLowerCase().includes(term)).slice(0,150);
-  FAST_PORTAL.innerHTML = rows.length ? rows.map(a=>{
-    const idNum = Number(a.id_producto);
-    const eligRegalo = REGALO_PERMITIDOS.has(idNum);
-    const soloRegalo = SOLO_REGALO.has(idNum);
-    const blocked = (!isRegalo() && soloRegalo) || (isRegalo() && !eligRegalo);
-    let tag = '';
-    if (isRegalo()) {
-      tag = eligRegalo ? '<span class="badge badge-eleg ms-2">Elegible</span>'
-                       : '<span class="badge badge-noe ms-2">No elegible</span>';
-    } else if (soloRegalo) {
-      tag = '<span class="badge badge-solo ms-2">Solo regalo</span>';
-    }
-    return `<div class="fast-item ${blocked?'blocked':''}" data-id="${idNum}" data-precio="${Number(a.precio_sugerido||0)}" data-stock="${Number(a.stock_disp||0)}" data-elig="${eligRegalo?1:0}" data-solo="${soloRegalo?1:0}">${a.nombre} ${tag}</div>`;
-  }).join('') : `<div class="fast-item text-muted">Sin coincidencias</div>`;
+  const term = (q || '').trim().toLowerCase();
+
+  const rows = accesorios.filter(a=>{
+    const label = String(a.nombre_mostrar || a.nombre || '').toLowerCase();
+    const imei  = String(a.imei || a.imei_ejemplo || '').toLowerCase();
+    if (term === '') return true;
+    return label.includes(term) || imei.includes(term);
+  }).slice(0,150);
+
+  FAST_PORTAL.innerHTML = rows.length
+    ? rows.map(a=>{
+        const idNum = Number(a.id_producto);
+        const eligRegalo = REGALO_PERMITIDOS.has(idNum);
+        const soloRegalo = SOLO_REGALO.has(idNum);
+        const blocked = (!isRegalo() && soloRegalo) || (isRegalo() && !eligRegalo);
+
+        const display = (a.nombre_mostrar || a.nombre || '').trim();
+
+        let tag = '';
+        if (isRegalo()) {
+          tag = eligRegalo ? '<span class="badge badge-eleg ms-2">Elegible</span>'
+                           : '<span class="badge badge-noe ms-2">No elegible</span>';
+        } else if (soloRegalo) {
+          tag = '<span class="badge badge-solo ms-2">Solo regalo</span>';
+        }
+
+        return `
+          <div class="fast-item ${blocked?'blocked':''}"
+               data-id="${idNum}"
+               data-precio="${Number(a.precio_sugerido||0)}"
+               data-stock="${Number(a.stock_disp||0)}"
+               data-elig="${eligRegalo?1:0}"
+               data-solo="${soloRegalo?1:0}">
+            ${display} ${tag}
+          </div>`;
+      }).join('')
+    : `<div class="fast-item text-muted">Sin coincidencias</div>`;
 }
 function buildFastSelector(td, selectEl){
   td.classList.add('fast-wrap');
-  const fast=document.createElement('input'); fast.type='text'; fast.className='form-control fast-input'; fast.placeholder='Buscar accesorio…'; fast.autocomplete='off';
-  const kbd=document.createElement('span'); kbd.className='fast-kbd'; kbd.textContent='⌄';
-  td.prepend(fast); td.appendChild(kbd);
+  const fast=document.createElement('input');
+  fast.type='text';
+  fast.className='form-control fast-input';
+  fast.placeholder='Buscar accesorio…';
+  fast.autocomplete='off';
+  const kbd=document.createElement('span');
+  kbd.className='fast-kbd';
+  kbd.textContent='⌄';
+  td.prepend(fast);
+  td.appendChild(kbd);
+
   fast.addEventListener('focus', ()=>openPortal(fast,selectEl));
   fast.addEventListener('input', ()=>renderPortal(fast.value));
   fast.addEventListener('keydown', (e)=>{
     if(FAST_PORTAL?.style.display!=='block') return;
-    const items=[...FAST_PORTAL.querySelectorAll('.fast-item[data-id]')]; const cur=FAST_PORTAL.querySelector('.fast-item.active'); let idx=items.indexOf(cur);
+    const items=[...FAST_PORTAL.querySelectorAll('.fast-item[data-id]')];
+    const cur=FAST_PORTAL.querySelector('.fast-item.active');
+    let idx=items.indexOf(cur);
     if(e.key==='ArrowDown'){e.preventDefault(); idx=Math.min(idx+1, items.length-1);}
     if(e.key==='ArrowUp'){e.preventDefault(); idx=Math.max(idx-1, 0);}
     if(e.key==='Enter'&&cur){e.preventDefault(); cur.click(); return;}
     if(e.key==='Escape'){closePortal(); return;}
-    if(idx>=0&&items[idx]){items.forEach(x=>x.classList.remove('active')); items[idx].classList.add('active'); items[idx].scrollIntoView({block:'nearest'});}
+    if(idx>=0&&items[idx]){
+      items.forEach(x=>x.classList.remove('active'));
+      items[idx].classList.add('active');
+      items[idx].scrollIntoView({block:'nearest'});
+    }
   });
+
   ensurePortal();
   FAST_PORTAL.addEventListener('click', (e)=>{
     if(FAST_PORTAL.style.display!=='block') return;
-    const it=e.target.closest('.fast-item[data-id]'); if(!it) return;
-    if(it.classList.contains('blocked')) return; // bloqueo real
+    const it=e.target.closest('.fast-item[data-id]');
+    if(!it) return;
+    if(it.classList.contains('blocked')) return;
     const id=Number(it.dataset.id||0);
-    const precio=Number(it.dataset.precio||0), stock=Number(it.dataset.stock||0);
+    const precio=Number(it.dataset.precio||0);
+    const stock=Number(it.dataset.stock||0);
     const eleg = Number(it.dataset.elig||0)===1;
     const solo = Number(it.dataset.solo||0)===1;
+
     selectEl.value=String(id);
     const tr=selectEl.closest('tr');
     tr.querySelector('.stock').textContent=stock;
     const priceInput=tr.querySelector('.money');
     if(!isRegalo()&&precio>0) priceInput.value=precio.toFixed(2);
-    fast.value=it.textContent.replace(/Elegible|No elegible|Solo regalo/i,'').trim();
+
+    const rawText = it.textContent.replace(/Elegible|No elegible|Solo regalo/i,'').trim();
+    fast.value=rawText;
+
     tr.dataset.elegible = eleg ? '1' : '0';
     tr.dataset.soloregalo = solo ? '1' : '0';
-    closePortal(); recalc();
+    closePortal();
+    recalc();
   });
 }
 
@@ -668,7 +794,14 @@ function addRow(){
     <td>
       <select name="linea_id_producto[]" class="form-select selProducto d-none" tabindex="-1" aria-hidden="true">
         <option value="">—</option>
-        ${accesorios.map(a=>`<option value="${Number(a.id_producto)}" data-precio="${Number(a.precio_sugerido||0)}" data-stock="${Number(a.stock_disp||0)}">${a.nombre}</option>`).join('')}
+        ${
+          accesorios.map(a=>{
+            const label = (a.nombre_mostrar || a.nombre || '');
+            return `<option value="${Number(a.id_producto)}"
+                            data-precio="${Number(a.precio_sugerido||0)}"
+                            data-stock="${Number(a.stock_disp||0)}">${label}</option>`;
+          }).join('')
+        }
       </select>
     </td>
     <td class="text-center stock">0</td>
@@ -677,12 +810,17 @@ function addRow(){
     <td class="money subtotal text-end">$0.00</td>
     <td class="text-end"><button type="button" class="btn btn-outline-danger btn-sm btnDel">Quitar</button></td>`;
   tbody.appendChild(tr);
-  const tdAcc=tr.children[0]; const sel=tdAcc.querySelector('select.selProducto');
+
+  const tdAcc=tr.children[0];
+  const sel=tdAcc.querySelector('select.selProducto');
   buildFastSelector(tdAcc, sel);
   updateRowForRegalo(tr);
 }
 document.getElementById('btnAdd').addEventListener('click', ()=>{
-  if (isRegalo() && tbody.children.length>=1){ alert('En modo regalo solo puedes agregar 1 accesorio.'); return; }
+  if (isRegalo() && tbody.children.length>=1){
+    alert('En modo regalo solo puedes agregar 1 accesorio.');
+    return;
+  }
   addRow();
 });
 
@@ -693,8 +831,13 @@ function recalc(){
     const cant=Number(tr.querySelector('.cant').value||0);
     const priceEl=tr.querySelector('.money');
     let price=Number(priceEl.value||0);
-    if(isRegalo()){ price=0; priceEl.value='0.00'; }
-    const sub=cant*price; total+=sub; tr.querySelector('.subtotal').textContent=money(sub);
+    if(isRegalo()){
+      price=0;
+      priceEl.value='0.00';
+    }
+    const sub=cant*price;
+    total+=sub;
+    tr.querySelector('.subtotal').textContent=money(sub);
   });
   if(isRegalo()) total=0;
   lblTotal.textContent=money(total);
@@ -704,7 +847,10 @@ tbody.addEventListener('input', e=>{
   if(e.target.classList.contains('cant')||e.target.classList.contains('money')) recalc();
 });
 tbody.addEventListener('click', e=>{
-  if(e.target.classList.contains('btnDel')){ e.target.closest('tr').remove(); recalc(); }
+  if(e.target.classList.contains('btnDel')){
+    e.target.closest('tr').remove();
+    recalc();
+  }
 });
 
 /* -------- Pagos -------- */
@@ -712,13 +858,31 @@ function syncPagos(){
   const total = Number(lblTotal.textContent.replace(/[^0-9.]/g,'')) || 0;
   if(isRegalo()){
     pagosCampos.classList.add('hidden-fields');
-    formaPago.value='Efectivo'; inpEf.value='0.00'; inpTa.value='0.00'; inpEf.readOnly=true; inpTa.readOnly=true; return;
+    formaPago.value='Efectivo';
+    inpEf.value='0.00';
+    inpTa.value='0.00';
+    inpEf.readOnly=true;
+    inpTa.readOnly=true;
+    return;
   }
   pagosCampos.classList.remove('hidden-fields');
   switch(formaPago.value){
-    case 'Efectivo': inpEf.value=total.toFixed(2); inpTa.value='0.00'; inpEf.readOnly=false; inpTa.readOnly=true; break;
-    case 'Tarjeta':  inpEf.value='0.00'; inpTa.value=total.toFixed(2); inpEf.readOnly=true;  inpTa.readOnly=false; break;
-    case 'Mixto':    inpEf.readOnly=false; inpTa.readOnly=false; break;
+    case 'Efectivo':
+      inpEf.value=total.toFixed(2);
+      inpTa.value='0.00';
+      inpEf.readOnly=false;
+      inpTa.readOnly=true;
+      break;
+    case 'Tarjeta':
+      inpEf.value='0.00';
+      inpTa.value=total.toFixed(2);
+      inpEf.readOnly=true;
+      inpTa.readOnly=false;
+      break;
+    case 'Mixto':
+      inpEf.readOnly=false;
+      inpTa.readOnly=false;
+      break;
   }
 }
 formaPago.addEventListener('change', syncPagos);
@@ -728,25 +892,37 @@ function updateRowForRegalo(tr){
   const priceInput=tr.querySelector('.money');
   const cantInput =tr.querySelector('.cant');
   if(isRegalo()){
-    priceInput.value='0.00'; priceInput.readOnly=true;
-    cantInput.value='1';     cantInput.min='1'; cantInput.max='1'; cantInput.readOnly=true;
+    priceInput.value='0.00';
+    priceInput.readOnly=true;
+    cantInput.value='1';
+    cantInput.min='1';
+    cantInput.max='1';
+    cantInput.readOnly=true;
   }else{
-    priceInput.readOnly=false; cantInput.readOnly=false; cantInput.removeAttribute('max');
+    priceInput.readOnly=false;
+    cantInput.readOnly=false;
+    cantInput.removeAttribute('max');
   }
 }
-function applyRegaloModeToAllRows(){ tbody.querySelectorAll('tr').forEach(tr=>updateRowForRegalo(tr)); }
+function applyRegaloModeToAllRows(){
+  tbody.querySelectorAll('tr').forEach(tr=>updateRowForRegalo(tr));
+}
 chkRegalo.addEventListener('change', ()=>{
   esRegaloInp.value = isRegalo() ? '1' : '0';
   grpTagEquipo.classList.toggle('d-none', !isRegalo());
   if(isRegalo() && tbody.children.length>1){
     [...tbody.querySelectorAll('tr')].slice(1).forEach(tr=>tr.remove());
   }
-  applyRegaloModeToAllRows(); recalc();
+  applyRegaloModeToAllRows();
+  recalc();
 });
 
 /* -------- Validaciones -------- */
 function validarLineasBasico(){
-  if (tbody.children.length === 0){ alert('Agrega al menos una línea.'); return false; }
+  if (tbody.children.length === 0){
+    alert('Agrega al menos una línea.');
+    return false;
+  }
   let ok=true, msg='';
   tbody.querySelectorAll('tr').forEach(tr=>{
     const sel=tr.querySelector('.selProducto');
@@ -755,37 +931,60 @@ function validarLineasBasico(){
     const price=Number(tr.querySelector('.money').value||-1);
     const eleg = tr.dataset.elegible==='1';
     const solo = tr.dataset.soloregalo==='1';
-    if(!sel.value){ ok=false; msg='Selecciona el accesorio.'; return; }
-    if(cant<1 || cant>stock){ ok=false; msg='Cantidad inválida o mayor al stock.'; return; }
+    if(!sel.value){
+      ok=false; msg='Selecciona el accesorio.'; return;
+    }
+    if(cant<1 || cant>stock){
+      ok=false; msg='Cantidad inválida o mayor al stock.'; return;
+    }
     if(isRegalo()){
-      if(!eleg){ ok=false; msg='El accesorio no es elegible para regalo.'; return; }
-      if(price!==0){ ok=false; msg='En regalo, el precio debe ser $0.'; return; }
+      if(!eleg){
+        ok=false; msg='El accesorio no es elegible para regalo.'; return;
+      }
+      if(price!==0){
+        ok=false; msg='En regalo, el precio debe ser $0.'; return;
+      }
     }else{
-      if(solo){ ok=false; msg='Este accesorio es solo para regalo.'; return; }
-      if(price<0){ ok=false; msg='Precio inválido.'; return; }
+      if(solo){
+        ok=false; msg='Este accesorio es solo para regalo.'; return;
+      }
+      if(price<0){
+        ok=false; msg='Precio inválido.'; return;
+      }
     }
   });
-  if(!ok){ alert(msg||'Revisa las líneas.'); return false; }
+  if(!ok){
+    alert(msg||'Revisa las líneas.');
+    return false;
+  }
   if(!isRegalo()){
     const total=Number(lblTotal.textContent.replace(/[^0-9.]/g,''))||0;
-    const ef=Number(inpEf.value||0), ta=Number(inpTa.value||0);
-    if(formaPago.value==='Mixto' && (ef+ta).toFixed(2)!==total.toFixed(2)) { alert('En pago Mixto, Efectivo + Tarjeta debe igualar el Total.'); return false; }
-    if(formaPago.value==='Efectivo' && ef.toFixed(2)!==total.toFixed(2))    { alert('Efectivo debe igualar el Total.'); return false; }
-    if(formaPago.value==='Tarjeta'  && ta.toFixed(2)!==total.toFixed(2))    { alert('Tarjeta debe igualar el Total.'); return false; }
+    const ef=Number(inpEf.value||0);
+    const ta=Number(inpTa.value||0);
+    if(formaPago.value==='Mixto' && (ef+ta).toFixed(2)!==total.toFixed(2)) {
+      alert('En pago Mixto, Efectivo + Tarjeta debe igualar el Total.');
+      return false;
+    }
+    if(formaPago.value==='Efectivo' && ef.toFixed(2)!==total.toFixed(2))    {
+      alert('Efectivo debe igualar el Total.');
+      return false;
+    }
+    if(formaPago.value==='Tarjeta'  && ta.toFixed(2)!==total.toFixed(2))    {
+      alert('Tarjeta debe igualar el Total.');
+      return false;
+    }
   }
   return true;
 }
 
 /* -------- Armado de CONFIRMACIÓN -------- */
 function armarConfirmacion(){
-  // Encabezado
   cfModo.textContent = isRegalo() ? 'Modo: Regalo' : 'Modo: Venta normal';
   cfModo.className = 'badge ' + (isRegalo() ? 'bg-success-subtle text-success' : 'bg-primary-subtle text-primary');
   cfTag.textContent = (tagInput.value || '—');
   cfCliente.textContent = (nombreCliente.value || '—');
   cfTelefono.textContent = (telClienteInput.value || '—');
 
-  // Líneas
   cfBody.innerHTML = '';
   let total = 0;
   [...tbody.querySelectorAll('tr')].forEach(tr=>{
@@ -808,7 +1007,6 @@ function armarConfirmacion(){
   if (isRegalo()) total = 0;
   cfTotal.textContent = money(total);
 
-  // Pago / TAG equipo
   if (isRegalo()){
     if (cfPagoWrap) cfPagoWrap.classList.add('d-none');
     cfTagEqWrap.classList.remove('d-none');
@@ -830,7 +1028,7 @@ const frm=document.getElementById('frmVenta');
 frm.addEventListener('submit', async (ev)=>{
   ev.preventDefault();
 
-  // 💡 Validar cliente primero
+  // Cliente obligatorio
   const idCli = (idClienteInput.value || '').trim();
   let telCli  = (telClienteInput.value || '').trim().replace(/\D+/g,'');
   if (!idCli){
@@ -841,18 +1039,18 @@ frm.addEventListener('submit', async (ev)=>{
     alert('El teléfono del cliente debe tener exactamente 10 dígitos.');
     return;
   }
-  // normalizamos tel
   telClienteInput.value = telCli;
 
-  // Líneas / pagos
   if(!validarLineasBasico()) return;
 
-  // Si es regalo, validación backend previa (TAG equipo)
   if(isRegalo()){
     const tr = tbody.querySelector('tr');
     const idProductoAcc = Number(tr.querySelector('.selProducto').value||0);
     const tagEq = (tagEquipo.value||'').trim();
-    if(tagEq===''){ alert('Indica el TAG de la venta de equipo.'); return; }
+    if(tagEq===''){
+      alert('Indica el TAG de la venta de equipo.');
+      return;
+    }
     try{
       const q = new URLSearchParams({ tag_equipo: tagEq, id_producto_accesorio: String(idProductoAcc) });
       const data = await fetchJSON('validar_regalo.php', {
@@ -860,44 +1058,65 @@ frm.addEventListener('submit', async (ev)=>{
         headers:{'Content-Type':'application/x-www-form-urlencoded'},
         body: q.toString()
       });
-      if(!data.ok){ alert(data.msg || 'No fue posible validar el regalo.'); return; }
+      if(!data.ok){
+        alert(data.msg || 'No fue posible validar el regalo.');
+        return;
+      }
     }catch(e){
-      alert('Error validando el regalo: ' + (e?.message||e)); return;
+      alert('Error validando el regalo: ' + (e?.message||e));
+      return;
     }
   }
 
-  // Mostrar confirmación previa
   armarConfirmacion();
-  if (!confirmModal) { confirmModal = new bootstrap.Modal(document.getElementById('confirmModal')); }
+  if (!confirmModal) {
+    confirmModal = new bootstrap.Modal(document.getElementById('confirmModal'));
+  }
   confirmModal.show();
 });
 
-// Botón Confirmar del modal
 document.getElementById('btnConfirmarVenta').addEventListener('click', async ()=>{
-  // Cierra modal y envía definitivamente
   confirmModal?.hide();
-  const btn=frm.querySelector('button[type="submit"]'); btn.disabled=true; btn.innerText='Guardando…';
+  const btn=frm.querySelector('button[type="submit"]');
+  btn.disabled=true;
+  btn.innerText='Guardando…';
   try{
     const fd=new FormData(frm);
     const resp=await fetch(frm.action, { method:'POST', body:fd, redirect:'follow' });
     const finalURL=resp.url||'';
     if(resp.ok && finalURL.includes('venta_accesorios_ticket.php')){
-      const frame=document.getElementById('ticketFrame'); frame.src=finalURL;
-      const modal=new bootstrap.Modal(document.getElementById('ticketModal')); modal.show();
-      frm.reset(); tbody.innerHTML=''; addRow(); recalc(); esRegaloInp.value='0'; grpTagEquipo.classList.add('d-none');
+      const frame=document.getElementById('ticketFrame');
+      frame.src=finalURL;
+      const modal=new bootstrap.Modal(document.getElementById('ticketModal'));
+      modal.show();
+      frm.reset();
+      tbody.innerHTML='';
+      addRow();
+      recalc();
+      esRegaloInp.value='0';
+      grpTagEquipo.classList.add('d-none');
       limpiarCliente();
     }else{
-      const txt=await resp.text(); alert('No se pudo completar la venta:\n'+txt);
+      const txt=await resp.text();
+      alert('No se pudo completar la venta:\n'+txt);
     }
-  }catch(e){ alert('Error de red: ' + (e?.message||e)); }
-  finally{ btn.disabled=false; btn.innerText='Guardar venta'; }
+  }catch(e){
+    alert('Error de red: ' + (e?.message||e));
+  }finally{
+    btn.disabled=false;
+    btn.innerText='Guardar venta';
+  }
 });
 
 document.getElementById('btnPrintTicket').addEventListener('click', ()=>{
-  const f=document.getElementById('ticketFrame'); try{ f.contentWindow.focus(); f.contentWindow.print(); }catch(e){}
+  const f=document.getElementById('ticketFrame');
+  try{
+    f.contentWindow.focus();
+    f.contentWindow.print();
+  }catch(e){}
 });
 
-/* -------- Modal de clientes: eventos -------- */
+/* -------- Modal de clientes -------- */
 document.getElementById('btn_open_modal_clientes').addEventListener('click', ()=>{
   const inpBuscar = document.getElementById('cliente_buscar_q');
   const tbodyCli  = document.getElementById('tbody_clientes');
@@ -1023,8 +1242,8 @@ document.getElementById('btn_guardar_nuevo_cliente').addEventListener('click', a
 
 /* Estado inicial */
 function init(){
-  addRow(); 
-  recalc(); 
+  addRow();
+  recalc();
   limpiarCliente();
 }
 init();

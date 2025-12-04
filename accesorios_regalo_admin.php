@@ -1,7 +1,6 @@
 <?php
 // accesorios_regalo_admin.php — Admin/Logística: modelos elegibles para REGALO
-// + Switch individual para permitir/ bloquear VENTA (campo booleano `vender`).
-// Endpoints AJAX al inicio para evitar "headers already sent".
+// Ahora trabaja por codigo_producto (modelo de accesorio), no por id de pieza.
 
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 if (!isset($_SESSION['id_usuario'])) { header('Location: index.php'); exit(); }
@@ -28,18 +27,42 @@ function column_exists(mysqli $conn, string $table, string $col): bool {
   $rs = $conn->query("SHOW COLUMNS FROM `{$t}` LIKE '{$c}'");
   return $rs && $rs->num_rows > 0;
 }
+function index_exists(mysqli $conn, string $table, string $index): bool {
+  $t = $conn->real_escape_string($table);
+  $i = $conn->real_escape_string($index);
+  $rs = $conn->query("SHOW INDEX FROM `{$t}` WHERE Key_name = '{$i}'");
+  return $rs && $rs->num_rows > 0;
+}
 
-/* ===== DDL SEGURA ===== */
+/* ===== DDL SEGURA: tabla por codigo_producto ===== */
 $conn->query("CREATE TABLE IF NOT EXISTS accesorios_regalo_modelos (
   id INT AUTO_INCREMENT PRIMARY KEY,
-  id_producto INT NOT NULL,
+  id_producto INT NULL,
+  codigo_producto VARCHAR(100) NULL,
   activo TINYINT(1) NOT NULL DEFAULT 1,
   codigos_equipos TEXT NULL,
   vender TINYINT(1) NOT NULL DEFAULT 1,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  UNIQUE KEY uniq_id_producto (id_producto)
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
+
+if (!column_exists($conn, 'accesorios_regalo_modelos', 'codigo_producto')) {
+  $conn->query("ALTER TABLE accesorios_regalo_modelos ADD COLUMN codigo_producto VARCHAR(100) NULL AFTER id_producto");
+}
+
+/// backfill básico (por si viene de una versión previa)
+@$conn->query("
+  UPDATE accesorios_regalo_modelos arm
+  JOIN productos p ON p.id = arm.id_producto
+  SET arm.codigo_producto = p.codigo_producto
+  WHERE (arm.codigo_producto IS NULL OR arm.codigo_producto = '')
+    AND p.codigo_producto IS NOT NULL AND p.codigo_producto <> ''
+");
+
+/// índice único por código (una promo por modelo de accesorio) — SOLO si no existe
+if (!index_exists($conn, 'accesorios_regalo_modelos', 'uniq_codigo_producto')) {
+  $conn->query("ALTER TABLE accesorios_regalo_modelos ADD UNIQUE KEY uniq_codigo_producto (codigo_producto)");
+}
 
 if (!column_exists($conn, 'accesorios_regalo_modelos', 'codigos_equipos')) {
   $conn->query("ALTER TABLE accesorios_regalo_modelos ADD COLUMN codigos_equipos TEXT NULL AFTER activo");
@@ -51,6 +74,10 @@ if (!column_exists($conn, 'accesorios_regalo_modelos', 'vender')) {
 /* ===== Endpoints AJAX ===== */
 $action = $_GET['action'] ?? $_POST['action'] ?? null;
 
+/**
+ * search_products:
+ *   devuelve modelos de ACCESORIOS (o sin IMEI) agrupados por codigo_producto.
+ */
 if ($action === 'search_products') {
   $q = trim($_GET['q'] ?? ''); if ($q === '') bad('Término vacío');
 
@@ -58,105 +85,171 @@ if ($action === 'search_products') {
   $hasModelo = column_exists($conn, 'productos', 'modelo');
   $hasColor  = column_exists($conn, 'productos', 'color');
   $hasTipo   = column_exists($conn, 'productos', 'tipo_producto');
-  $hasImei1  = column_exists($conn, 'productos', 'imei1');
-  $hasImei2  = column_exists($conn, 'productos', 'imei2');
 
+  // Para que ONLY_FULL_GROUP_BY no se enoje, usamos agregados (MAX)
   $nombreExprParts = [];
-  if ($hasMarca)  $nombreExprParts[] = "p.marca";
-  if ($hasModelo) $nombreExprParts[] = "p.modelo";
-  if ($hasColor)  $nombreExprParts[] = "COALESCE(p.color,'')";
+  if ($hasMarca) {
+    $nombreExprParts[] = "MAX(p.marca)";
+  }
+  if ($hasModelo) {
+    $nombreExprParts[] = "MAX(p.modelo)";
+  }
+  if ($hasColor) {
+    $nombreExprParts[] = "MAX(COALESCE(p.color,''))";
+  }
+
   $nombreExpr = empty($nombreExprParts)
-    ? "CONCAT('Producto #', p.id)"
+    ? "CONCAT('Producto #', MIN(p.id))"
     : "TRIM(CONCAT(" . implode(", ' ', ", $nombreExprParts) . "))";
 
   $filtrosTipo = [];
-  if ($hasTipo) { $filtrosTipo[] = "p.tipo_producto='Accesorio'"; }
-  if ($hasImei1 && $hasImei2) {
-    $filtrosTipo[] = "(COALESCE(p.imei1,'')='' AND COALESCE(p.imei2,'')='')";
-  } elseif ($hasImei1) {
-    $filtrosTipo[] = "(COALESCE(p.imei1,'')='')";
-  }
-  $whereTipo = empty($filtrosTipo) ? "1=1" : "(" . implode(" OR ", $filtrosTipo) . ")";
+  if ($hasTipo) { $filtrosTipo[] = "UPPER(p.tipo_producto) IN ('ACCESORIO','ACCESORIOS')"; }
+  // Permitimos también los que no tienen IMEI (accesorios sin serie)
+  $filtrosTipo[] = "(COALESCE(p.imei1,'')='' AND COALESCE(p.imei2,'')='')";
+  $whereTipo = "(" . implode(" OR ", $filtrosTipo) . ")";
 
   $likes = [];
   if ($hasMarca)  $likes[] = "p.marca  LIKE CONVERT(? USING utf8mb4)";
   if ($hasModelo) $likes[] = "p.modelo LIKE CONVERT(? USING utf8mb4)";
   if ($hasColor)  $likes[] = "p.color  LIKE CONVERT(? USING utf8mb4)";
 
+  // siempre trabajamos por codigo_producto
   if (empty($likes)) {
-    $sql = "SELECT p.id AS id_producto, $nombreExpr AS nombre
+    $sql = "SELECT DISTINCT
+              p.codigo_producto AS id_producto,
+              $nombreExpr AS nombre
             FROM productos p
-            WHERE $whereTipo AND p.id = ?
+            WHERE $whereTipo
+              AND p.codigo_producto IS NOT NULL
+              AND p.codigo_producto <> ''
+              AND p.codigo_producto = ?
             ORDER BY nombre ASC
             LIMIT 25";
-    $st = $conn->prepare($sql); if (!$st) bad('Error SQL (prep/fallback id): '.$conn->error);
-    $idExacto = (int)$q; $st->bind_param('i', $idExacto);
+    $st = $conn->prepare($sql);
+    if (!$st) bad('Error SQL (prep/fallback): '.$conn->error);
+    $st->bind_param('s', $q);
   } else {
-    $sql = "SELECT p.id AS id_producto, $nombreExpr AS nombre
+    $sql = "SELECT
+              p.codigo_producto AS id_producto,
+              $nombreExpr AS nombre
             FROM productos p
-            WHERE $whereTipo AND (" . implode(" OR ", $likes) . ")
+            WHERE $whereTipo
+              AND p.codigo_producto IS NOT NULL
+              AND p.codigo_producto <> ''
+              AND (" . implode(" OR ", $likes) . ")
+            GROUP BY p.codigo_producto
             ORDER BY nombre ASC
             LIMIT 25";
-    $st = $conn->prepare($sql); if (!$st) bad('Error SQL (prepare): '.$conn->error);
-    $qLike = '%'.$q.'%'; $binds = array_fill(0, count($likes), $qLike); $types = str_repeat('s', count($binds));
+    $st = $conn->prepare($sql);
+    if (!$st) bad('Error SQL (prepare): '.$conn->error);
+    $qLike = '%'.$q.'%';
+    $binds = array_fill(0, count($likes), $qLike);
+    $types = str_repeat('s', count($binds));
     $st->bind_param($types, ...$binds);
   }
 
   if (!$st->execute()) bad('Error SQL (exec): '.$st->error);
   $rs = $st->get_result(); if (!$rs) bad('Error SQL (result): '.$st->error);
-  $items = $rs->fetch_all(MYSQLI_ASSOC); ok(['items'=>$items]);
+  $items = $rs->fetch_all(MYSQLI_ASSOC);
+  ok(['items'=>$items]);
 }
 
+/**
+ * add_or_activate:
+ *   inserta / reactiva por codigo_producto (NO por id_producto).
+ */
 if ($action === 'add_or_activate') {
-  $pid = (int)($_POST['id_producto'] ?? 0);
-  if ($pid <= 0) bad('Producto inválido');
-  $st = $conn->prepare("INSERT INTO accesorios_regalo_modelos (id_producto, activo)
+  $codigo = trim($_POST['id_producto'] ?? '');
+  if ($codigo === '') bad('Código de producto inválido');
+
+  $st = $conn->prepare("INSERT INTO accesorios_regalo_modelos (codigo_producto, activo)
                         VALUES (?,1)
                         ON DUPLICATE KEY UPDATE activo=VALUES(activo), updated_at=CURRENT_TIMESTAMP");
   if (!$st) bad('Error preparando alta: '.$conn->error);
-  $st->bind_param('i', $pid); if (!$st->execute()) bad('Error al guardar: '.$st->error); ok();
+  $st->bind_param('s', $codigo);
+  if (!$st->execute()) bad('Error al guardar: '.$st->error);
+  ok();
 }
 
-if ($action === 'toggle') { // Activa/Inactiva como REGALO
-  $pid = (int)($_POST['id_producto'] ?? 0);
-  $val = (int)($_POST['activo'] ?? -1);
-  if ($pid<=0 || ($val!==0 && $val!==1)) bad('Parámetros inválidos');
-  $st = $conn->prepare("UPDATE accesorios_regalo_modelos SET activo=?, updated_at=CURRENT_TIMESTAMP WHERE id_producto=?");
+/**
+ * toggle: activa/inactiva como REGALO por codigo_producto
+ */
+if ($action === 'toggle') {
+  $codigo = trim($_POST['id_producto'] ?? '');
+  $val    = isset($_POST['activo']) ? (int)$_POST['activo'] : -1;
+  if ($codigo === '' || ($val !== 0 && $val !== 1)) bad('Parámetros inválidos');
+
+  $st = $conn->prepare("UPDATE accesorios_regalo_modelos
+                        SET activo=?, updated_at=CURRENT_TIMESTAMP
+                        WHERE codigo_producto=?");
   if (!$st) bad('Error preparando toggle: '.$conn->error);
-  $st->bind_param('ii', $val, $pid); if (!$st->execute()) bad('Error al actualizar: '.$st->error); ok();
+  $st->bind_param('is', $val, $codigo);
+  if (!$st->execute()) bad('Error al actualizar: '.$st->error);
+  ok();
 }
 
-if ($action === 'toggle_vender') { // NUEVO: permite/ bloquea VENTA
-  $pid = (int)($_POST['id_producto'] ?? 0);
-  $val = (int)($_POST['vender'] ?? -1);
-  if ($pid<=0 || ($val!==0 && $val!==1)) bad('Parámetros inválidos');
-  $st = $conn->prepare("UPDATE accesorios_regalo_modelos SET vender=?, updated_at=CURRENT_TIMESTAMP WHERE id_producto=?");
+/**
+ * toggle_vender: permite / bloquea VENTA normal por codigo_producto
+ */
+if ($action === 'toggle_vender') {
+  $codigo = trim($_POST['id_producto'] ?? '');
+  $val    = isset($_POST['vender']) ? (int)$_POST['vender'] : -1;
+  if ($codigo === '' || ($val !== 0 && $val !== 1)) bad('Parámetros inválidos');
+
+  $st = $conn->prepare("UPDATE accesorios_regalo_modelos
+                        SET vender=?, updated_at=CURRENT_TIMESTAMP
+                        WHERE codigo_producto=?");
   if (!$st) bad('Error preparando toggle_vender: '.$conn->error);
-  $st->bind_param('ii', $val, $pid); if (!$st->execute()) bad('Error al actualizar: '.$st->error); ok();
+  $st->bind_param('is', $val, $codigo);
+  if (!$st->execute()) bad('Error al actualizar: '.$st->error);
+  ok();
 }
 
+/**
+ * remove: elimina por codigo_producto
+ */
 if ($action === 'remove') {
-  $pid = (int)($_POST['id_producto'] ?? 0);
-  if ($pid<=0) bad('Producto inválido');
-  $st = $conn->prepare("DELETE FROM accesorios_regalo_modelos WHERE id_producto=?");
+  $codigo = trim($_POST['id_producto'] ?? '');
+  if ($codigo === '') bad('Código inválido');
+  $st = $conn->prepare("DELETE FROM accesorios_regalo_modelos WHERE codigo_producto=?");
   if (!$st) bad('Error preparando eliminación: '.$conn->error);
-  $st->bind_param('i', $pid); if (!$st->execute()) bad('Error al eliminar: '.$st->error); ok();
+  $st->bind_param('s', $codigo);
+  if (!$st->execute()) bad('Error al eliminar: '.$st->error);
+  ok();
 }
 
+/**
+ * list: listado general, agrupado por codigo_producto
+ */
 if ($action === 'list') {
   $only = isset($_GET['solo_activos']) ? (int)$_GET['solo_activos'] : -1;
   $where = ($only === 1) ? " WHERE arm.activo=1 " : "";
-  $sql = "SELECT arm.id_producto, arm.activo, arm.codigos_equipos, arm.vender,
-                 TRIM(CONCAT(COALESCE(p.marca,''),' ',COALESCE(p.modelo,''),' ',COALESCE(p.color,''))) AS nombre
+
+  $sql = "SELECT
+            arm.codigo_producto AS id_producto,
+            arm.activo,
+            arm.codigos_equipos,
+            arm.vender,
+            TRIM(CONCAT(
+              COALESCE(MAX(p.marca),''), ' ',
+              COALESCE(MAX(p.modelo),''), ' ',
+              COALESCE(MAX(p.color),'')
+            )) AS nombre
           FROM accesorios_regalo_modelos arm
-          LEFT JOIN productos p ON p.id = arm.id_producto
+          LEFT JOIN productos p
+            ON p.codigo_producto COLLATE utf8mb4_unicode_ci
+             = arm.codigo_producto COLLATE utf8mb4_unicode_ci
           $where
+          GROUP BY arm.codigo_producto, arm.activo, arm.codigos_equipos, arm.vender
           ORDER BY arm.activo DESC, nombre ASC";
+
   $rs = $conn->query($sql);
   $rows = $rs ? $rs->fetch_all(MYSQLI_ASSOC) : [];
+
   foreach ($rows as &$r){
     $raw = trim((string)($r['codigos_equipos'] ?? ''));
-    $cnt = 0; if ($raw !== ''){
+    $cnt = 0;
+    if ($raw !== ''){
       if (preg_match('/^\s*\[/', $raw)) {
         $arr = json_decode($raw, true);
         if (is_array($arr)) $cnt = count(array_filter($arr, fn($x)=>trim((string)$x) !== ''));
@@ -171,18 +264,24 @@ if ($action === 'list') {
   ok(['rows'=>$rows]);
 }
 
+/**
+ * get_codes / save_codes: usan codigo_producto
+ */
 if ($action === 'get_codes') {
-  $pid = (int)($_GET['id_producto'] ?? 0); if ($pid<=0) bad('Producto inválido');
-  $st = $conn->prepare("SELECT codigos_equipos FROM accesorios_regalo_modelos WHERE id_producto=? LIMIT 1");
+  $codigo = trim($_GET['id_producto'] ?? '');
+  if ($codigo === '') bad('Código inválido');
+  $st = $conn->prepare("SELECT codigos_equipos FROM accesorios_regalo_modelos WHERE codigo_producto=? LIMIT 1");
   if (!$st) bad('Error preparando lectura: '.$conn->error);
-  $st->bind_param('i', $pid); if (!$st->execute()) bad('Error al leer: '.$st->error);
-  $row = $st->get_result()->fetch_assoc(); ok(['codigos' => (string)($row['codigos_equipos'] ?? '')]);
+  $st->bind_param('s', $codigo);
+  if (!$st->execute()) bad('Error al leer: '.$st->error);
+  $row = $st->get_result()->fetch_assoc();
+  ok(['codigos' => (string)($row['codigos_equipos'] ?? '')]);
 }
 
 if ($action === 'save_codes') {
-  $pid = (int)($_POST['id_producto'] ?? 0);
-  $raw = (string)($_POST['codigos'] ?? '');
-  if ($pid<=0) bad('Producto inválido');
+  $codigo = trim($_POST['id_producto'] ?? '');
+  $raw    = (string)($_POST['codigos'] ?? '');
+  if ($codigo === '') bad('Código inválido');
 
   $txt = trim($raw);
   if ($txt !== '') {
@@ -193,25 +292,42 @@ if ($action === 'save_codes') {
     } else {
       $txt = str_replace(["\r\n","\r"], "\n", $txt);
       $parts = preg_split('/[\n,]+/', $txt);
-      $parts = array_values(array_unique(array_filter(array_map(fn($x)=>trim($x), $parts), fn($x)=>$x!=='')));
+      $parts = array_values(array_unique(array_filter(array_map('trim', $parts), fn($x)=>$x!=='')));
       $txt = implode(',', $parts);
     }
     if (strlen($txt) > 65534) bad('La lista es demasiado grande.');
   }
 
-  $st = $conn->prepare("UPDATE accesorios_regalo_modelos SET codigos_equipos=?, updated_at=CURRENT_TIMESTAMP WHERE id_producto=?");
+  $st = $conn->prepare("UPDATE accesorios_regalo_modelos
+                        SET codigos_equipos=?, updated_at=CURRENT_TIMESTAMP
+                        WHERE codigo_producto=?");
   if (!$st) bad('Error preparando guardado: '.$conn->error);
-  $st->bind_param('si', $txt, $pid); if (!$st->execute()) bad('Error al guardar: '.$st->error); ok();
+  $st->bind_param('ss', $txt, $codigo);
+  if (!$st->execute()) bad('Error al guardar: '.$st->error);
+  ok();
 }
 
 /* ===== Render HTML (no AJAX) ===== */
 require_once __DIR__.'/navbar.php';
 $primerListado = [];
-$init = $conn->query("SELECT arm.id_producto, arm.activo, arm.codigos_equipos, arm.vender,
-                             TRIM(CONCAT(COALESCE(p.marca,''),' ',COALESCE(p.modelo,''),' ',COALESCE(p.color,''))) AS nombre
-                      FROM accesorios_regalo_modelos arm
-                      LEFT JOIN productos p ON p.id = arm.id_producto
-                      ORDER BY arm.activo DESC, nombre ASC");
+$init = $conn->query("
+  SELECT
+    arm.codigo_producto AS id_producto,
+    arm.activo,
+    arm.codigos_equipos,
+    arm.vender,
+    TRIM(CONCAT(
+      COALESCE(MAX(p.marca),''), ' ',
+      COALESCE(MAX(p.modelo),''), ' ',
+      COALESCE(MAX(p.color),'')
+    )) AS nombre
+  FROM accesorios_regalo_modelos arm
+  LEFT JOIN productos p
+    ON p.codigo_producto COLLATE utf8mb4_unicode_ci
+     = arm.codigo_producto COLLATE utf8mb4_unicode_ci
+  GROUP BY arm.codigo_producto, arm.activo, arm.codigos_equipos, arm.vender
+  ORDER BY arm.activo DESC, nombre ASC
+");
 if ($init) { $primerListado = $init->fetch_all(MYSQLI_ASSOC); }
 ?>
 <!doctype html>
@@ -226,12 +342,9 @@ if ($init) { $primerListado = $init->fetch_all(MYSQLI_ASSOC); }
     .card-ghost{backdrop-filter:saturate(140%) blur(6px); border:1px solid rgba(0,0,0,.06); box-shadow:0 10px 25px rgba(0,0,0,.06)}
     .badge-soft{background:#0d6efd14;border:1px solid #0d6efd2e}
     .muted{color:#6c757d}
-    .portal{position:absolute; z-index:1000; background:#fff; border:1px solid #dee2e6; border-radius:.5rem; box-shadow:0 12px 24px rgba(0,0,0,.12); display:none; max-height:260px; overflow:auto;}
+    .portal{position:static; z-index:1000; background:#fff; border:1px solid #dee2e6; border-radius:.5rem; box-shadow:0 12px 24px rgba(0,0,0,.12); display:none; max-height:260px; overflow:auto;}
     .portal-item{padding:.45rem .6rem; cursor:pointer}
     .portal-item:hover{background:#0d6efd10}
-    .status-dot{display:inline-block; width:.6rem; height:.6rem; border-radius:50%; margin-right:.35rem}
-    .dot-on{background:#16a34a}
-    .dot-off{background:#dc2626}
     .table-sticky thead th{position:sticky; top:0; background:#fff; z-index:1}
     .w-35{width:32%}
     .w-15{width:15%}
@@ -249,13 +362,15 @@ if ($init) { $primerListado = $init->fetch_all(MYSQLI_ASSOC); }
   </div>
 
   <div class="card card-ghost p-3 mb-3">
-    <h5 class="mb-3">Agregar accesorio a la lista</h5>
+    <h5 class="mb-3">Agregar accesorio a la lista (por código de producto)</h5>
     <div class="row g-2 align-items-end position-relative" id="searchRow">
       <div class="col-md-8 position-relative">
         <label class="form-label">Buscar accesorio (marca, modelo o color)</label>
         <input type="text" id="q" class="form-control" autocomplete="off" placeholder="Ej. 'cable lightning'">
         <div id="portal" class="portal"></div>
-        <div class="form-text">Solo se listan productos tipo <b>Accesorio</b> o sin IMEI.</div>
+        <div class="form-text">
+          Se guarda una sola vez por <b>codigo_producto</b>, aunque existan muchas piezas con serie distinta.
+        </div>
       </div>
       <div class="col-md-2">
         <button id="btnAdd" class="btn btn-primary w-100" type="button" disabled>Agregar</button>
@@ -273,13 +388,13 @@ if ($init) { $primerListado = $init->fetch_all(MYSQLI_ASSOC); }
   <div class="card card-ghost p-3">
     <div class="d-flex align-items-center justify-content-between mb-2">
       <h5 class="mb-0">Listado</h5>
-      <small class="muted">Activa/desactiva REGALO, bloquea/permite VENTA, quita o edita códigos.</small>
+      <small class="muted">Activa/desactiva REGALO, bloquea/permite VENTA, quita o edita códigos de equipos.</small>
     </div>
     <div class="table-responsive">
       <table class="table table-sm align-middle table-sticky" id="tbl">
         <thead class="table-light">
           <tr>
-            <th class="w-35">Accesorio</th>
+            <th class="w-35">Accesorio (modelo)</th>
             <th class="w-15">Regalo</th>
             <th class="w-15">Vender</th>
             <th class="w-15 text-center">Códigos</th>
@@ -291,7 +406,7 @@ if ($init) { $primerListado = $init->fetch_all(MYSQLI_ASSOC); }
           <?php if (empty($primerListado)): ?>
             <tr><td colspan="6" class="text-center text-muted">Sin modelos configurados todavía.</td></tr>
           <?php else: foreach ($primerListado as $r):
-            $nombre = trim($r['nombre']) !== '' ? $r['nombre'] : ('Prod #'.(int)$r['id_producto']);
+            $nombre = trim($r['nombre']) !== '' ? $r['nombre'] : ('Código '.h($r['id_producto']));
             $raw = trim((string)($r['codigos_equipos'] ?? ''));
             $cnt = 0;
             if ($raw !== '') {
@@ -305,8 +420,8 @@ if ($init) { $primerListado = $init->fetch_all(MYSQLI_ASSOC); }
             }
             $vender = (int)($r['vender'] ?? 1);
           ?>
-            <tr data-id="<?= (int)$r['id_producto'] ?>">
-              <td><?= h($nombre) ?></td>
+            <tr data-id="<?= h($r['id_producto']) ?>">
+              <td><?= h($nombre) ?><br><small class="text-muted">Código: <?= h($r['id_producto']) ?></small></td>
               <td>
                 <?php if ((int)$r['activo']===1): ?>
                   <button class="btn btn-outline-warning btn-sm btnToggle" data-val="0">Desactivar</button>
@@ -345,7 +460,7 @@ if ($init) { $primerListado = $init->fetch_all(MYSQLI_ASSOC); }
       </div>
       <div class="modal-body">
         <p class="mb-2">
-          Ingresa los <b>codigo_producto</b> de equipos que habilitan el regalo para este accesorio.
+          Ingresa los <b>codigo_producto</b> de los equipos que habilitan el regalo para este accesorio.
           Puedes usar <b>CSV</b> (separados por coma) o <b>JSON</b> (<code>["A12-128","SM-A15"]</code>),
           o uno por línea.
         </p>
@@ -376,11 +491,11 @@ async function jfetch(url, opt){
 function rowHTML(r){
   const activo = Number(r.activo)===1;
   const vender = Number(r.vender)===1;
-  const nombre = (r.nombre && r.nombre.trim()) ? r.nombre : ('Prod #'+r.id_producto);
+  const nombre = (r.nombre && r.nombre.trim()) ? r.nombre : ('Código '+r.id_producto);
   const cnt = Number(r.codes_count||0);
   return `
     <tr data-id="${r.id_producto}">
-      <td>${nombre}</td>
+      <td>${nombre}<br><small class="text-muted">Código: ${r.id_producto}</small></td>
       <td>
         ${activo
           ? '<button class="btn btn-outline-warning btn-sm btnToggle" data-val="0">Desactivar</button>'
@@ -406,7 +521,22 @@ function rowHTML(r){
 const q = $('#q'), portal = $('#portal'), btnAdd = $('#btnAdd'), selHidden = $('#selIdProducto');
 let debounceTimer = null;
 function closePortal(){ portal.style.display='none'; }
-function openPortal(){ const r = q.getBoundingClientRect(); portal.style.minWidth = r.width+'px'; portal.style.left = r.left+'px'; portal.style.top = (r.bottom + window.scrollY)+'px'; portal.style.display='block'; }
+const searchRow = document.getElementById('searchRow');
+
+function openPortal(){
+  const rInput = q.getBoundingClientRect();       // posición del input en la ventana
+  const rRow   = searchRow.getBoundingClientRect(); // posición del contenedor
+
+  // Ancho igual al input
+  portal.style.minWidth = rInput.width + 'px';
+
+  // Coordenadas relativas al contenedor (#searchRow)
+  portal.style.left = (rInput.left - rRow.left) + 'px';
+  portal.style.top  = (rInput.bottom - rRow.top) + 'px';
+
+  portal.style.display = 'block';
+}
+
 q.addEventListener('input', ()=>{
   selHidden.value=''; btnAdd.disabled = true;
   const term = q.value.trim();
@@ -417,7 +547,11 @@ q.addEventListener('input', ()=>{
       const res = await jfetch('accesorios_regalo_admin.php?action=search_products&q='+encodeURIComponent(term));
       const items = res.items || [];
       if (items.length===0){ portal.innerHTML = '<div class="portal-item text-muted">Sin coincidencias</div>'; openPortal(); return; }
-      portal.innerHTML = items.map(it => `<div class="portal-item" data-id="${it.id_producto}">${it.nombre}</div>`).join('');
+      portal.innerHTML = items.map(it => `
+        <div class="portal-item" data-id="${it.id_producto}">
+          ${it.nombre || it.id_producto}
+          <br><small class="text-muted">Código: ${it.id_producto}</small>
+        </div>`).join('');
       openPortal();
     }catch(e){ portal.innerHTML = `<div class="portal-item text-danger">${e.message || 'Error en búsqueda'}</div>`; openPortal(); }
   }, 250);
@@ -425,16 +559,25 @@ q.addEventListener('input', ()=>{
 document.addEventListener('click', (ev)=>{
   if (portal.contains(ev.target)){
     const it = ev.target.closest('.portal-item[data-id]');
-    if (it){ selHidden.value = it.dataset.id; q.value = it.textContent.trim(); btnAdd.disabled = false; closePortal(); }
+    if (it){
+      selHidden.value = it.dataset.id;
+      q.value = it.textContent.trim();
+      btnAdd.disabled = false;
+      closePortal();
+    }
   } else if (ev.target !== q){ closePortal(); }
 });
 btnAdd.addEventListener('click', async ()=>{
-  const idp = Number(selHidden.value||0); if (!idp){ alert('Selecciona un accesorio de la lista.'); return; }
+  const idp = (selHidden.value || '').trim();
+  if (!idp){ alert('Selecciona un accesorio de la lista.'); return; }
   btnAdd.disabled = true;
   try{
-    const fd = new FormData(); fd.append('action','add_or_activate'); fd.append('id_producto', String(idp));
+    const fd = new FormData();
+    fd.append('action','add_or_activate');
+    fd.append('id_producto', idp); // aquí va codigo_producto
     const res = await jfetch('accesorios_regalo_admin.php', { method:'POST', body: fd });
-    if (!res.ok) throw new Error(res.error||'No se pudo agregar'); q.value=''; selHidden.value=''; await reloadList();
+    if (!res.ok) throw new Error(res.error||'No se pudo agregar');
+    q.value=''; selHidden.value=''; await reloadList();
   }catch(e){ alert(e.message); }
   finally{ btnAdd.disabled = false; }
 });
@@ -445,18 +588,27 @@ const tbody = document.querySelector('#tbody');
 async function reloadList(){
   try{
     const url = 'accesorios_regalo_admin.php?action=list' + (cbSoloActivos.checked ? '&solo_activos=1' : '');
-    const res = await jfetch(url); const rows = res.rows || [];
-    if (rows.length===0){ tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">Sin modelos configurados.</td></tr>'; return; }
+    const res = await jfetch(url);
+    const rows = res.rows || [];
+    if (rows.length===0){
+      tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">Sin modelos configurados.</td></tr>';
+      return;
+    }
     tbody.innerHTML = rows.map(rowHTML).join('');
   }catch(e){ alert('Error cargando listado: '+e.message); }
 }
 cbSoloActivos.addEventListener('change', reloadList);
 
 // Modal de códigos
-let EDIT_ID = 0; const codesModalEl = document.getElementById('codesModal'); let codesModal = null;
-const codesText = document.getElementById('codesText'); const codesCount = document.getElementById('codesCount');
-const btnSaveCodes = document.getElementById('btnSaveCodes'); // ← DEFINIDO UNA SOLA VEZ
-const btnToCSV = document.getElementById('btnToCSV'); const btnToJSON = document.getElementById('btnToJSON');
+let EDIT_ID = '';
+const codesModalEl = document.getElementById('codesModal');
+let codesModal = null;
+const codesText  = document.getElementById('codesText');
+const codesCount = document.getElementById('codesCount');
+const btnSaveCodes = document.getElementById('btnSaveCodes');
+const btnToCSV  = document.getElementById('btnToCSV');
+const btnToJSON = document.getElementById('btnToJSON');
+
 function countCodes(txt){
   txt = (txt||'').trim(); if (txt==='') return 0;
   if (/^\s*\[/.test(txt)){
@@ -485,11 +637,15 @@ btnToJSON.addEventListener('click', ()=>{
 });
 
 tbody.addEventListener('click', async (e)=>{
-  const tr = e.target.closest('tr[data-id]'); if (!tr) return; const idp = Number(tr.dataset.id||0);
+  const tr = e.target.closest('tr[data-id]'); if (!tr) return;
+  const idp = (tr.dataset.id || '').trim();
 
-  if (e.target.classList.contains('btnToggle')){ // toggle regalo
-    const val = Number(e.target.dataset.val||0); const fd = new FormData();
-    fd.append('action','toggle'); fd.append('id_producto', String(idp)); fd.append('activo', String(val));
+  if (e.target.classList.contains('btnToggle')){
+    const val = Number(e.target.dataset.val||0);
+    const fd = new FormData();
+    fd.append('action','toggle');
+    fd.append('id_producto', idp);
+    fd.append('activo', String(val));
     try{
       const res = await jfetch('accesorios_regalo_admin.php', { method:'POST', body: fd });
       if (!res.ok) throw new Error(res.error||'No se pudo cambiar el estado');
@@ -497,9 +653,12 @@ tbody.addEventListener('click', async (e)=>{
     } catch(err){ alert(err.message); }
     return;
   }
-  if (e.target.classList.contains('btnRemove')){ // quitar
-    if (!confirm('¿Quitar este accesorio de la lista de regalo?')) return;
-    const fd = new FormData(); fd.append('action','remove'); fd.append('id_producto', String(idp));
+
+  if (e.target.classList.contains('btnRemove')){
+    if (!confirm('¿Quitar este modelo de accesorio de la lista de regalo?')) return;
+    const fd = new FormData();
+    fd.append('action','remove');
+    fd.append('id_producto', idp);
     try{
       const res = await jfetch('accesorios_regalo_admin.php', { method:'POST', body: fd });
       if (!res.ok) throw new Error(res.error||'No se pudo quitar');
@@ -507,49 +666,64 @@ tbody.addEventListener('click', async (e)=>{
     } catch(err){ alert(err.message); }
     return;
   }
-  if (e.target.classList.contains('btnEditCodes')){ // editar códigos
+
+  if (e.target.classList.contains('btnEditCodes')){
     EDIT_ID = idp;
     try{
-      const res = await jfetch('accesorios_regalo_admin.php?action=get_codes&id_producto='+idp);
-      codesText.value = res.codigos || ''; codesText.dispatchEvent(new Event('input'));
+      const res = await jfetch('accesorios_regalo_admin.php?action=get_codes&id_producto='+encodeURIComponent(idp));
+      codesText.value = res.codigos || '';
+      codesText.dispatchEvent(new Event('input'));
       if (!codesModal){ try{ codesModal = new bootstrap.Modal(codesModalEl); }catch(_){} }
-      if (codesModal && codesModal.show){ codesModal.show(); } else { codesModalEl.style.display='block'; codesModalEl.classList.add('show'); }
+      if (codesModal && codesModal.show){ codesModal.show(); }
+      else { codesModalEl.style.display='block'; codesModalEl.classList.add('show'); }
     }catch(err){ alert('No se pudieron cargar los códigos: '+(err.message||err)); }
   }
 });
 
-// Cambios del switch VENDER (delegación por tbody)
+// Switch VENDER
 tbody.addEventListener('change', async (e)=>{
   if (!e.target.classList.contains('swVender')) return;
-  const tr = e.target.closest('tr[data-id]'); if (!tr) return; const idp = Number(tr.dataset.id||0);
+  const tr = e.target.closest('tr[data-id]'); if (!tr) return;
+  const idp = (tr.dataset.id || '').trim();
   const val = e.target.checked ? 1 : 0;
-  const fd = new FormData(); fd.append('action','toggle_vender'); fd.append('id_producto', String(idp)); fd.append('vender', String(val));
+  const fd = new FormData();
+  fd.append('action','toggle_vender');
+  fd.append('id_producto', idp);
+  fd.append('vender', String(val));
   try{
     const res = await jfetch('accesorios_regalo_admin.php', { method:'POST', body: fd });
     if (!res.ok) throw new Error(res.error||'No se pudo actualizar el permiso de venta');
-    const lbl = tr.querySelector('.swVender + .form-check-label'); if (lbl) lbl.textContent = val ? 'Permitida' : 'Bloqueada';
+    const lbl = tr.querySelector('.swVender + .form-check-label');
+    if (lbl) lbl.textContent = val ? 'Permitida' : 'Bloqueada';
   }catch(err){
     alert(err.message);
-    e.target.checked = !e.target.checked; // revertir visual si fallo
+    e.target.checked = !e.target.checked;
   }
 });
 
 // Guardar códigos
 btnSaveCodes.addEventListener('click', async ()=>{
-  if (!EDIT_ID){ alert('Accesorio no válido'); return; }
-  const fd = new FormData(); fd.append('action','save_codes'); fd.append('id_producto', String(EDIT_ID)); fd.append('codigos', (document.getElementById('codesText').value || ''));
+  if (!EDIT_ID){ alert('Modelo no válido'); return; }
+  const fd = new FormData();
+  fd.append('action','save_codes');
+  fd.append('id_producto', EDIT_ID);
+  fd.append('codigos', (codesText.value || ''));
   btnSaveCodes.disabled = true;
   try{
     const res = await jfetch('accesorios_regalo_admin.php', { method:'POST', body: fd });
     if (!res.ok) throw new Error(res.error||'No se pudieron guardar los códigos');
-    if (window.bootstrap){ const m = bootstrap.Modal.getInstance(document.getElementById('codesModal')); if (m) m.hide(); }
-    document.getElementById('codesModal').classList.remove('show'); document.getElementById('codesModal').style.display='none';
+    if (window.bootstrap){
+      const m = bootstrap.Modal.getInstance(codesModalEl);
+      if (m) m.hide();
+    }
+    codesModalEl.classList.remove('show');
+    codesModalEl.style.display='none';
     await reloadList();
   }catch(err){ alert(err.message); }
   finally{ btnSaveCodes.disabled = false; }
 });
 
-/* Carga inicial (servidor ya pintó algo, pero homogeneizamos con AJAX tras 1er tick) */
+// Carga inicial
 setTimeout(reloadList, 0);
 </script>
 <!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->

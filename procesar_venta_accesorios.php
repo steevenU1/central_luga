@@ -1,11 +1,13 @@
 <?php
 // procesar_venta_accesorios.php — LUGA / Central 2.0
-// Opción A: descuenta SOLO cantidad sin tocar estatus.
+// Reglas de inventario:
+//   - Accesorios CON serie (productos.imei1 lleno): cada fila es una pieza → se marca estatus='Vendido'.
+//   - Accesorios SIN serie (productos.imei1 vacío): se descuenta cantidad y si llega a 0 se marca estatus='Vendido'.
 // Inserta detalle en la tabla existente: detalle_venta_accesorio (singular) o detalle_venta_accesorios (plural).
 // NUEVO:
 //   - Recibe id_cliente, nombre_cliente y telefono (oculto).
 //   - Si existe columna id_cliente en ventas_accesorios, la llena.
-//   - Mantiene lógica de regalo / whitelist / stock.
+//   - Mantiene lógica de regalo / whitelist / stock usando accesorios_regalo_modelos POR codigo_producto.
 
 session_start();
 if (!isset($_SESSION['id_usuario'])) { header('Location: index.php'); exit(); }
@@ -59,17 +61,33 @@ function parse_codes_to_array(string $raw): array {
   return array_values(array_unique(array_filter($arr, fn($x)=>$x!=='')));
 }
 function nombre_producto(mysqli $conn, int $idProducto): string {
-  $st = $conn->prepare("SELECT TRIM(CONCAT(marca,' ',modelo,' ',COALESCE(color,''))) AS n FROM productos WHERE id=?");
+  $st = $conn->prepare("
+    SELECT TRIM(CONCAT(marca,' ',modelo,' ',COALESCE(color,''))) AS n
+    FROM productos
+    WHERE id=?
+  ");
   $st->bind_param('i', $idProducto);
   $st->execute();
   $r = $st->get_result()->fetch_assoc();
   return trim((string)($r['n'] ?? 'Producto #'.$idProducto));
 }
-// NUEVO: checar si el producto es "solo regalo" (vender=0)
+
+// ✅ checar si el producto es "solo regalo" usando accesorios_regalo_modelos + codigo_producto
 function es_solo_regalo(mysqli $conn, int $idProducto): bool {
   $tbl = $conn->query("SHOW TABLES LIKE 'accesorios_regalo_modelos'");
   if (!$tbl || $tbl->num_rows === 0) return false;
-  $st = $conn->prepare("SELECT 1 FROM accesorios_regalo_modelos WHERE id_producto=? AND activo=1 AND vender=0 LIMIT 1");
+
+  $sql = "
+    SELECT 1
+    FROM accesorios_regalo_modelos arm
+    JOIN productos p ON p.codigo_producto = arm.codigo_producto
+    WHERE p.id = ?
+      AND arm.activo = 1
+      AND CAST(COALESCE(arm.vender, 1) AS UNSIGNED) = 0
+    LIMIT 1
+  ";
+  $st = $conn->prepare($sql);
+  if (!$st) return false;
   $st->bind_param('i', $idProducto);
   $st->execute();
   return (bool)$st->get_result()->fetch_row();
@@ -141,11 +159,16 @@ if ($ES_REGALO === 1) {
     if ($st->get_result()->fetch_row()) die('Ese TAG ya usó su accesorio de regalo.');
   }
 
-  // Whitelist
+  // ✅ Whitelist usando accesorios_regalo_modelos + codigo_producto
   $ID_ACC = (int)$lineas[0]['id_producto'];
-  $st = $conn->prepare("SELECT codigos_equipos
-                          FROM accesorios_regalo_modelos
-                         WHERE id_producto=? AND activo=1 LIMIT 1");
+  $sqlW = "
+    SELECT arm.codigos_equipos
+    FROM accesorios_regalo_modelos arm
+    JOIN productos p ON p.codigo_producto = arm.codigo_producto
+    WHERE p.id = ? AND arm.activo = 1
+    LIMIT 1
+  ";
+  $st = $conn->prepare($sqlW);
   if (!$st) die('Error preparando whitelist: '.$conn->error);
   $st->bind_param('i', $ID_ACC);
   $st->execute();
@@ -181,34 +204,73 @@ function stock_disponible(mysqli $conn, int $idSucursal, int $idProducto): int {
   $st = $conn->prepare("
     SELECT COALESCE(SUM(CASE WHEN estatus='Disponible'
                              THEN COALESCE(cantidad,1) ELSE 0 END),0)
-    FROM inventario WHERE id_sucursal=? AND id_producto=?");
+    FROM inventario
+    WHERE id_sucursal=? AND id_producto=?
+  ");
   $st->bind_param('ii', $idSucursal, $idProducto);
   $st->execute();
   return (int)$st->get_result()->fetch_row()[0];
 }
+
+/**
+ * descontar_inventario:
+ *   - Si el producto tiene serie (productos.imei1 no vacío) → por cada pieza vendida marcamos estatus='Vendido'.
+ *   - Si NO tiene serie → restamos cantidad y si llega a 0 marcamos estatus='Vendido'.
+ */
 function descontar_inventario(mysqli $conn, int $idSucursal, int $idProducto, int $qty){
   $st = $conn->prepare("
-    SELECT id, COALESCE(cantidad,1) AS cant
-    FROM inventario
-    WHERE id_sucursal=? AND id_producto=? AND estatus='Disponible'
-    ORDER BY id ASC");
+    SELECT i.id,
+           COALESCE(i.cantidad,1) AS cant,
+           p.imei1
+    FROM inventario i
+    JOIN productos p ON p.id = i.id_producto
+    WHERE i.id_sucursal=? AND i.id_producto=? AND i.estatus='Disponible'
+    ORDER BY i.id ASC
+  ");
   $st->bind_param('ii', $idSucursal, $idProducto);
   $st->execute();
   $res = $st->get_result();
 
   $pend = $qty;
-  while ($pend > 0 && ($row = $res->fetch_assoc())){
-    $iid = (int)$row['id'];
-    $c   = (int)$row['cant'];
-    if ($c <= 0) continue;
-    $take = min($pend, $c);
-    // Opción A: solo restar cantidad; NO tocar estatus.
-    $up = $conn->prepare("UPDATE inventario SET cantidad = GREATEST(cantidad-?,0) WHERE id=?");
-    $up->bind_param('ii', $take, $iid);
-    if (!$up->execute()) throw new Exception('No se pudo actualizar inventario: '.$conn->error);
-    $pend -= $take;
+  while ($pend > 0 && ($row = $res->fetch_assoc())) {
+    $iid      = (int)$row['id'];
+    $cantFila = (int)$row['cant'];
+    if ($cantFila <= 0) $cantFila = 1;
+
+    $tieneSerie = ($row['imei1'] !== null && trim((string)$row['imei1']) !== '');
+
+    if ($tieneSerie) {
+      // Cada fila con serie es una pieza. Solo cambiamos estatus.
+      if ($pend <= 0) break;
+      $up = $conn->prepare("UPDATE inventario SET estatus='Vendido' WHERE id=?");
+      if (!$up) throw new Exception('No se pudo preparar actualización de inventario (serie): '.$conn->error);
+      $up->bind_param('i', $iid);
+      if (!$up->execute()) throw new Exception('No se pudo actualizar inventario (serie): '.$conn->error);
+      $pend -= 1;
+    } else {
+      // Sin serie: restamos cantidad y si llega a 0 marcamos Vendido.
+      if ($pend <= 0) break;
+      $take = min($pend, $cantFila);
+      $nuevo = $cantFila - $take;
+      if ($nuevo <= 0) {
+        $nuevo   = 0;
+        $estatus = 'Vendido';
+      } else {
+        $estatus = 'Disponible';
+      }
+
+      $up = $conn->prepare("UPDATE inventario SET cantidad=?, estatus=? WHERE id=?");
+      if (!$up) throw new Exception('No se pudo preparar actualización de inventario: '.$conn->error);
+      $up->bind_param('isi', $nuevo, $estatus, $iid);
+      if (!$up->execute()) throw new Exception('No se pudo actualizar inventario: '.$conn->error);
+
+      $pend -= $take;
+    }
   }
-  if ($pend > 0) throw new Exception('Stock insuficiente en inventario.');
+
+  if ($pend > 0) {
+    throw new Exception('Stock insuficiente en inventario.');
+  }
 }
 
 /* ---------------- Totales / Pagos ---------------- */
@@ -308,7 +370,7 @@ try{
     if (!$stDet->execute()) throw new Exception('No se pudo guardar detalle: '.$stDet->error);
   }
 
-  // Descontar inventario (opción A)
+  // Descontar / marcar inventario
   foreach ($lineas as $ln){
     descontar_inventario($conn, $ID_SUCURSAL, $ln['id_producto'], $ln['cantidad']);
   }
