@@ -1,8 +1,21 @@
 <?php
-// compras_ver.php
+// compras_ver.php — Vista de factura + pagos + cancelación segura
 session_start();
-if (!isset($_SESSION['id_usuario'])) { header("Location: index.php"); exit(); }
-require_once __DIR__.'/db.php';
+if (!isset($_SESSION['id_usuario'])) {
+  header("Location: index.php");
+  exit();
+}
+
+require_once __DIR__ . '/db.php';
+
+// ============================
+// Datos de sesión / roles
+// ============================
+$ID_USUARIO = (int)($_SESSION['id_usuario'] ?? 0);
+$ROL        = $_SESSION['rol'] ?? 'Ejecutivo';
+
+$ADMIN_ROLES = ['Admin', 'Super', 'SuperAdmin', 'Logistica'];
+$isAdminLike = in_array($ROL, $ADMIN_ROLES, true);
 
 // ============================
 // ID de compra
@@ -13,21 +26,26 @@ if ($id <= 0) die("ID inválido.");
 // ============================
 // Helpers
 // ============================
-function table_exists(mysqli $conn, string $table): bool {
+function table_exists(mysqli $conn, string $table): bool
+{
   $t = $conn->real_escape_string($table);
   $q = $conn->query("SHOW TABLES LIKE '{$t}'");
   return $q && $q->num_rows > 0;
 }
-function column_exists(mysqli $conn, string $table, string $col): bool {
+function column_exists(mysqli $conn, string $table, string $col): bool
+{
   $t = $conn->real_escape_string($table);
   $c = $conn->real_escape_string($col);
   $q = $conn->query("SHOW COLUMNS FROM `{$t}` LIKE '{$c}'");
   return $q && $q->num_rows > 0;
 }
-function h($s){ return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
+function h($s)
+{
+  return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8');
+}
 
 // ¿La tabla de ingresos tiene columna "cantidad"?
-$hasCantIngreso = table_exists($conn,'compras_detalle_ingresos') && column_exists($conn,'compras_detalle_ingresos','cantidad');
+$hasCantIngreso = table_exists($conn, 'compras_detalle_ingresos') && column_exists($conn, 'compras_detalle_ingresos', 'cantidad');
 // Fragmento SQL para calcular "ingresadas"
 $ingAgg = $hasCantIngreso
   ? "COALESCE((SELECT COALESCE(SUM(x.cantidad),0) FROM compras_detalle_ingresos x WHERE x.id_detalle=d.id),0)"
@@ -72,8 +90,226 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['accion'] ?? '') === 'agreg
       }
     }
   }
-  header("Location: compras_ver.php?id=".$id);
+  header("Location: compras_ver.php?id=" . $id);
   exit();
+}
+
+// ============================
+// POST: Eliminar / cancelar compra
+// ============================
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['accion'] ?? '') === 'eliminar_compra') {
+  if (!$isAdminLike) {
+    $_SESSION['flash_error'] = "No tienes permisos para cancelar esta factura.";
+    header("Location: compras_ver.php?id=" . $id);
+    exit();
+  }
+
+  $password = $_POST['password_admin'] ?? '';
+
+  // Traer hash de contraseña del usuario actual
+  $stUser = $conn->prepare("SELECT password, rol FROM usuarios WHERE id = ?");
+  $stUser->bind_param("i", $ID_USUARIO);
+  $stUser->execute();
+  $rowUser = $stUser->get_result()->fetch_assoc();
+  $stUser->close();
+
+  // Helper para soportar varios tipos de almacenamiento
+  $okPassword = false;
+  if ($rowUser && isset($rowUser['password'])) {
+    $hash = (string)$rowUser['password'];
+
+    if ($hash !== '') {
+      // 1) password_hash (bcrypt/argon)
+      if (password_verify($password, $hash)) {
+        $okPassword = true;
+      } else {
+        // 2) MD5 viejo
+        if (strlen($hash) === 32 && ctype_xdigit($hash) && hash_equals($hash, md5($password))) {
+          $okPassword = true;
+        }
+        // 3) Texto plano
+        if (!$okPassword && hash_equals($hash, $password)) {
+          $okPassword = true;
+        }
+      }
+    }
+  }
+
+  if (!$okPassword) {
+    $_SESSION['flash_error'] = "Contraseña incorrecta. No se canceló la factura.";
+    header("Location: compras_ver.php?id=" . $id);
+    exit();
+  }
+
+  // Verificar que el usuario realmente sea admin-like (por si cambió rol)
+  if (!in_array($rowUser['rol'] ?? '', $ADMIN_ROLES, true)) {
+    $_SESSION['flash_error'] = "Tu usuario no tiene rol de administrador para cancelar compras.";
+    header("Location: compras_ver.php?id=" . $id);
+    exit();
+  }
+
+  // 1) Verificar si hay inventario ya usado (estatus ≠ 'Disponible')
+  $inventUsados = 0;
+  if (table_exists($conn, 'compras_detalle_ingresos') && table_exists($conn, 'inventario')) {
+    $sqlCheck = "
+      SELECT COUNT(*) AS usados
+      FROM compras_detalle_ingresos cdi
+      JOIN compras_detalle d   ON d.id = cdi.id_detalle
+      JOIN inventario i        ON i.id_producto = cdi.id_producto
+      WHERE d.id_compra = ?
+        AND COALESCE(i.estatus,'Disponible') <> 'Disponible'
+    ";
+    $stChk = $conn->prepare($sqlCheck);
+    $stChk->bind_param("i", $id);
+    $stChk->execute();
+    $rowChk = $stChk->get_result()->fetch_assoc();
+    $stChk->close();
+    $inventUsados = (int)($rowChk['usados'] ?? 0);
+  }
+
+  if ($inventUsados > 0) {
+    $_SESSION['flash_error'] = "No se puede cancelar la factura porque uno o más equipos ya fueron vendidos o movidos de inventario.";
+    header("Location: compras_ver.php?id=" . $id);
+    exit();
+  }
+
+  // 2) Ejecutar reversa en transacción
+  $conn->begin_transaction();
+  try {
+    // 2.1 Eliminar pagos
+    $st = $conn->prepare("DELETE FROM compras_pagos WHERE id_compra = ?");
+    $st->bind_param("i", $id);
+    $st->execute();
+    $st->close();
+
+    // 2.2 Revertir inventario (solo registros disponibles)
+    if (table_exists($conn, 'compras_detalle_ingresos') && table_exists($conn, 'inventario')) {
+      // Accesorios con cantidad (restar)
+      if ($hasCantIngreso && column_exists($conn, 'inventario', 'cantidad')) {
+        $sqlUpdCant = "
+          UPDATE inventario i
+          JOIN compras_detalle_ingresos cdi ON i.id_producto = cdi.id_producto
+          JOIN compras_detalle d ON d.id = cdi.id_detalle
+          SET i.cantidad = GREATEST(
+                0,
+                COALESCE(i.cantidad, 0) - COALESCE(cdi.cantidad, 0)
+              )
+          WHERE d.id_compra = ?
+            AND COALESCE(i.estatus,'Disponible') = 'Disponible'
+            AND cdi.cantidad IS NOT NULL
+        ";
+        $stUC = $conn->prepare($sqlUpdCant);
+        $stUC->bind_param("i", $id);
+        $stUC->execute();
+        $stUC->close();
+
+        // Eliminar inventario con cantidad 0
+        $sqlDelInvCant = "
+          DELETE i FROM inventario i
+          WHERE i.cantidad <= 0
+            AND COALESCE(i.estatus,'Disponible') = 'Disponible'
+        ";
+        $conn->query($sqlDelInvCant);
+      }
+
+      // Equipos por pieza (sin cantidad / o cantidad=1)
+      $sqlDelInv = "
+      DELETE i
+      FROM inventario i
+      JOIN compras_detalle_ingresos cdi ON i.id_producto = cdi.id_producto
+      JOIN compras_detalle d ON d.id = cdi.id_detalle
+      WHERE d.id_compra = ?
+        AND COALESCE(i.estatus,'Disponible') = 'Disponible'
+    ";
+      $stDI = $conn->prepare($sqlDelInv);
+      $stDI->bind_param("i", $id);
+      $stDI->execute();
+      $stDI->close();
+    }
+
+    // 2.3 Eliminar productos (solo equipos con IMEI que ya no tengan inventario ni ventas)
+    if (table_exists($conn, 'compras_detalle_ingresos') && table_exists($conn, 'productos')) {
+
+      $tieneDetalleVenta = table_exists($conn, 'detalle_venta');
+
+      if ($tieneDetalleVenta) {
+        $sqlDelProd = "
+          DELETE p
+          FROM productos p
+          JOIN compras_detalle_ingresos cdi ON cdi.id_producto = p.id
+          JOIN compras_detalle d ON d.id = cdi.id_detalle
+          LEFT JOIN inventario i   ON i.id_producto = p.id
+          LEFT JOIN detalle_venta dv ON dv.id_producto = p.id
+          WHERE d.id_compra = ?
+            AND COALESCE(d.requiere_imei,0) = 1
+            AND i.id IS NULL
+            AND dv.id IS NULL
+        ";
+      } else {
+        // Versión sin detalle_venta (por si en Nano aún no existe esa tabla)
+        $sqlDelProd = "
+          DELETE p
+          FROM productos p
+          JOIN compras_detalle_ingresos cdi ON cdi.id_producto = p.id
+          JOIN compras_detalle d ON d.id = cdi.id_detalle
+          LEFT JOIN inventario i   ON i.id_producto = p.id
+          WHERE d.id_compra = ?
+            AND COALESCE(d.requiere_imei,0) = 1
+            AND i.id IS NULL
+        ";
+      }
+
+      $stDP = $conn->prepare($sqlDelProd);
+      $stDP->bind_param("i", $id);
+      $stDP->execute();
+      $stDP->close();
+    }
+
+    // 2.4 Eliminar registro de ingresos
+    if (table_exists($conn, 'compras_detalle_ingresos')) {
+      $sqlDelIng = "
+        DELETE cdi
+        FROM compras_detalle_ingresos cdi
+        JOIN compras_detalle d ON d.id = cdi.id_detalle
+        WHERE d.id_compra = ?
+      ";
+      $stDelIng = $conn->prepare($sqlDelIng);
+      $stDelIng->bind_param("i", $id);
+      $stDelIng->execute();
+      $stDelIng->close();
+    }
+
+    // 2.5 Eliminar cargos
+    if (table_exists($conn, 'compras_cargos')) {
+      $st = $conn->prepare("DELETE FROM compras_cargos WHERE id_compra = ?");
+      $st->bind_param("i", $id);
+      $st->execute();
+      $st->close();
+    }
+
+    // 2.6 Eliminar detalle
+    $st = $conn->prepare("DELETE FROM compras_detalle WHERE id_compra = ?");
+    $st->bind_param("i", $id);
+    $st->execute();
+    $st->close();
+
+    // 2.7 Eliminar encabezado de compra
+    $st = $conn->prepare("DELETE FROM compras WHERE id = ?");
+    $st->bind_param("i", $id);
+    $st->execute();
+    $st->close();
+
+    $conn->commit();
+
+    $_SESSION['flash_success'] = "La factura y sus movimientos asociados se cancelaron correctamente.";
+    header("Location: compras_resumen.php");
+    exit();
+  } catch (Throwable $e) {
+    $conn->rollback();
+    $_SESSION['flash_error'] = "Error al cancelar la factura: " . $e->getMessage();
+    header("Location: compras_ver.php?id=" . $id);
+    exit();
+  }
 }
 
 // ============================
@@ -119,23 +355,23 @@ if (isset($_GET['excel'])) {
 
   // Totales modelos y cargos
   $sumDet = $conn->prepare("SELECT COALESCE(SUM(subtotal),0) AS sub, COALESCE(SUM(iva),0) AS iva, COALESCE(SUM(total),0) AS tot FROM compras_detalle WHERE id_compra=?");
-  $sumDet->bind_param("i",$id);
+  $sumDet->bind_param("i", $id);
   $sumDet->execute();
   $rowDet = $sumDet->get_result()->fetch_assoc();
   $sumDet->close();
 
   $sumCar = $conn->prepare("SELECT COALESCE(SUM(monto),0) AS sub, COALESCE(SUM(iva_monto),0) AS iva, COALESCE(SUM(total),0) AS tot FROM compras_cargos WHERE id_compra=?");
-  $sumCar->bind_param("i",$id);
+  $sumCar->bind_param("i", $id);
   $sumCar->execute();
   $rowCar = $sumCar->get_result()->fetch_assoc();
   $sumCar->close();
 
   // IMEIs/series (si existe)
   $imeiRows = [];
-  $candDynamic = ['imei1','imei','imei2','serial','n_serie','lote','id_producto','creado_en'];
+  $candDynamic = ['imei1', 'imei', 'imei2', 'serial', 'n_serie', 'lote', 'id_producto', 'creado_en'];
   if (table_exists($conn, 'compras_detalle_ingresos')) {
     $present = [];
-    foreach ($candDynamic as $c) if (column_exists($conn,'compras_detalle_ingresos',$c)) $present[]=$c;
+    foreach ($candDynamic as $c) if (column_exists($conn, 'compras_detalle_ingresos', $c)) $present[] = $c;
     $selectImeis = "";
     foreach ($present as $c) $selectImeis .= ", i.`{$c}` AS `{$c}`";
 
@@ -148,28 +384,28 @@ if (isset($_GET['excel'])) {
       ORDER BY i.id ASC
     ";
     $resI = $conn->query($sqlI);
-    if ($resI) while($x=$resI->fetch_assoc()) $imeiRows[]=$x;
+    if ($resI) while ($x = $resI->fetch_assoc()) $imeiRows[] = $x;
   }
 
   // Headers Excel
-  $num   = preg_replace('/[^A-Za-z0-9_\-]/','_', (string)($enc['num_factura'] ?? "compra_{$id}"));
+  $num   = preg_replace('/[^A-Za-z0-9_\-]/', '_', (string)($enc['num_factura'] ?? "compra_{$id}"));
   $fname = "factura_{$num}.xls";
   header("Content-Type: application/vnd.ms-excel; charset=UTF-8");
   header("Content-Disposition: attachment; filename=\"{$fname}\"");
   header("Cache-Control: max-age=0, no-cache, no-store, must-revalidate");
 
-  echo "<html><head><meta charset='UTF-8'><title>".h($fname)."</title><style>.text{mso-number-format:'\\@';}</style></head><body>";
+  echo "<html><head><meta charset='UTF-8'><title>" . h($fname) . "</title><style>.text{mso-number-format:'\\@';}</style></head><body>";
 
-  echo "<h3>Factura #".h($enc['num_factura'])."</h3>";
+  echo "<h3>Factura #" . h($enc['num_factura']) . "</h3>";
   echo "<table border='1' cellspacing='0' cellpadding='4'>";
-  echo "<tr><th align='left'>Proveedor</th><td>".h($enc['proveedor'])."</td></tr>";
-  echo "<tr><th align='left'>Sucursal destino</th><td>".h($enc['sucursal'])."</td></tr>";
-  echo "<tr><th align='left'>Fecha factura</th><td>".h($enc['fecha_factura'])."</td></tr>";
-  echo "<tr><th align='left'>Vencimiento</th><td>".h($enc['fecha_vencimiento'] ?? '')."</td></tr>";
-  echo "<tr><th align='left'>Condición</th><td>".h($enc['condicion_pago'] ?? '')."</td></tr>";
-  echo "<tr><th align='left'>Días vencimiento</th><td>".(int)($enc['dias_vencimiento'] ?? 0)."</td></tr>";
-  echo "<tr><th align='left'>Estatus</th><td>".h($enc['estatus'] ?? '')."</td></tr>";
-  echo "<tr><th align='left'>Total factura</th><td>".number_format((float)$enc['total'],2,'.','')."</td></tr>";
+  echo "<tr><th align='left'>Proveedor</th><td>" . h($enc['proveedor']) . "</td></tr>";
+  echo "<tr><th align='left'>Sucursal destino</th><td>" . h($enc['sucursal']) . "</td></tr>";
+  echo "<tr><th align='left'>Fecha factura</th><td>" . h($enc['fecha_factura']) . "</td></tr>";
+  echo "<tr><th align='left'>Vencimiento</th><td>" . h($enc['fecha_vencimiento'] ?? '') . "</td></tr>";
+  echo "<tr><th align='left'>Condición</th><td>" . h($enc['condicion_pago'] ?? '') . "</td></tr>";
+  echo "<tr><th align='left'>Días vencimiento</th><td>" . (int)($enc['dias_vencimiento'] ?? 0) . "</td></tr>";
+  echo "<tr><th align='left'>Estatus</th><td>" . h($enc['estatus'] ?? '') . "</td></tr>";
+  echo "<tr><th align='left'>Total factura</th><td>" . number_format((float)$enc['total'], 2, '.', '') . "</td></tr>";
   echo "</table><br>";
 
   echo "<h3>Detalle de modelos</h3>";
@@ -188,36 +424,36 @@ if (isset($_GET['excel'])) {
     $tieneDtoIva = $hasDtoIva && isset($r['costo_dto_iva']) && $r['costo_dto_iva'] !== null && (float)$r['costo_dto_iva'] > 0;
 
     echo "<tr>";
-    echo "<td>".h($r['marca'])."</td>";
+    echo "<td>" . h($r['marca']) . "</td>";
     $modeloTxt = h($r['modelo']);
     if ($tieneDto || $tieneDtoIva) $modeloTxt .= " <span style='background:#0d6efd;color:#fff;padding:2px 6px;border-radius:10px;font-size:11px;'>Dto</span>";
     echo "<td>{$modeloTxt}</td>";
-    echo "<td>".h($r['color'])."</td>";
-    echo "<td>".h($r['ram'] ?? '')."</td>";
-    echo "<td>".h($r['capacidad'])."</td>";
-    echo "<td>".(($r['requiere_imei'] ?? 0) ? 'Sí' : 'No')."</td>";
-    echo "<td>".(int)$r['cantidad']."</td>";
-    echo "<td>".(int)$r['ingresadas']."</td>";
-    echo "<td>".number_format((float)$r['precio_unitario'],2,'.','')."</td>";
-    if ($hasDto)    echo "<td>".($tieneDto ? number_format((float)$r['costo_dto'],2,'.','') : '')."</td>";
-    if ($hasDtoIva) echo "<td>".($tieneDtoIva ? number_format((float)$r['costo_dto_iva'],2,'.','') : '')."</td>";
-    echo "<td>".number_format((float)$r['iva_porcentaje'],2,'.','')."</td>";
-    echo "<td>".number_format((float)$r['subtotal'],2,'.','')."</td>";
-    echo "<td>".number_format((float)$r['iva'],2,'.','')."</td>";
-    echo "<td>".number_format((float)$r['total'],2,'.','')."</td>";
+    echo "<td>" . h($r['color']) . "</td>";
+    echo "<td>" . h($r['ram'] ?? '') . "</td>";
+    echo "<td>" . h($r['capacidad']) . "</td>";
+    echo "<td>" . (($r['requiere_imei'] ?? 0) ? 'Sí' : 'No') . "</td>";
+    echo "<td>" . (int)$r['cantidad'] . "</td>";
+    echo "<td>" . (int)$r['ingresadas'] . "</td>";
+    echo "<td>" . number_format((float)$r['precio_unitario'], 2, '.', '') . "</td>";
+    if ($hasDto)    echo "<td>" . ($tieneDto ? number_format((float)$r['costo_dto'], 2, '.', '') : '') . "</td>";
+    if ($hasDtoIva) echo "<td>" . ($tieneDtoIva ? number_format((float)$r['costo_dto_iva'], 2, '.', '') : '') . "</td>";
+    echo "<td>" . number_format((float)$r['iva_porcentaje'], 2, '.', '') . "</td>";
+    echo "<td>" . number_format((float)$r['subtotal'], 2, '.', '') . "</td>";
+    echo "<td>" . number_format((float)$r['iva'], 2, '.', '') . "</td>";
+    echo "<td>" . number_format((float)$r['total'], 2, '.', '') . "</td>";
     echo "</tr>";
   }
-  echo "<tr><th colspan='".(10 + ($hasDto?1:0) + ($hasDtoIva?1:0))."' align='right'>Subtotal (modelos)</th><th>".number_format((float)$rowDet['sub'],2,'.','')."</th><th colspan='2'></th></tr>";
-  echo "<tr><th colspan='".(11 + ($hasDto?1:0) + ($hasDtoIva?1:0))."' align='right'>IVA (modelos)</th><th>".number_format((float)$rowDet['iva'],2,'.','')."</th><th></th></tr>";
-  echo "<tr><th colspan='".(12 + ($hasDto?1:0) + ($hasDtoIva?1:0))."' align='right'>Total (modelos)</th><th>".number_format((float)$rowDet['tot'],2,'.','')."</th></tr>";
+  echo "<tr><th colspan='" . (10 + ($hasDto ? 1 : 0) + ($hasDtoIva ? 1 : 0)) . "' align='right'>Subtotal (modelos)</th><th>" . number_format((float)$rowDet['sub'], 2, '.', '') . "</th><th colspan='2'></th></tr>";
+  echo "<tr><th colspan='" . (11 + ($hasDto ? 1 : 0) + ($hasDtoIva ? 1 : 0)) . "' align='right'>IVA (modelos)</th><th>" . number_format((float)$rowDet['iva'], 2, '.', '') . "</th><th></th></tr>";
+  echo "<tr><th colspan='" . (12 + ($hasDto ? 1 : 0) + ($hasDtoIva ? 1 : 0)) . "' align='right'>Total (modelos)</th><th>" . number_format((float)$rowDet['tot'], 2, '.', '') . "</th></tr>";
   echo "</table>";
 
-  if ($rowCar && ((float)$rowCar['tot'])>0) {
+  if ($rowCar && ((float)$rowCar['tot']) > 0) {
     echo "<br><h3>Otros cargos</h3>";
     echo "<table border='1' cellspacing='0' cellpadding='4'>";
-    echo "<tr><th>Subtotal (cargos)</th><td>".number_format((float)$rowCar['sub'],2,'.','')."</td></tr>";
-    echo "<tr><th>IVA (cargos)</th><td>".number_format((float)$rowCar['iva'],2,'.','')."</td></tr>";
-    echo "<tr><th>Total (cargos)</th><td>".number_format((float)$rowCar['tot'],2,'.','')."</td></tr>";
+    echo "<tr><th>Subtotal (cargos)</th><td>" . number_format((float)$rowCar['sub'], 2, '.', '') . "</td></tr>";
+    echo "<tr><th>IVA (cargos)</th><td>" . number_format((float)$rowCar['iva'], 2, '.', '') . "</td></tr>";
+    echo "<tr><th>Total (cargos)</th><td>" . number_format((float)$rowCar['tot'], 2, '.', '') . "</td></tr>";
     echo "</table>";
   }
 
@@ -225,18 +461,18 @@ if (isset($_GET['excel'])) {
     echo "<br><h3>Ingresos (IMEI / series) de esta factura</h3>";
     echo "<table border='1' cellspacing='0' cellpadding='4'><tr>";
     echo "<th>#</th><th>Marca</th><th>Modelo</th><th>Color</th><th>RAM</th><th>Capacidad</th>";
-    foreach ($candDynamic as $c) if (array_key_exists($c, $imeiRows[0])) echo "<th>".strtoupper($c)."</th>";
+    foreach ($candDynamic as $c) if (array_key_exists($c, $imeiRows[0])) echo "<th>" . strtoupper($c) . "</th>";
     echo "</tr>";
-    $imeisComoTexto = ['imei1','imei','imei2','serial','n_serie','lote'];
-    $n=1;
+    $imeisComoTexto = ['imei1', 'imei', 'imei2', 'serial', 'n_serie', 'lote'];
+    $n = 1;
     foreach ($imeiRows as $x) {
       echo "<tr>";
-      echo "<td>".$n++."</td>";
-      echo "<td>".h($x['marca'])."</td>";
-      echo "<td>".h($x['modelo'])."</td>";
-      echo "<td>".h($x['color'])."</td>";
-      echo "<td>".h($x['ram'])."</td>";
-      echo "<td>".h($x['capacidad'])."</td>";
+      echo "<td>" . $n++ . "</td>";
+      echo "<td>" . h($x['marca']) . "</td>";
+      echo "<td>" . h($x['modelo']) . "</td>";
+      echo "<td>" . h($x['color']) . "</td>";
+      echo "<td>" . h($x['ram']) . "</td>";
+      echo "<td>" . h($x['capacidad']) . "</td>";
       foreach ($candDynamic as $c) {
         if (array_key_exists($c, $x)) {
           $val = h((string)$x[$c]);
@@ -301,7 +537,7 @@ $resPagos = $pagos->get_result();
 
 // Totales pagados/saldo
 $rowSum = $conn->prepare("SELECT COALESCE(SUM(monto),0) AS pagado FROM compras_pagos WHERE id_compra=?");
-$rowSum->bind_param("i",$id);
+$rowSum->bind_param("i", $id);
 $rowSum->execute();
 $sumPag = $rowSum->get_result()->fetch_assoc();
 $rowSum->close();
@@ -315,28 +551,46 @@ $cargos = $conn->prepare("
   WHERE id_compra=?
   ORDER BY id ASC
 ");
-$cargos->bind_param("i",$id);
+$cargos->bind_param("i", $id);
 $cargos->execute();
 $resCargos = $cargos->get_result();
 
 $sumDet = $conn->prepare("SELECT COALESCE(SUM(subtotal),0) AS sub, COALESCE(SUM(iva),0) AS iva, COALESCE(SUM(total),0) AS tot FROM compras_detalle WHERE id_compra=?");
-$sumDet->bind_param("i",$id);
+$sumDet->bind_param("i", $id);
 $sumDet->execute();
 $rowDet = $sumDet->get_result()->fetch_assoc();
 $sumDet->close();
 
 $sumCar = $conn->prepare("SELECT COALESCE(SUM(monto),0) AS sub, COALESCE(SUM(iva_monto),0) AS iva, COALESCE(SUM(total),0) AS tot FROM compras_cargos WHERE id_compra=?");
-$sumCar->bind_param("i",$id);
+$sumCar->bind_param("i", $id);
 $sumCar->execute();
 $rowCar = $sumCar->get_result()->fetch_assoc();
 $sumCar->close();
 
 // Navbar después de headers
-require_once __DIR__.'/navbar.php';
+require_once __DIR__ . '/navbar.php';
+
+// Mensajes flash
+$flashSuccess = $_SESSION['flash_success'] ?? null;
+$flashError   = $_SESSION['flash_error']   ?? null;
+unset($_SESSION['flash_success'], $_SESSION['flash_error']);
 ?>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 
 <div class="container my-4">
+
+  <?php if ($flashSuccess): ?>
+    <div class="alert alert-success alert-dismissible fade show" role="alert">
+      <?= h($flashSuccess) ?>
+      <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Cerrar"></button>
+    </div>
+  <?php endif; ?>
+  <?php if ($flashError): ?>
+    <div class="alert alert-danger alert-dismissible fade show" role="alert">
+      <?= h($flashError) ?>
+      <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Cerrar"></button>
+    </div>
+  <?php endif; ?>
 
   <div class="d-flex justify-content-between align-items-center mb-2">
     <h4 class="mb-0">
@@ -351,6 +605,15 @@ require_once __DIR__.'/navbar.php';
       <a href="compras_resumen.php" class="btn btn-outline-secondary">↩︎ Volver a resumen</a>
       <a href="compras_nueva.php" class="btn btn-primary">Nueva compra</a>
       <a href="compras_ver.php?id=<?= $id ?>&excel=1" class="btn btn-success">Descargar Excel</a>
+
+      <?php if ($isAdminLike): ?>
+        <button type="button"
+          class="btn btn-outline-danger"
+          data-bs-toggle="modal"
+          data-bs-target="#modalEliminarCompra">
+          Cancelar factura
+        </button>
+      <?php endif; ?>
     </div>
   </div>
 
@@ -414,10 +677,10 @@ require_once __DIR__.'/navbar.php';
             <td class="text-end">$<?= number_format((float)$r['precio_unitario'], 2) ?></td>
 
             <?php if ($hasDto): ?>
-              <td class="text-end"><?= $tieneDto ? '$'.number_format((float)$r['costo_dto'], 2) : '—' ?></td>
+              <td class="text-end"><?= $tieneDto ? '$' . number_format((float)$r['costo_dto'], 2) : '—' ?></td>
             <?php endif; ?>
             <?php if ($hasDtoIva): ?>
-              <td class="text-end"><?= $tieneDtoIva ? '$'.number_format((float)$r['costo_dto_iva'], 2) : '—' ?></td>
+              <td class="text-end"><?= $tieneDtoIva ? '$' . number_format((float)$r['costo_dto_iva'], 2) : '—' ?></td>
             <?php endif; ?>
 
             <td class="text-end"><?= number_format((float)$r['iva_porcentaje'], 2) ?></td>
@@ -567,8 +830,8 @@ require_once __DIR__.'/navbar.php';
       </div>
       <?php $puedeAgregarPago = $saldo > 0; ?>
       <button class="btn btn-sm btn-outline-primary <?= $puedeAgregarPago ? '' : 'disabled' ?>"
-              data-bs-toggle="modal" data-bs-target="#modalPago"
-              <?= $puedeAgregarPago ? '' : 'disabled title="Saldo cubierto: no es posible agregar más pagos"' ?>>
+        data-bs-toggle="modal" data-bs-target="#modalPago"
+        <?= $puedeAgregarPago ? '' : 'disabled title="Saldo cubierto: no es posible agregar más pagos"' ?>>
         + Agregar pago
       </button>
     </div>
@@ -655,4 +918,51 @@ require_once __DIR__.'/navbar.php';
     </div>
   </div>
 
+  <?php if ($isAdminLike): ?>
+    <!-- Modal eliminar / cancelar factura -->
+    <div class="modal fade" id="modalEliminarCompra" tabindex="-1" aria-hidden="true">
+      <div class="modal-dialog modal-dialog-centered">
+        <form method="post" class="modal-content">
+          <input type="hidden" name="accion" value="eliminar_compra">
+          <input type="hidden" name="id_compra" value="<?= $id ?>">
+          <div class="modal-header bg-danger text-white">
+            <h5 class="modal-title">Cancelar factura</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+          </div>
+          <div class="modal-body">
+            <p class="mb-2">
+              Estás a punto de <strong>cancelar por completo</strong> la factura
+              <strong>#<?= h($enc['num_factura']) ?></strong>.
+            </p>
+            <ul class="small mb-3">
+              <li>Se eliminarán los pagos registrados en esta factura.</li>
+              <li>Se revertirán los ingresos a inventario asociados (solo equipos/insumos todavía disponibles).</li>
+              <li>Se eliminarán los renglones de detalle y cargos de la compra.</li>
+            </ul>
+            <p class="small text-danger mb-3">
+              Si algún equipo ya fue vendido o movido de inventario, la cancelación se bloqueará.
+            </p>
+            <div class="mb-3">
+              <label class="form-label">Confirma tu contraseña de usuario administrador</label>
+              <input type="password"
+                name="password_admin"
+                class="form-control"
+                required
+                autocomplete="current-password"
+                placeholder="Contraseña de tu usuario">
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cerrar</button>
+            <button type="submit" class="btn btn-danger">
+              Sí, cancelar factura
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  <?php endif; ?>
+
 </div>
+
+<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script> -->
