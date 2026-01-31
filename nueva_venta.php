@@ -26,6 +26,11 @@ foreach ($sucursales as $s) {
   $mapSuc[(int)$s['id']] = $s['nombre'];
 }
 
+// 🔓 Sucursales que pueden editar manualmente el precio_venta
+// 👉 Cambia 999 por el ID real de la sucursal que debe poder editar el precio.
+$SUCURSALES_PRECIO_LIBRE = [42];
+$editablePrecioInicial = in_array($id_sucursal_usuario, $SUCURSALES_PRECIO_LIBRE, true);
+
 // 🔒 Evaluación del candado para la sucursal por defecto (la del usuario)
 list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_captura($conn, $id_sucursal_usuario);
 ?>
@@ -290,6 +295,8 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
       <div id="errores" class="alert alert-danger d-none"></div>
 
       <form method="POST" action="procesar_venta.php" id="form_venta" novalidate data-locked="<?= $bloquearInicial ? '1' : '0' ?>">
+        <input type="text" name="username" autocomplete="username" style="display:none">
+        <input type="password" name="password" autocomplete="current-password" style="display:none">
         <input type="hidden" name="id_usuario" value="<?= $id_usuario ?>">
 
         <!-- 🔗 Cliente seleccionado -->
@@ -395,10 +402,24 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
             <div class="row g-3 mb-2">
               <div class="col-md-4">
                 <label class="form-label req">Precio de Venta Total ($)</label>
-                <!-- 🔒 Solo lectura: se llena desde precios de lista/combo y aplica cupón si hay -->
-                <input type="number" step="0.01" min="0.01" name="precio_venta" id="precio_venta"
-                  class="form-control" placeholder="0.00" required readonly>
-                <div class="form-text">Se calcula automáticamente según los equipos seleccionados.</div>
+                <!-- 🔒 Solo lectura por defecto, editable solo en sucursales especiales -->
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0.01"
+                  name="precio_venta"
+                  id="precio_venta"
+                  class="form-control"
+                  placeholder="0.00"
+                  required
+                  <?= $editablePrecioInicial ? '' : 'readonly' ?>
+                  data-sucursales-libre="<?= htmlspecialchars(implode(',', $SUCURSALES_PRECIO_LIBRE)) ?>">
+                <div class="form-text <?= $editablePrecioInicial ? 'd-none' : '' ?>" id="txt_precio_auto">
+                  Se calcula automáticamente según los equipos seleccionados.
+                </div>
+                <div class="form-text d-none" id="txt_precio_manual">
+                  En esta sucursal puedes ajustar manualmente el precio de venta final.
+                </div>
                 <div class="form-text text-success-soft d-none" id="txt_cupon_info">
                   Cupón aplicado: -$<span id="lbl_cupon_monto">0.00</span> MXN
                 </div>
@@ -445,7 +466,16 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
               </div>
               <div class="col-md-4">
                 <label class="form-label">Comentarios</label>
-                <input type="text" name="comentarios" class="form-control" placeholder="Notas adicionales (opcional)">
+                <input
+                  type="text"
+                  name="comentarios"
+                  id="comentarios"
+                  class="form-control"
+                  placeholder="Notas adicionales (opcional)"
+                  autocomplete="off"
+                  autocapitalize="off"
+                  autocorrect="off"
+                  spellcheck="false" />
               </div>
             </div>
           </div>
@@ -516,7 +546,8 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
                 name="password_confirm"
                 form="form_venta"
                 placeholder="Escribe tu contraseña"
-                autocomplete="current-password" />
+                autocomplete="off" />
+
               <div class="form-text">
                 Esta venta se registrará a nombre de <strong><?= htmlspecialchars($nombre_usuario) ?></strong>.
                 Para continuar, confirma que eres tú ingresando tu contraseña.
@@ -694,9 +725,6 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
       </div>
     </div>
 
-    <!-- Si no tienes el bundle en navbar, descomenta: -->
-    <!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
-
     <script>
       $(document).ready(function() {
         const idSucursalUsuario = <?= $id_sucursal_usuario ?>;
@@ -705,6 +733,28 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
         const modalClientes = new bootstrap.Modal(document.getElementById('modalClientes'));
         const modalCupon = new bootstrap.Modal(document.getElementById('modalCupon'));
         const modalEngancheInfo = new bootstrap.Modal(document.getElementById('modalEngancheInfo'));
+
+        // 🔹 Sucursales con precio editable (vienen del data-attribute del input)
+        const sucursalesPrecioLibre = (String($('#precio_venta').data('sucursales-libre') || ''))
+          .split(',')
+          .map(s => parseInt(s.trim(), 10))
+          .filter(n => !isNaN(n));
+
+        function esSucursalPrecioLibre(idSucursal) {
+          const id = parseInt(idSucursal, 10);
+          if (isNaN(id)) return false;
+          return sucursalesPrecioLibre.includes(id);
+        }
+
+        // Flag para saber si el usuario ya tocó manualmente el precio en sucursales libres
+        let precioEditadoManualmente = false;
+
+        $('#precio_venta').on('input', function() {
+          const idSuc = $('#id_sucursal').val();
+          if (esSucursalPrecioLibre(idSuc)) {
+            precioEditadoManualmente = true;
+          }
+        });
 
         // 🔹 Mostrar aviso de enganche solo una vez al enfocar el campo
         let engancheModalShown = false;
@@ -874,7 +924,7 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
         // 🔹 Permitir buscar con Enter en el campo de búsqueda
         $('#cliente_buscar_q').on('keydown', function(e) {
           if (e.key === 'Enter') {
-            e.preventDefault(); // evita que el enter cierre el modal o envíe algo raro
+            e.preventDefault();
             $('#btn_buscar_modal').click();
           }
         });
@@ -936,6 +986,24 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
           }
         }
 
+        // 🔹 Actualiza si el precio puede editarse o no según sucursal
+        function actualizarBloqueoPrecio() {
+          const idSucSel = $('#id_sucursal').val();
+          const esLibre = esSucursalPrecioLibre(idSucSel);
+
+          $('#precio_venta').prop('readonly', !esLibre);
+
+          if (esLibre) {
+            $('#txt_precio_auto').addClass('d-none');
+            $('#txt_precio_manual').removeClass('d-none');
+          } else {
+            $('#txt_precio_auto').removeClass('d-none');
+            $('#txt_precio_manual').addClass('d-none');
+            // Al salir de una sucursal libre, reseteamos el flag de edición manual
+            precioEditadoManualmente = false;
+          }
+        }
+
         // 🔹 Recalcular precio total según equipos y tipo (aplica cupón si está aceptado)
         function recalcPrecioVenta() {
           let total = 0;
@@ -962,10 +1030,14 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
           }
           if (total < 0) total = 0;
 
-          if (total > 0) {
-            $('#precio_venta').val(total.toFixed(2));
-          } else {
-            $('#precio_venta').val('');
+          const esLibre = esSucursalPrecioLibre($('#id_sucursal').val());
+
+          if (!esLibre || !precioEditadoManualmente) {
+            if (total > 0) {
+              $('#precio_venta').val(total.toFixed(2));
+            } else {
+              $('#precio_venta').val('');
+            }
           }
 
           const precio = parseFloat($('#precio_venta').val()) || 0;
@@ -1116,7 +1188,7 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
           /* redefinido en initEquipos */
         }
 
-        // ===== Cambio de sucursal: aviso + consulta candado en caliente =====
+        // ===== Cambio de sucursal: aviso + consulta candado en caliente + bloqueo precio =====
         $('#id_sucursal').on('change', function() {
           const seleccionada = parseInt($(this).val());
           if (seleccionada !== idSucursalUsuario) {
@@ -1144,6 +1216,12 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
           }, 'json').fail(function() {
             console.warn('No se pudo verificar el candado por AJAX. El back-end seguirá validando.');
           });
+
+          // Actualizar permiso de edición de precio
+          actualizarBloqueoPrecio();
+          // Al cambiar de sucursal, si es libre, el cálculo llenará el precio la primera vez
+          precioEditadoManualmente = false;
+          recalcPrecioVenta();
         });
 
         // ========= Validación + modal =========
@@ -1341,6 +1419,9 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
           recalcPrecioVenta();
         }
         initEquipos();
+
+        // Inicial: actualizar modo de precio (auto vs editable) según sucursal actual
+        actualizarBloqueoPrecio();
 
         // De inicio, sin cliente
         limpiarCliente();

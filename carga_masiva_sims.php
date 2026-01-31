@@ -15,6 +15,7 @@ const OPERADORES_VALIDOS = ['Bait','AT&T','Virgin','Unefon','Telcel','Movistar']
 $msg = '';
 $previewRows = [];
 $contador = ['total' => 0, 'ok' => 0, 'ignoradas' => 0];
+$okCarga = isset($_GET['ok']); // bandera para mostrar mensaje después de recargar
 
 // ========= Helpers =========
 function columnAllowsNull(mysqli $conn, string $table, string $column): bool {
@@ -70,21 +71,55 @@ function normalizarOperador(string $opRaw): array {
     return [$opRaw, false];
 }
 
+/**
+ * Limpia el texto crudo del header:
+ * - Quita BOM (por bytes y por la secuencia ï»¿).
+ * - Quita espacios raros y normaliza a minúsculas.
+ */
+function cleanHeaderRaw(string $raw): string {
+    // Quitar BOM en bytes al inicio
+    $raw = preg_replace('/^\xEF\xBB\xBF/u', '', $raw);
+    // A veces el BOM ya viene “traducido” a caracteres visibles
+    $raw = str_replace('ï»¿', '', $raw);
+    // Quitar posibles NBSP (espacio no separable)
+    $raw = str_replace("\xC2\xA0", ' ', $raw);
+    // Trim normal
+    $raw = trim($raw);
+    // Normalizar a minúsculas
+    $raw = strtolower($raw);
+    // Reemplazar espacios y guiones por guion bajo
+    $raw = str_replace([' ', '-'], '_', $raw);
+    return $raw;
+}
+
 /** Lee el header del CSV y arma un mapa de índice por nombre de columna (case-insensitive). */
 function buildHeaderMap(array $hdr): array {
     $map = [];
     foreach ($hdr as $i => $raw) {
-        $k = strtolower(trim((string)$raw));
-        $k = str_replace([' ', '-'], '_', $k);
+        $k = cleanHeaderRaw((string)$raw);
+        if ($k === '') continue;
         $map[$k] = $i;
     }
-    // alias comunes
+
+    // alias comunes para caja
     if (!isset($map['caja_id'])) {
-        if (isset($map['id_caja'])) $map['caja_id'] = $map['id_caja'];
+        if (isset($map['id_caja']))  $map['caja_id'] = $map['id_caja'];
         elseif (isset($map['caja'])) $map['caja_id'] = $map['caja'];
     }
+
+    // detectar iccid aunque tenga suciedad rara (cualquier header que contenga "iccid")
+    if (!isset($map['iccid'])) {
+        foreach ($map as $k => $idx) {
+            if (strpos($k, 'iccid') !== false) {
+                $map['iccid'] = $idx;
+                break;
+            }
+        }
+    }
+
     return $map;
 }
+
 function getCsvVal(array $row, array $map, string $key): string {
     if (isset($map[$key])) return trim((string)($row[$map[$key]] ?? ''));
     return '';
@@ -106,6 +141,98 @@ $lotePermiteNull = columnAllowsNull($conn, 'inventario_sims', 'lote');
 
 // Cache de búsqueda de sucursal
 $sucursalCache = [];
+
+// ========= INSERTAR =========
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'insertar') {
+    $word = trim($_POST['confirm_word'] ?? '');
+    $chk  = isset($_POST['confirm_ok']) ? 1 : 0;
+    $token_recv = $_POST['confirm_token'] ?? '';
+    $token_sess = $_SESSION['confirm_token'] ?? '';
+    if ($word !== 'CARGAR' || $chk !== 1 || $token_recv !== $token_sess) {
+        echo "❌ Confirmación inválida.";
+        exit;
+    }
+    $tmpPath = $_SESSION['carga_sims_tmp'] ?? '';
+    if ($tmpPath === '' || !is_file($tmpPath)) {
+        echo "❌ Archivo temporal no encontrado.";
+        exit;
+    }
+
+    if (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+    header('Content-Type: text/csv; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="reporte_carga_sims.csv"');
+
+    $out = fopen('php://output', 'w');
+    fputcsv($out, ['iccid','dn','caja','lote','sucursal','operador','estatus_final','motivo']);
+
+    $sqlInsert = "INSERT INTO inventario_sims (iccid,dn,caja_id,lote,id_sucursal,operador,estatus,fecha_ingreso)
+                  VALUES (?,?,?,?,?,?,'Disponible',NOW())";
+    $stmtInsert = $conn->prepare($sqlInsert);
+
+    $fh = fopen($tmpPath, 'r');
+    $fila = 0; $hdrMap = null;
+    while (($data = fgetcsv($fh, 0, ",")) !== false) {
+        $fila++;
+        if ($fila === 1) {
+            $hdrMap = buildHeaderMap($data);
+            continue;
+        }
+
+        $iccid   = getCsvVal($data, $hdrMap, 'iccid');
+        $dn      = getCsvVal($data, $hdrMap, 'dn');
+        $caja    = getCsvVal($data, $hdrMap, 'caja_id');
+        $lote    = getCsvVal($data, $hdrMap, 'lote');
+        $sucNom  = getCsvVal($data, $hdrMap, 'sucursal');
+        $opRaw   = getCsvVal($data, $hdrMap, 'operador');
+
+        $id_sucursal = $sucNom === '' ? $idEulalia : getSucursalIdPorNombre($conn, $sucNom, $sucursalCache);
+        [$operador, $opValido] = normalizarOperador($opRaw);
+
+        $estatusFinal='Ignorada';
+        $motivo='N/A';
+
+        if ($iccid===''){
+            $motivo='ICCID vacío';
+        } elseif ($id_sucursal===0){
+            $motivo='Sucursal no encontrada';
+        } elseif (!$opValido){
+            $motivo='Operador inválido';
+        } else {
+            $stmtDup = $conn->prepare("SELECT id FROM inventario_sims WHERE iccid=? LIMIT 1");
+            $stmtDup->bind_param("s", $iccid);
+            $stmtDup->execute();
+            $stmtDup->store_result();
+
+            if ($stmtDup->num_rows > 0) {
+                $motivo='Duplicado';
+            } else {
+                // DN vacío -> NULL si la columna lo permite
+                $dnParam   = ($dn === '')   ? ($dnPermiteNull   ? null : '') : $dn;
+                // LOTE vacío -> NULL si la columna lo permite
+                $loteParam = ($lote === '') ? ($lotePermiteNull ? null : '') : $lote;
+
+                $stmtInsert->bind_param("ssssis", $iccid, $dnParam, $caja, $loteParam, $id_sucursal, $operador);
+
+                if ($stmtInsert->execute()) {
+                    $estatusFinal='Insertada';
+                    $motivo='OK';
+                } else {
+                    $motivo='Error inserción';
+                }
+            }
+            $stmtDup->close();
+        }
+
+        fputcsv($out, [$iccid,$dn,$caja,$lote,$sucNom,$operador,$estatusFinal,$motivo]);
+    }
+    fclose($fh);
+    fclose($out);
+    @unlink($tmpPath);
+    unset($_SESSION['carga_sims_tmp'], $_SESSION['confirm_token']);
+    exit;
+}
 
 // ========= PREVIEW =========
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'preview' && isset($_FILES['archivo_csv'])) {
@@ -129,12 +256,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'previ
                     $fila = 0; $hdrMap = null;
                     while (($data = fgetcsv($fh, 0, ",")) !== false) {
                         $fila++;
-                        if ($fila === 1) { $hdrMap = buildHeaderMap($data); continue; } // header dinámico
+                        if ($fila === 1) {
+                            $hdrMap = buildHeaderMap($data);
+                            continue;
+                        }
 
                         $iccid   = getCsvVal($data, $hdrMap, 'iccid');
                         $dn      = getCsvVal($data, $hdrMap, 'dn');
-                        $caja    = getCsvVal($data, $hdrMap, 'caja_id');        // acepta caja/id_caja/caja_id
-                        $lote    = getCsvVal($data, $hdrMap, 'lote');           // nuevo (opcional)
+                        $caja    = getCsvVal($data, $hdrMap, 'caja_id');
+                        $lote    = getCsvVal($data, $hdrMap, 'lote');
                         $sucNom  = getCsvVal($data, $hdrMap, 'sucursal');
                         $opRaw   = getCsvVal($data, $hdrMap, 'operador');
 
@@ -143,22 +273,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'previ
 
                         $estatus = 'OK'; $motivo = 'Listo para insertar';
                         if ($iccid === '') {
-                            $estatus='Ignorada'; 
-                            $motivo='ICCID vacío'; 
-                        } elseif ($id_sucursal === 0) { 
-                            $estatus='Ignorada'; 
-                            $motivo='Sucursal no encontrada'; 
-                        } elseif (!$opValido) { 
-                            $estatus='Ignorada'; 
-                            $motivo='Operador inválido'; 
+                            $estatus='Ignorada';
+                            $motivo='ICCID vacío';
+                        } elseif ($id_sucursal === 0) {
+                            $estatus='Ignorada';
+                            $motivo='Sucursal no encontrada';
+                        } elseif (!$opValido) {
+                            $estatus='Ignorada';
+                            $motivo='Operador inválido';
                         } else {
                             $stmtDup = $conn->prepare("SELECT id FROM inventario_sims WHERE iccid=? LIMIT 1");
                             $stmtDup->bind_param("s", $iccid);
-                            $stmtDup->execute(); 
+                            $stmtDup->execute();
                             $stmtDup->store_result();
-                            if ($stmtDup->num_rows > 0) { 
-                                $estatus='Ignorada'; 
-                                $motivo='Duplicado en base'; 
+                            if ($stmtDup->num_rows > 0) {
+                                $estatus='Ignorada';
+                                $motivo='Duplicado en base';
                             }
                             $stmtDup->close();
                         }
@@ -186,88 +316,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'previ
         }
     }
 }
-
-// ========= INSERTAR =========
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'insertar') {
-    $word = trim($_POST['confirm_word'] ?? '');
-    $chk  = isset($_POST['confirm_ok']) ? 1 : 0;
-    $token_recv = $_POST['confirm_token'] ?? '';
-    $token_sess = $_SESSION['confirm_token'] ?? '';
-    if ($word !== 'CARGAR' || $chk !== 1 || $token_recv !== $token_sess) {
-        echo "❌ Confirmación inválida."; exit;
-    }
-    $tmpPath = $_SESSION['carga_sims_tmp'] ?? '';
-    if ($tmpPath === '' || !is_file($tmpPath)) { echo "❌ Archivo temporal no encontrado."; exit; }
-
-    header('Content-Type: text/csv; charset=UTF-8');
-    header('Content-Disposition: attachment; filename="reporte_carga_sims.csv"');
-    $out = fopen('php://output', 'w');
-    fputcsv($out, ['iccid','dn','caja','lote','sucursal','operador','estatus_final','motivo']);
-
-    $sqlInsert = "INSERT INTO inventario_sims (iccid,dn,caja_id,lote,id_sucursal,operador,estatus,fecha_ingreso)
-                  VALUES (?,?,?,?,?,?,'Disponible',NOW())";
-    $stmtInsert = $conn->prepare($sqlInsert);
-
-    $fh = fopen($tmpPath, 'r');
-    $fila = 0; $hdrMap = null;
-    while (($data = fgetcsv($fh, 0, ",")) !== false) {
-        $fila++;
-        if ($fila === 1) { $hdrMap = buildHeaderMap($data); continue; }
-
-        $iccid   = getCsvVal($data, $hdrMap, 'iccid');
-        $dn      = getCsvVal($data, $hdrMap, 'dn');
-        $caja    = getCsvVal($data, $hdrMap, 'caja_id');
-        $lote    = getCsvVal($data, $hdrMap, 'lote');    // puede venir vacío
-        $sucNom  = getCsvVal($data, $hdrMap, 'sucursal');
-        $opRaw   = getCsvVal($data, $hdrMap, 'operador');
-
-        $id_sucursal = $sucNom === '' ? $idEulalia : getSucursalIdPorNombre($conn, $sucNom, $sucursalCache);
-        [$operador, $opValido] = normalizarOperador($opRaw);
-
-        $estatusFinal='Ignorada'; 
-        $motivo='N/A';
-
-        if ($iccid===''){ 
-            $motivo='ICCID vacío'; 
-        } elseif ($id_sucursal===0){ 
-            $motivo='Sucursal no encontrada'; 
-        } elseif (!$opValido){ 
-            $motivo='Operador inválido'; 
-        } else {
-            $stmtDup=$conn->prepare("SELECT id FROM inventario_sims WHERE iccid=? LIMIT 1");
-            $stmtDup->bind_param("s",$iccid);
-            $stmtDup->execute(); 
-            $stmtDup->store_result();
-
-            if($stmtDup->num_rows>0){
-                $motivo='Duplicado';
-            } else {
-                // DN vacío -> NULL si la columna lo permite
-                $dnParam   = ($dn === '')   ? ($dnPermiteNull   ? null : '') : $dn;
-                // LOTE vacío -> NULL si la columna lo permite
-                $loteParam = ($lote === '') ? ($lotePermiteNull ? null : '') : $lote;
-
-                // Tipos: iccid(s), dn(s), caja(s), lote(s), id_sucursal(i), operador(s)
-                $stmtInsert->bind_param("ssssis", $iccid, $dnParam, $caja, $loteParam, $id_sucursal, $operador);
-
-                if($stmtInsert->execute()){
-                    $estatusFinal='Insertada'; 
-                    $motivo='OK';
-                } else {
-                    $motivo='Error inserción';
-                }
-            }
-            $stmtDup->close();
-        }
-
-        fputcsv($out, [$iccid,$dn,$caja,$lote,$sucNom,$operador,$estatusFinal,$motivo]);
-    }
-    fclose($fh); 
-    fclose($out);
-    @unlink($tmpPath);
-    unset($_SESSION['carga_sims_tmp'],$_SESSION['confirm_token']);
-    exit;
-}
 ?>
 <!DOCTYPE html>
 <html lang="es">
@@ -284,6 +332,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'inser
 <div class="container mt-4">
     <h2>Carga Masiva de SIMs</h2>
     <a href="dashboard_unificado.php" class="btn btn-secondary mb-3">← Volver al Dashboard</a>
+
+    <?php if ($okCarga): ?>
+        <div class="alert alert-success">
+            ✅ La última carga de SIMs se procesó correctamente. Revisa el archivo de reporte descargado para ver el detalle.
+        </div>
+    <?php endif; ?>
 
     <?php if ($msg): ?><div class="alert alert-info"><?= $msg ?></div><?php endif; ?>
 
@@ -308,8 +362,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'inser
         <div class="card p-4 shadow-sm bg-white">
             <h5>Vista Previa</h5>
             <p>
-                Total filas: <b><?= $contador['total'] ?></b> | 
-                OK: <b class="text-success"><?= $contador['ok'] ?></b> | 
+                Total filas: <b><?= $contador['total'] ?></b> |
+                OK: <b class="text-success"><?= $contador['ok'] ?></b> |
                 Ignoradas: <b class="text-danger"><?= $contador['ignoradas'] ?></b>
             </p>
             <div class="table-responsive">
@@ -343,12 +397,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'inser
                 </table>
             </div>
 
-            <!-- Form de inserción: lo mandamos a un iframe oculto -->
+            <!-- Form de inserción: usa iframe oculto -->
             <form method="POST" class="mt-3" id="formInsertar" target="hidden_iframe">
                 <input type="hidden" name="action" value="insertar">
                 <input type="hidden" name="confirm_token" value="<?= htmlspecialchars($_SESSION['confirm_token'] ?? '') ?>">
                 <div class="alert alert-warning">
-                    Se insertarán hasta 
+                    Se insertarán hasta
                     <b class="text-success"><?= $contador['ok'] ?></b> registros válidos.
                     También se descargará un archivo con el detalle de la carga.
                 </div>
@@ -366,10 +420,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'inser
     <?php endif; ?>
 </div>
 
-<!-- Iframe oculto para recibir la respuesta de la carga (CSV) -->
+<!-- Iframe oculto para procesar la carga y descargar el CSV -->
 <iframe name="hidden_iframe" id="hidden_iframe" style="display:none;"></iframe>
 
-<!-- Modal de 'Ya quedó' -->
+<!-- Modal de confirmación visual -->
 <div class="modal fade" id="modalCargaOK" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered">
     <div class="modal-content">
@@ -379,31 +433,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'inser
       </div>
       <div class="modal-body">
         <p class="mb-0">
-          Listo 🙌<br>
-          La <b>carga masiva de SIMs</b> se está procesando y se generó el archivo de reporte con todo el detalle.<br>
-          Revisa el archivo que se descargó para confirmar qué SIMs se insertaron, cuáles se ignoraron y los posibles duplicados. 🔍
+          La <b>carga masiva de SIMs</b> ya se procesó y se generó el archivo de reporte con el detalle de la operación.<br>
+          Para evitar cargas duplicadas se recargará la vista una vez que cierres este mensaje.
         </p>
       </div>
       <div class="modal-footer">
-        <a href="carga_masiva_sims.php" class="btn btn-outline-secondary">
-          Cargar otro archivo
-        </a>
         <button type="button" class="btn btn-primary" id="btnEntendido">
-            ¡Entendido!
+            Entendido y recargar
         </button>
       </div>
     </div>
   </div>
 </div>
 
-<!-- JS de Bootstrap + lógica del modal -->
+<!-- JS de Bootstrap + lógica -->
 <!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script> -->
 <script>
 (function(){
-    // Habilitar / deshabilitar botón Confirmar
     const chk  = document.getElementById('confirm_ok');
     const word = document.querySelector('[name=confirm_word]');
     const btn  = document.getElementById('btnConfirm');
+    const form = document.getElementById('formInsertar');
+    const iframe = document.getElementById('hidden_iframe');
+    const btnEntendido = document.getElementById('btnEntendido');
+    let iframeHandled = false;
 
     function toggleBtn(){
         if (!btn || !word || !chk) return;
@@ -416,33 +469,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'inser
         toggleBtn();
     }
 
-    // Mostrar modal y bloquear doble envío al hacer submit
-    const form   = document.getElementById('formInsertar');
-
-    if (form) {
+    if (form && btn) {
         form.addEventListener('submit', function(){
-            // Bloquear doble envío
-            if (btn) {
-                btn.disabled = true;
-                btn.innerText = 'Procesando carga...';
-            }
+            btn.disabled = true;
+            btn.innerText = 'Procesando carga...';
             if (chk) chk.disabled = true;
             if (word) word.readOnly = true;
+        });
+    }
 
-            // Mostrar modal "YA QUEDÓ" (mientras se descarga el CSV)
+    // Cuando el iframe termine (o sea, ya acabó la carga y se generó el CSV)
+    if (iframe) {
+        iframe.addEventListener('load', function(){
+            if (iframeHandled) return;
+            iframeHandled = true;
+
             const modalEl = document.getElementById('modalCargaOK');
             if (modalEl && window.bootstrap) {
                 const modal = new bootstrap.Modal(modalEl);
                 modal.show();
+            } else {
+                // fallback: recargar directo
+                window.location.href = 'carga_masiva_sims.php?ok=1';
             }
         });
     }
 
-    // Botón ¡Entendido!: recarga la página para limpiar la vista
-    const btnEntendido = document.getElementById('btnEntendido');
     if (btnEntendido) {
-        btnEntendido.addEventListener('click', function () {
-            window.location.href = 'carga_masiva_sims.php';
+        btnEntendido.addEventListener('click', function(){
+            window.location.href = 'carga_masiva_sims.php?ok=1';
         });
     }
 })();

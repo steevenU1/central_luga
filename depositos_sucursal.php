@@ -60,6 +60,54 @@ $ALLOWED_BANKS = [
   'Banco del Bajío','Banca Mifel','Compartamos Banco'
 ];
 
+/* =======================
+   Helpers
+   ======================= */
+function hasColumn(mysqli $conn, string $table, string $column): bool {
+  $t = $conn->real_escape_string($table);
+  $c = $conn->real_escape_string($column);
+  $sql = "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+          WHERE TABLE_SCHEMA = DATABASE()
+            AND TABLE_NAME = '{$t}'
+            AND COLUMN_NAME = '{$c}'
+          LIMIT 1";
+  $res = $conn->query($sql);
+  return $res && $res->num_rows > 0;
+}
+
+/* =======================
+   Auto-migración (segura)
+   ======================= */
+if (!hasColumn($conn, 'depositos_sucursal', 'comentario_admin')) {
+  @$conn->query("ALTER TABLE depositos_sucursal
+                 ADD COLUMN comentario_admin TEXT NULL AFTER referencia");
+}
+if (!hasColumn($conn, 'depositos_sucursal', 'correccion_motivo')) {
+  @$conn->query("ALTER TABLE depositos_sucursal
+                 ADD COLUMN correccion_motivo TEXT NULL AFTER comentario_admin");
+}
+if (!hasColumn($conn, 'depositos_sucursal', 'correccion_solicitada_en')) {
+  @$conn->query("ALTER TABLE depositos_sucursal
+                 ADD COLUMN correccion_solicitada_en DATETIME NULL AFTER correccion_motivo");
+}
+if (!hasColumn($conn, 'depositos_sucursal', 'correccion_solicitada_por')) {
+  @$conn->query("ALTER TABLE depositos_sucursal
+                 ADD COLUMN correccion_solicitada_por INT(11) NULL AFTER correccion_solicitada_en");
+}
+if (!hasColumn($conn, 'depositos_sucursal', 'correccion_resuelta_en')) {
+  @$conn->query("ALTER TABLE depositos_sucursal
+                 ADD COLUMN correccion_resuelta_en DATETIME NULL AFTER correccion_solicitada_por");
+}
+if (!hasColumn($conn, 'depositos_sucursal', 'correccion_resuelta_por')) {
+  @$conn->query("ALTER TABLE depositos_sucursal
+                 ADD COLUMN correccion_resuelta_por INT(11) NULL AFTER correccion_resuelta_en");
+}
+
+// Intento seguro de extender ENUM para permitir 'Correccion'
+@ $conn->query("ALTER TABLE depositos_sucursal
+                MODIFY estado ENUM('Pendiente','Parcial','Correccion','Validado')
+                NOT NULL DEFAULT 'Pendiente'");
+
 /* ------- helper: guardar comprobante para un depósito ------- */
 function guardar_comprobante(mysqli $conn, int $deposito_id, array $file, int $idUsuario, int $MAX_BYTES, array $ALLOWED, &$errMsg): bool {
   if (!isset($file['error']) || $file['error'] === UPLOAD_ERR_NO_FILE) {
@@ -118,6 +166,66 @@ function guardar_comprobante(mysqli $conn, int $deposito_id, array $file, int $i
   return true;
 }
 
+/* =========================================================
+   0) Re-subir comprobante (cuando estado = Correccion)
+   ========================================================= */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['accion']) && $_POST['accion']==='resubir') {
+  $deposito_id = (int)($_POST['deposito_id'] ?? 0);
+
+  if ($deposito_id <= 0) {
+    $msg = "<div class='alert alert-danger shadow-sm'>❌ Depósito inválido.</div>";
+  } else {
+    // Verificar que exista y pertenezca a esta sucursal y esté en Correccion
+    $st = $conn->prepare("
+      SELECT id, estado
+      FROM depositos_sucursal
+      WHERE id = ? AND id_sucursal = ?
+      LIMIT 1
+    ");
+    $st->bind_param('ii', $deposito_id, $idSucursal);
+    $st->execute();
+    $dep = $st->get_result()->fetch_assoc();
+    $st->close();
+
+    if (!$dep) {
+      $msg = "<div class='alert alert-danger shadow-sm'>❌ No se encontró el depósito.</div>";
+    } elseif (($dep['estado'] ?? '') !== 'Correccion') {
+      $msg = "<div class='alert alert-warning shadow-sm'>⚠ Este depósito no está en Corrección.</div>";
+    } else {
+      $errUp = '';
+      if (!isset($_FILES['comprobante']) || $_FILES['comprobante']['error'] === UPLOAD_ERR_NO_FILE) {
+        $msg = "<div class='alert alert-warning shadow-sm'>⚠ Debes adjuntar el comprobante corregido.</div>";
+      } else {
+        if (guardar_comprobante($conn, $deposito_id, $_FILES['comprobante'], $idUsuario, $MAX_BYTES, $ALLOWED, $errUp)) {
+
+          // Marcar como Pendiente y registrar resolución
+          $up = $conn->prepare("
+            UPDATE depositos_sucursal
+            SET estado = 'Pendiente',
+                correccion_resuelta_en = NOW(),
+                correccion_resuelta_por = ?,
+                actualizado_en = NOW()
+            WHERE id = ? AND id_sucursal = ? AND estado = 'Correccion'
+          ");
+          $up->bind_param('iii', $idUsuario, $deposito_id, $idSucursal);
+          $up->execute();
+          $ok = ($up->affected_rows > 0);
+          $up->close();
+
+          if ($ok) {
+            $msg = "<div class='alert alert-success shadow-sm'>✅ Comprobante re-subido. El depósito volvió a <b>Pendiente</b> para validación del Admin.</div>";
+          } else {
+            $msg = "<div class='alert alert-warning shadow-sm'>⚠ Se subió el archivo, pero no se pudo cambiar el estado. Revisa el estado actual del depósito.</div>";
+          }
+
+        } else {
+          $msg = "<div class='alert alert-danger shadow-sm'>❌ No se pudo re-subir el comprobante: ".htmlspecialchars($errUp)."</div>";
+        }
+      }
+    }
+  }
+}
+
 /* ------- Registrar DEPÓSITO (referencia OBLIGATORIA y NUMÉRICA) ------- */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['accion']) && $_POST['accion']==='registrar') {
   $id_corte        = (int)($_POST['id_corte'] ?? 0);
@@ -167,7 +275,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['accion']) && $_POST['
                   (id_sucursal, id_corte, fecha_deposito, monto_depositado, banco, referencia, observaciones, estado, creado_en)
                 VALUES (?, ?, ?, ?, ?, ?, ?, 'Pendiente', NOW())
               ");
-              // i, i, s, d, s, s, s   ->  id_sucursal, id_corte, fecha, monto, banco, referencia, motivo
+              // i, i, s, d, s, s, s
               $stmtIns->bind_param("iisdsss", $idSucursal, $id_corte, $fecha_deposito, $monto, $banco, $referencia, $motivo);
               if ($stmtIns->execute()) {
                 $deposito_id = $stmtIns->insert_id;
@@ -219,22 +327,22 @@ if ($f_fin    !== '') { $conds[] = 'ds.fecha_deposito <= ?'; $types .= 's'; $par
 if ($f_banco  !== '') { $conds[] = 'ds.banco = ?';             $types .= 's'; $params[] = $f_banco; }
 if ($f_estado !== '') { $conds[] = 'ds.estado = ?';            $types .= 's'; $params[] = $f_estado; }
 if ($f_q      !== '') {
-  // 🔎 ahora también busca en comentario_admin
-  $conds[] = '(ds.referencia LIKE ? OR ds.banco LIKE ? OR ds.observaciones LIKE ? OR ds.comentario_admin LIKE ?)';
-  $types  .= 'ssss';
+  // 🔎 ahora también busca en comentario_admin y correccion_motivo
+  $conds[] = '(ds.referencia LIKE ? OR ds.banco LIKE ? OR ds.observaciones LIKE ? OR ds.comentario_admin LIKE ? OR ds.correccion_motivo LIKE ?)';
+  $types  .= 'sssss';
   $like = '%'.$f_q.'%';
-  array_push($params, $like, $like, $like, $like);
+  array_push($params, $like, $like, $like, $like, $like);
 }
 $where = implode(' AND ', $conds);
 
 /* ------- Export CSV si se pide ------- */
 if (isset($_GET['export']) && $_GET['export'] == '1') {
   $sqlExp = "SELECT ds.id, ds.id_corte, cc.fecha_corte, ds.fecha_deposito, ds.monto_depositado,
-                    ds.banco, ds.referencia, ds.estado
+                    ds.banco, ds.referencia, ds.estado, ds.correccion_motivo
              FROM depositos_sucursal ds
              INNER JOIN cortes_caja cc ON cc.id = ds.id_corte
              WHERE $where
-             ORDER BY ds.fecha_deposito DESC, ds.id DESC";
+             ORDER BY FIELD(ds.estado,'Correccion','Pendiente','Parcial','Validado') ASC, ds.fecha_deposito DESC, ds.id DESC";
   $stmt = $conn->prepare($sqlExp);
   $stmt->bind_param($types, ...$params);
   $stmt->execute();
@@ -242,14 +350,14 @@ if (isset($_GET['export']) && $_GET['export'] == '1') {
 
   header('Content-Type: text/csv; charset=UTF-8');
   header('Content-Disposition: attachment; filename="depositos_'.date('Ymd_His').'.csv"');
-  // BOM para Excel
   echo "\xEF\xBB\xBF";
   $out = fopen('php://output', 'w');
-  fputcsv($out, ['ID Depósito','ID Corte','Fecha Corte','Fecha Depósito','Monto','Banco','Referencia','Estado']);
+  fputcsv($out, ['ID Depósito','ID Corte','Fecha Corte','Fecha Depósito','Monto','Banco','Referencia','Estado','Motivo Corrección']);
   while ($row = $res->fetch_assoc()) {
     fputcsv($out, [
       $row['id'], $row['id_corte'], $row['fecha_corte'], $row['fecha_deposito'],
-      number_format((float)$row['monto_depositado'], 2, '.', ''), $row['banco'], $row['referencia'], $row['estado']
+      number_format((float)$row['monto_depositado'], 2, '.', ''), $row['banco'], $row['referencia'], $row['estado'],
+      $row['correccion_motivo'] ?? ''
     ]);
   }
   fclose($out);
@@ -257,7 +365,7 @@ if (isset($_GET['export']) && $_GET['export'] == '1') {
 }
 
 /* ------- Consultas para render ------- */
-// Cortes pendientes
+// Cortes pendientes de depósito (no cambia)
 $sqlPendientes = "
   SELECT cc.id, cc.fecha_corte, cc.total_efectivo,
          IFNULL(SUM(ds.monto_depositado),0) AS total_depositado
@@ -272,7 +380,7 @@ $stmtPend->execute();
 $cortesPendientes = $stmtPend->get_result()->fetch_all(MYSQLI_ASSOC);
 $stmtPend->close();
 
-// Historial paginado (trae comentario_admin dentro de ds.*)
+// Historial paginado
 $sqlCount = "SELECT COUNT(*) AS n
              FROM depositos_sucursal ds
              INNER JOIN cortes_caja cc ON cc.id = ds.id_corte
@@ -289,7 +397,7 @@ $sqlHistorial = "
   FROM depositos_sucursal ds
   INNER JOIN cortes_caja cc ON cc.id = ds.id_corte
   WHERE $where
-  ORDER BY ds.fecha_deposito DESC, ds.id DESC
+  ORDER BY FIELD(ds.estado,'Correccion','Pendiente','Parcial','Validado') ASC, ds.fecha_deposito DESC, ds.id DESC
   LIMIT ? OFFSET ?";
 $stmtHist = $conn->prepare($sqlHistorial);
 $types2 = $types . 'ii';
@@ -321,6 +429,19 @@ $stmtCmt->execute();
 $numConComentario = (int)$stmtCmt->get_result()->fetch_assoc()['n'];
 $stmtCmt->close();
 
+// === Conteo de depósitos en Corrección ===
+$sqlCorr = "
+  SELECT COUNT(*) AS n
+  FROM depositos_sucursal
+  WHERE id_sucursal = ?
+    AND estado = 'Correccion'
+";
+$stmtCorr = $conn->prepare($sqlCorr);
+$stmtCorr->bind_param('i', $idSucursal);
+$stmtCorr->execute();
+$numEnCorreccion = (int)$stmtCorr->get_result()->fetch_assoc()['n'];
+$stmtCorr->close();
+
 ?>
 <!DOCTYPE html>
 <html lang="es" data-bs-theme="light">
@@ -346,6 +467,7 @@ $stmtCmt->close();
     .chip-success{background:#e7f8ef;color:#0f7a3d;border:1px solid #b7f1cf}
     .chip-warn{background:#fff6e6;color:#9a6200;border:1px solid #ffe1a8}
     .chip-pending{background:#eef2ff;color:#3f51b5;border:1px solid #dfe3ff}
+    .chip-corr{background:#ffe8e8;color:#b42318;border:1px solid #ffcdcd}
 
     /* 🔴 indicador de comentario admin */
     .chip-alert{background:#ffe8e8;color:#b42318;border:1px solid #ffcdcd}
@@ -387,6 +509,19 @@ $stmtCmt->close();
 
   <?= $msg ?>
 
+  <?php if (!empty($numEnCorreccion) && $numEnCorreccion > 0): ?>
+    <div class="alert alert-danger shadow-sm d-flex align-items-center justify-content-between" role="alert" style="border-left:6px solid #b42318;">
+      <div class="d-flex align-items-center gap-2">
+        <i class="bi bi-exclamation-triangle-fill fs-4"></i>
+        <div>
+          Tienes <strong><?= (int)$numEnCorreccion ?></strong> depósito<?= $numEnCorreccion>1?'s':'' ?> en <strong>Corrección</strong>.
+          Baja al historial y da clic en <strong>“Re-subir comprobante”</strong>.
+          <a href="#historialSection" class="alert-link ms-1">Ir al historial</a>
+        </div>
+      </div>
+    </div>
+  <?php endif; ?>
+
   <?php if (!empty($numConComentario) && $numConComentario > 0): ?>
   <div class="alert alert-danger shadow-sm d-flex align-items-center justify-content-between" role="alert" id="bannerComentarios" style="border-left:6px solid #dc3545;">
     <div class="d-flex align-items-center gap-2">
@@ -397,8 +532,7 @@ $stmtCmt->close();
       </div>
     </div>
   </div>
-<?php endif; ?>
-
+  <?php endif; ?>
 
   <!-- Cortes pendientes de depósito -->
   <div class="card-surface p-3 p-md-4 mb-4">
@@ -520,7 +654,7 @@ $stmtCmt->close();
         <div class="col-12 col-lg-4">
           <div class="form-floating">
             <input type="text" name="q" id="f_q" value="<?= htmlspecialchars($f_q) ?>" class="form-control" placeholder="Buscar">
-            <label for="f_q"><i class="bi bi-search me-1"></i>Buscar (referencia, banco, motivo, comentario)</label>
+            <label for="f_q"><i class="bi bi-search me-1"></i>Buscar (referencia, banco, motivo, comentario, corrección)</label>
           </div>
         </div>
 
@@ -552,7 +686,14 @@ $stmtCmt->close();
         <div class="col-6 col-lg-2">
           <div class="form-floating">
             <select name="f_estado" id="f_estado" class="form-select">
-              <?php $estados=[''=>'Todos','Pendiente'=>'Pendiente','Parcial'=>'Parcial','Validado'=>'Validado'];
+              <?php
+                $estados=[
+                  ''=>'Todos',
+                  'Correccion'=>'Corrección',
+                  'Pendiente'=>'Pendiente',
+                  'Parcial'=>'Parcial',
+                  'Validado'=>'Validado'
+                ];
                 foreach($estados as $k=>$v): $sel = ($f_estado===$k)?'selected':''; ?>
                 <option value="<?= htmlspecialchars($k) ?>" <?= $sel ?>><?= htmlspecialchars($v) ?></option>
               <?php endforeach; ?>
@@ -568,7 +709,6 @@ $stmtCmt->close();
       </form>
 
       <?php
-        // Chips de filtros activos (links para limpiar cada uno)
         $chips = [];
         if ($f_q      !== '') $chips[] = ['label' => 'Búsqueda: '.$f_q, 'key' => 'q'];
         if ($f_inicio !== '') $chips[] = ['label' => 'Desde: '.$f_inicio, 'key' => 'f_inicio'];
@@ -600,17 +740,21 @@ $stmtCmt->close();
             <th>Referencia</th>
             <th>Comprobante</th>
             <th>Estado</th>
-            <th>Comentario</th> <!-- NUEVA COL -->
+            <th>Comentario</th>
+            <th>Corrección</th>
+            <th>Acción</th>
           </tr>
         </thead>
         <tbody>
           <?php if (!$historial): ?>
-            <tr><td colspan="10" class="text-center text-muted py-4">Sin resultados con los filtros seleccionados.</td></tr>
-          <?php else: foreach ($historial as $h): 
+            <tr><td colspan="12" class="text-center text-muted py-4">Sin resultados con los filtros seleccionados.</td></tr>
+          <?php else: foreach ($historial as $h):
             $tieneComentario = isset($h['comentario_admin']) && trim($h['comentario_admin']) !== '';
             $comentarioPlano = $tieneComentario ? $h['comentario_admin'] : '';
+            $estadoRaw = (string)($h['estado'] ?? '');
+            $tieneCorr = ($estadoRaw === 'Correccion') && trim((string)($h['correccion_motivo'] ?? '')) !== '';
           ?>
-            <tr>
+            <tr class="<?= $estadoRaw==='Correccion'?'table-danger':'' ?>">
               <td><span class="badge text-bg-secondary">#<?= (int)$h['id'] ?></span></td>
               <td><?= (int)$h['id_corte'] ?></td>
               <td><?= htmlspecialchars($h['fecha_corte']) ?></td>
@@ -629,11 +773,12 @@ $stmtCmt->close();
               </td>
               <td>
                 <?php
-                  $estado = htmlspecialchars($h['estado']);
-                  if ($estado === 'Validado') {
+                  if ($estadoRaw === 'Validado') {
                     echo '<span class="chip chip-success"><i class="bi bi-check2-circle"></i> Validado</span>';
-                  } elseif ($estado === 'Parcial') {
+                  } elseif ($estadoRaw === 'Parcial') {
                     echo '<span class="chip chip-warn"><i class="bi bi-hourglass-split"></i> Parcial</span>';
+                  } elseif ($estadoRaw === 'Correccion') {
+                    echo '<span class="chip chip-corr"><i class="bi bi-exclamation-triangle-fill"></i> Corrección</span>';
                   } else {
                     echo '<span class="chip chip-pending"><i class="bi bi-hourglass"></i> Pendiente</span>';
                   }
@@ -650,6 +795,27 @@ $stmtCmt->close();
                       <i class="bi bi-chat-left-quote comment-icon me-1"></i> Revisar
                     </button>
                   </div>
+                <?php else: ?>
+                  <span class="text-muted small">—</span>
+                <?php endif; ?>
+              </td>
+              <td style="max-width:360px;">
+                <?php if ($estadoRaw === 'Correccion'): ?>
+                  <div class="small text-danger" style="white-space:pre-wrap"><?= htmlspecialchars($h['correccion_motivo'] ?? '') ?></div>
+                  <?php if (!empty($h['correccion_solicitada_en'])): ?>
+                    <div class="small text-muted">Solicitado: <?= htmlspecialchars($h['correccion_solicitada_en']) ?></div>
+                  <?php endif; ?>
+                <?php else: ?>
+                  <span class="text-muted small">—</span>
+                <?php endif; ?>
+              </td>
+              <td style="min-width:220px;">
+                <?php if ($estadoRaw === 'Correccion'): ?>
+                  <button class="btn btn-danger btn-sm js-resubir"
+                          data-id="<?= (int)$h['id'] ?>"
+                          data-bs-toggle="modal" data-bs-target="#modalResubir">
+                    <i class="bi bi-arrow-repeat me-1"></i> Re-subir comprobante
+                  </button>
                 <?php else: ?>
                   <span class="text-muted small">—</span>
                 <?php endif; ?>
@@ -688,7 +854,7 @@ $stmtCmt->close();
 
 </div>
 
-<!-- MODAL CONFIRMACIÓN -->
+<!-- MODAL CONFIRMACIÓN (tu modal original) -->
 <div class="modal fade" id="modalConfirmarDeposito" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered modal-lg">
     <div class="modal-content">
@@ -770,7 +936,7 @@ $stmtCmt->close();
   </div>
 </div>
 
-<!-- MODAL Comentario Admin -->
+<!-- MODAL Comentario Admin (tu modal original) -->
 <div class="modal fade" id="modalComentarioAdmin" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered">
     <div class="modal-content">
@@ -789,6 +955,38 @@ $stmtCmt->close();
   </div>
 </div>
 
+<!-- MODAL Re-subir comprobante (nuevo) -->
+<div class="modal fade" id="modalResubir" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <form method="POST" enctype="multipart/form-data">
+        <input type="hidden" name="accion" value="resubir">
+        <input type="hidden" name="deposito_id" id="resubir_deposito_id" value="">
+        <div class="modal-header">
+          <h5 class="modal-title"><i class="bi bi-arrow-repeat me-2"></i>Re-subir comprobante</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+        </div>
+        <div class="modal-body">
+          <div class="alert alert-warning py-2 small">
+            <i class="bi bi-info-circle me-1"></i>
+            Al subir el comprobante corregido, el depósito volverá a <b>Pendiente</b> para que Admin lo valide.
+          </div>
+
+          <label class="form-label fw-semibold">Comprobante corregido (PDF/JPG/PNG, máx 10MB)</label>
+          <input type="file" name="comprobante" class="form-control" accept=".pdf,.jpg,.jpeg,.png" required>
+          <div class="form-text">Sube el archivo correcto para resolver la corrección.</div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline-secondary" type="button" data-bs-dismiss="modal">Cancelar</button>
+          <button class="btn btn-danger" type="submit">
+            <i class="bi bi-upload me-1"></i> Subir y enviar a validación
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
 <!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script> -->
 <script>
 (() => {
@@ -799,21 +997,19 @@ $stmtCmt->close();
   // tooltips
   document.querySelectorAll('[data-bs-toggle="tooltip"]').forEach(el => new bootstrap.Tooltip(el));
 
-  // Lista blanca en el cliente (debiera coincidir con PHP)
   const allowedBanks = [
     "BBVA","Citibanamex","Banorte","Santander","HSBC","Scotiabank",
     "Inbursa","Banco Azteca","BanCoppel","Banregio","Afirme",
     "Banco del Bajío","Banca Mifel","Compartamos Banco"
   ];
 
-  // Sincroniza select de bancos con el hidden "banco"
   document.querySelectorAll('.deposito-form').forEach(form => {
     const sel = form.querySelector('select[name="banco_select"]');
     const hidden = form.querySelector('input[name="banco"]');
     if (!sel || !hidden) return;
     const sync = () => { hidden.value = sel.value || ""; };
     sel.addEventListener('change', sync);
-    sync(); // init
+    sync();
   });
 
   const formatMXN = (n) => new Intl.NumberFormat('es-MX', { style:'currency', currency:'MXN' }).format(n);
@@ -918,17 +1114,26 @@ $stmtCmt->close();
       cmtModal.show();
     });
   });
+
+  // === Modal re-subir ===
+  const resInp = document.getElementById('resubir_deposito_id');
+  document.querySelectorAll('.js-resubir').forEach(btn => {
+    btn.addEventListener('click', () => {
+      resInp.value = btn.dataset.id || '';
+    });
+  });
+
 })();
 
 // Scroll suave hacia el Historial cuando se hace clic en el banner
-  const linkVerComentarios = document.getElementById('linkVerComentarios');
-  if (linkVerComentarios) {
-    linkVerComentarios.addEventListener('click', (e) => {
-      e.preventDefault();
-      const target = document.getElementById('historialSection');
-      if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    });
-  }
+const linkVerComentarios = document.getElementById('linkVerComentarios');
+if (linkVerComentarios) {
+  linkVerComentarios.addEventListener('click', (e) => {
+    e.preventDefault();
+    const target = document.getElementById('historialSection');
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+}
 </script>
 </body>
 </html>
