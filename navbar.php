@@ -215,9 +215,10 @@ $grpVentas     = [
   'historial_ventas.php',
   'historial_ventas_sims.php',
   'historial_payjoy_tc.php',    // ✅ NUEVO
-  'historial_ventas_accesorios.php' // ✅ NUEVO: Historial accesorios
+  'historial_ventas_accesorios.php', // ✅ NUEVO: Historial accesorios
+  'catalogo_clientes.php'
 ];
-$grpInventario = ['panel.php', 'inventario_subdistribuidor.php', 'inventario_global.php', 'inventario_resumen.php', 'inventario_eulalia.php', 'inventario_retiros.php', 'inventario_historico.php', 'generar_traspaso_zona.php', 'traspasos_pendientes_zona.php', 'inventario_sims_resumen.php'];
+$grpInventario = ['panel.php', 'inventario_subdistribuidor.php', 'inventario_global.php', 'inventario_resumen.php', 'inventario_eulalia.php', 'inventario_retiros_v2.php', 'inventario_historico.php', 'generar_traspaso_zona.php', 'traspasos_pendientes_zona.php', 'inventario_sims_resumen.php'];
 $grpCompras    = ['compras_nueva.php', 'compras_resumen.php', 'modelos.php', 'proveedores.php', 'compras_ingreso.php'];
 $grpTraspasos  = ['generar_traspaso.php', 'generar_traspaso_sims.php', 'traspasos_sims_pendientes.php', 'traspasos_sims_salientes.php', 'traspasos_pendientes.php', 'traspasos_salientes.php', 'traspaso_nuevo.php'];
 $grpEfectivo   = ['cobros.php', 'cortes_caja.php', 'generar_corte.php', 'depositos_sucursal.php', 'depositos.php', 'recoleccion_comisiones.php'];
@@ -667,6 +668,15 @@ function item_active(string $f, string $c): string
           </a>
           <ul class="dropdown-menu">
             <?php if ($rolUsuario === 'Logistica'): ?>
+              <li class="dropdown-header">Catálogos</li>
+              <li>
+                <a class="dropdown-item <?= item_active('catalogo_clientes.php', $current) ?>" href="catalogo_clientes.php">
+                  <i class="bi bi-people me-1"></i>Clientes
+                </a>
+              </li>
+              <li>
+                <hr class="dropdown-divider">
+              </li>
               <!-- Solo historiales para Logística -->
               <li class="dropdown-header">Historiales</li>
               <li><a class="dropdown-item <?= item_active('historial_ventas.php', $current) ?>" href="historial_ventas.php">Historial de ventas</a></li>
@@ -682,6 +692,13 @@ function item_active(string $f, string $c): string
               <li><a class="dropdown-item <?= item_active('venta_sim_pospago.php', $current) ?>" href="venta_sim_pospago.php">Venta SIM pospago</a></li>
               <li><a class="dropdown-item <?= item_active('payjoy_tc_nueva.php', $current) ?>" href="payjoy_tc_nueva.php">PayJoy TC – Nueva</a></li>
               <li><a class="dropdown-item <?= item_active('venta_accesorios.php', $current) ?>" href="venta_accesorios.php">Venta accesorios</a></li>
+
+              <li class="dropdown-header">Catálogos</li>
+              <li>
+                <a class="dropdown-item <?= item_active('catalogo_clientes.php', $current) ?>" href="catalogo_clientes.php">
+                  <i class="bi bi-people me-1"></i>Clientes
+                </a>
+              </li>
 
               <li>
                 <hr class="dropdown-divider">
@@ -707,7 +724,7 @@ function item_active(string $f, string $c): string
               <li><a class="dropdown-item <?= item_active('inventario_global.php', $current) ?>" href="inventario_global.php">Inventario global</a></li>
               <li><a class="dropdown-item <?= item_active('inventario_historico.php', $current) ?>" href="inventario_historico.php">Inventario histórico</a></li>
               <li><a class="dropdown-item <?= item_active('inventario_sims_resumen.php', $current) ?>" href="inventario_sims_resumen.php">Inventario SIMs</a></li>
-
+              <li><a class="dropdown-item <?= item_active('inventario_retiros_v2.php', $current) ?>" href="inventario_retiros_v2.php">Retiros de inventario</a></li>
             <?php else: ?>
               <?php if (in_array($rolUsuario, ['Ejecutivo', 'Gerente'])): ?>
                 <li><a class="dropdown-item <?= item_active('panel.php', $current) ?>" href="panel.php">Inventario sucursal</a></li>
@@ -754,7 +771,7 @@ function item_active(string $f, string $c): string
                 <li class="dropdown-header">Administrador</li>
                 <li><a class="dropdown-item <?= item_active('inventario_resumen.php', $current) ?>" href="inventario_resumen.php">Resumen Global</a></li>
                 <li><a class="dropdown-item <?= item_active('inventario_eulalia.php', $current) ?>" href="inventario_eulalia.php">Inventario Eulalia</a></li>
-                <li><a class="dropdown-item <?= item_active('inventario_retiros.php', $current) ?>" href="inventario_retiros.php">🛑 Retiros de Inventario</a></li>
+                <li><a class="dropdown-item <?= item_active('inventario_retiros_v2.php', $current) ?>" href="inventario_retiros_v2.php">**Retiros de Inventario</a></li>
               <?php endif; ?>
             <?php endif; ?>
           </ul>
@@ -903,9 +920,9 @@ function item_active(string $f, string $c): string
               <li><a class="dropdown-item <?= item_active('zona_asistencias.php', $current) ?>" href="zona_asistencias.php"><i class="bi bi-people-fill me-1"></i>Asistencias de zona</a></li>
               <li>
                 <a class="dropdown-item <?= item_active('cortes_zona.php', $current) ?>" href="cortes_zona.php">
-                <i class="bi bi-journal-check me-1"></i>Monitoreo cortes de caja
+                  <i class="bi bi-journal-check me-1"></i>Monitoreo cortes de caja
                 </a>
-             </li>
+              </li>
             <?php endif; ?>
 
             <?php if (in_array($rolUsuario, ['Gerente', 'GerenteZona', 'GerenteSucursal', 'Admin', 'Super'])): ?>

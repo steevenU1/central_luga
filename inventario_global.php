@@ -64,6 +64,7 @@ $sql = "
   INNER JOIN productos p ON p.id = i.id_producto
   INNER JOIN sucursales s ON s.id = i.id_sucursal
   WHERE i.estatus IN ('Disponible','En tránsito')
+    AND COALESCE(i.cantidad, 0) > 0
 ";
 
 $params = [];

@@ -70,6 +70,12 @@ $sql = "
   WHERE i.estatus IN ('Disponible','En tránsito')
 ";
 
+if ($hasCantidad) {
+  // 🔐 Igual que en la vista: solo filas con cantidad > 0
+  $sql .= " AND COALESCE(i.cantidad, 0) > 0";
+}
+
+
 $params = [];
 $types  = "";
 
