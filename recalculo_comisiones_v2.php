@@ -203,7 +203,7 @@ try {
     LIMIT 1
   ");
 
-  // SIMs
+  // SIMs (se conserva para Nueva/Portabilidad, etc.)
   $selSIM = $conn->prepare("
     SELECT monto_fijo
     FROM esquemas_comisiones_v2
@@ -234,6 +234,41 @@ try {
   $TC_COMISION_EJE = 50.0;
   $TC_COMISION_GER = 20.0;
 
+  /* =========================================================
+     TABLA DIRECTA POSPAGO BAIT (SIN CUOTAS)
+     - Se calcula siempre, tanto ejecutivo como gerente.
+     - Gerente vendedor: cobra COMO gerente (RH), no como vendedor.
+     ========================================================= */
+  $POSPAGO_BAIT_EJEC = [
+    'con' => [339 => 220.0, 289 => 180.0, 249 => 140.0, 199 => 120.0],
+    'sin' => [339 => 200.0, 289 => 150.0, 249 => 120.0, 199 => 100.0],
+    'mig' => 50.0, // Migración Pre a Pos
+  ];
+  $POSPAGO_BAIT_GER = [
+    'con' => [339 => 80.0, 289 => 60.0, 249 => 40.0, 199 => 30.0],
+    'sin' => [339 => 70.0, 289 => 50.0, 249 => 30.0, 199 => 20.0],
+    'mig' => 25.0, // Migración Pre a Pos
+  ];
+  function normOperadorPospago(string $op): string {
+    $x = strtoupper(trim($op));
+    // Normaliza BAIT / Bait / bait
+    if ($x === 'BAIT') return 'BAIT';
+    return $x;
+  }
+  function bucketModalidad(string $modalidad): string {
+    $m = strtolower(trim($modalidad));
+    // Si trae "con", "equipo", "combo" => con
+    if (strpos($m, 'con') !== false) return 'con';
+    if (strpos($m, 'equipo') !== false && strpos($m, 'sin') === false) return 'con';
+    return 'sin';
+  }
+  function planKeyFromPrecio($precio): ?int {
+    // Planes esperados: 199, 249, 289, 339 (vienen como decimal)
+    $p = (int)round((float)$precio);
+    if (in_array($p, [199, 249, 289, 339], true)) return $p;
+    return null;
+  }
+
   /* ========== PROCESO POR USUARIO ========== */
   $stats = ['equipos' => 0, 'sims' => 0, 'pospago' => 0, 'tc' => 0];
 
@@ -243,18 +278,16 @@ try {
     $rolUsuario = (string)$u['rol'];
     $isGerenteVendedor = (strcasecmp($rolUsuario, 'Gerente') === 0);
 
-    $aplicaEje = !empty($cumpleUnidades[$uid]); // llegó a cuota de unidades
-    $aplicaGer = !empty($cumpleMonto[$sid]);    // sucursal llegó a cuota de monto
+    $aplicaEje = !empty($cumpleUnidades[$uid]); // llegó a cuota de unidades (para NUEVA/PORT y EQUIPOS)
+    $aplicaGer = !empty($cumpleMonto[$sid]);    // sucursal llegó a cuota de monto (para NUEVA/PORT, EQUIPOS, TC)
 
     // ✅ NUEVO: referencia principal = productos.precio_lista (precio del equipo)
-    // Regla: rangos por PRECIO LISTA del equipo (no por precio_venta de la venta)
     $precioRefExpr = "COALESCE(" .
       ($hasPrecioLista  ? "p.precio_lista," : "") .
       ($hasDVPrecioUnit ? "d.precio_unitario," : "") .
       ($hasDVPrecio     ? "d.precio," : "") .
       "0) AS precio_ref";
 
-    // es_combo (si existe la columna)
     $esComboExpr = $hasEsCombo ? "COALESCE(d.es_combo,0) AS es_combo," : "0 AS es_combo,";
 
     $sqlDV = "
@@ -270,9 +303,9 @@ try {
     $rsDV = $stDV->get_result();
 
     while ($row = $rsDV->fetch_assoc()) {
-      $idDet    = (int)$row['id'];
+      $idDet     = (int)$row['id'];
       $precioRef = (float)$row['precio_ref'];
-      $esCombo  = !empty($row['es_combo']); // 1 = combo
+      $esCombo   = !empty($row['es_combo']); // 1 = combo
 
       /* ===== COMBOS: SIEMPRE 75 / 75 ===== */
       if ($esCombo) {
@@ -287,13 +320,12 @@ try {
           $updDV_Ger->execute();
         }
         $stats['equipos']++;
-        // No aplicar reglas de esquema ni cuotas a este renglón
         continue;
       }
 
       // Comisión propia (Ejecutivo por cuota)
       if ($aplicaEje) {
-        $rolTmp = $ROL_EJE;
+        $rolTmp  = $ROL_EJE;
         $compTmp = $COMP_COMI;
         $selEquipo->bind_param('ssssidd', $rolTmp, $compTmp, $fin, $fin, $sid, $precioRef, $precioRef);
         $selEquipo->execute();
@@ -305,9 +337,10 @@ try {
           $stats['equipos']++;
         }
       }
+
       // Si el vendedor es Gerente, su propia comisión usa el esquema de Gerente
       if ($isGerenteVendedor) {
-        $rolTmp = $ROL_GER;
+        $rolTmp  = $ROL_GER;
         $compTmp = $COMP_COMI;
         $selEquipo->bind_param('ssssidd', $rolTmp, $compTmp, $fin, $fin, $sid, $precioRef, $precioRef);
         $selEquipo->execute();
@@ -322,14 +355,14 @@ try {
 
       // Comisión Gerente sobre la venta:
       if ($isGerenteVendedor) {
-        // Ventas hechas por Gerente NO generan comision_gerente
+        // Ventas hechas por Gerente NO generan comision_gerente en EQUIPOS (se mantiene)
         if ($updDV_Ger) {
           $v = 0.0;
           $updDV_Ger->bind_param('di', $v, $idDet);
           $updDV_Ger->execute();
         }
       } else if ($aplicaGer) {
-        $rolTmp = $ROL_GER;
+        $rolTmp  = $ROL_GER;
         $compTmp = $COMP_COMI_GER;
         $selEquipo->bind_param('ssssidd', $rolTmp, $compTmp, $fin, $fin, $sid, $precioRef, $precioRef);
         $selEquipo->execute();
@@ -348,55 +381,162 @@ try {
     if ($hasSims) {
       $selOper = $colOperador ? $colOperador : "''";
       $selTipo = $colTipoSIM  ? $colTipoSIM  : "''";
-      $sqlVS = "SELECT id, COALESCE(NULLIF(TRIM($selOper),''),'') AS operador,
-                       COALESCE(NULLIF(TRIM($selTipo),''),'') AS tipo
+
+      // Traemos también precio_total y modalidad para POSPAGO
+      $sqlVS = "SELECT id,
+                       COALESCE(NULLIF(TRIM($selOper),''),'') AS operador,
+                       COALESCE(NULLIF(TRIM($selTipo),''),'') AS tipo,
+                       COALESCE(precio_total,0) AS precio_total,
+                       COALESCE(NULLIF(TRIM(modalidad),''),'') AS modalidad
                 FROM ventas_sims
                 WHERE id_usuario=? AND fecha_venta BETWEEN ? AND ?";
+
       $stVS = $conn->prepare($sqlVS);
       $stVS->bind_param('iss', $uid, $iniTS, $finTS);
       $stVS->execute();
       $rsVS = $stVS->get_result();
 
       while ($s = $rsVS->fetch_assoc()) {
-        $idS = (int)$s['id'];
-        $op = (string)$s['operador'];
-        $tipo = (string)$s['tipo'];
+        $idS       = (int)$s['id'];
+        $opRaw     = (string)$s['operador'];
+        $tipo      = (string)$s['tipo'];
+        $precioTot = (float)($s['precio_total'] ?? 0);
+        $modalidad = (string)($s['modalidad'] ?? '');
+
         // subtipo normalizado
         $isPos = (stripos($tipo, 'posp') !== false);
         $sub = $isPos ? 'Pospago' : (stripos($tipo, 'port') !== false ? 'Portabilidad' : 'Nueva');
 
-        // Comisión propia
-        if ($aplicaEje && $updVS_Eje) {
-          $rolTmp = $ROL_EJE;
-          $compTmp = $COMP_COMI;
-          $selSIM->bind_param('ssssssi', $rolTmp, $compTmp, $sub, $op, $fin, $fin, $sid);
-          $selSIM->execute();
-          $re = $selSIM->get_result()->fetch_assoc();
-          if ($re && $re['monto_fijo'] !== null) {
-            $v = (float)$re['monto_fijo'];
-            $updVS_Eje->bind_param('di', $v, $idS);
+        /* =========================================================
+           POSPAGO: SIEMPRE COMISIONA (SIN CUOTAS) - DIRECTO EN RECALCULO
+           - Operador: BAIT (normalizado)
+           - Plan: precio_total 199/249/289/339
+           - Modalidad: Con equipo / Sin equipo
+           - Migración: si tipo contiene "migr"
+           - RH: si el vendedor es GERENTE => cobra como GERENTE (comision_gerente), NO como vendedor.
+        ========================================================= */
+        if ($isPos) {
+          // Defaults a 0 para evitar arrastre
+          if ($updVS_Eje) { $z=0.0; $updVS_Eje->bind_param('di',$z,$idS); $updVS_Eje->execute(); }
+          if ($updVS_Ger) { $z=0.0; $updVS_Ger->bind_param('di',$z,$idS); $updVS_Ger->execute(); }
+
+          $opN = normOperadorPospago($opRaw);
+          $isBait = ($opN === 'BAIT');
+
+          // Si no es BAIT, cae al esquema normal (por si manejan otros carriers)
+          if (!$isBait) {
+            // === lógica normal para NO-BAIT ===
+            if ($isGerenteVendedor) {
+              // Gerente NO cobra como vendedor en SIM (se mantiene)
+              if ($updVS_Eje) { $v0=0.0; $updVS_Eje->bind_param('di',$v0,$idS); $updVS_Eje->execute(); }
+            } else {
+              if ($aplicaEje && $updVS_Eje) {
+                $rolTmp  = $ROL_EJE; $compTmp = $COMP_COMI;
+                $selSIM->bind_param('ssssssi', $rolTmp, $compTmp, $sub, $opRaw, $fin, $fin, $sid);
+                $selSIM->execute();
+                $re = $selSIM->get_result()->fetch_assoc();
+                if ($re && $re['monto_fijo'] !== null) {
+                  $v = (float)$re['monto_fijo'];
+                  $updVS_Eje->bind_param('di', $v, $idS);
+                  $updVS_Eje->execute();
+                  $stats['pospago']++;
+                }
+              }
+            }
+
+            if ($aplicaGer && $updVS_Ger) {
+              $rolTmp  = $ROL_GER; $compTmp = $COMP_COMI_GER;
+              $selSIM->bind_param('ssssssi', $rolTmp, $compTmp, $sub, $opRaw, $fin, $fin, $sid);
+              $selSIM->execute();
+              $rg = $selSIM->get_result()->fetch_assoc();
+              $v = ($rg && $rg['monto_fijo'] !== null) ? (float)$rg['monto_fijo'] : 0.0;
+              $updVS_Ger->bind_param('di', $v, $idS);
+              $updVS_Ger->execute();
+              $stats['pospago']++;
+            }
+            continue;
+          }
+
+          // BAIT POSPAGO: tabla directa
+          $isMig = (stripos($tipo, 'migr') !== false); // "Migración Pre a Pos"
+          $bucket = bucketModalidad($modalidad);       // con/sin
+          $plan = planKeyFromPrecio($precioTot);       // 199/249/289/339
+
+          // Comisión vendedor (solo si NO es gerente)
+          if (!$isGerenteVendedor && $updVS_Eje) {
+            $vE = 0.0;
+            if ($isMig) {
+              $vE = (float)$POSPAGO_BAIT_EJEC['mig'];
+            } else if ($plan !== null && isset($POSPAGO_BAIT_EJEC[$bucket][$plan])) {
+              $vE = (float)$POSPAGO_BAIT_EJEC[$bucket][$plan];
+            }
+            $updVS_Eje->bind_param('di', $vE, $idS);
             $updVS_Eje->execute();
-            $isPos ? $stats['pospago']++ : $stats['sims']++;
+          } else if ($isGerenteVendedor && $updVS_Eje) {
+            // RH: gerente NO cobra como vendedor en pospago
+            $v0 = 0.0;
+            $updVS_Eje->bind_param('di', $v0, $idS);
+            $updVS_Eje->execute();
+          }
+
+          // Comisión gerente (SIEMPRE, aunque no cumpla cuota)
+          if ($updVS_Ger) {
+            $vG = 0.0;
+            if ($isMig) {
+              $vG = (float)$POSPAGO_BAIT_GER['mig'];
+            } else if ($plan !== null && isset($POSPAGO_BAIT_GER[$bucket][$plan])) {
+              $vG = (float)$POSPAGO_BAIT_GER[$bucket][$plan];
+            }
+            $updVS_Ger->bind_param('di', $vG, $idS);
+            $updVS_Ger->execute();
+          }
+
+          $stats['pospago']++;
+          continue;
+        }
+
+        // ===== NO POSPAGO: lógica existente =====
+
+        // ===== Comisión propia / vendedor =====
+        if ($isGerenteVendedor) {
+          // RH: Gerente NO cobra como vendedor en SIM (Nueva/Port/ etc.)
+          if ($updVS_Eje) {
+            $v0 = 0.0;
+            $updVS_Eje->bind_param('di', $v0, $idS);
+            $updVS_Eje->execute();
+          }
+        } else {
+          // Ejecutivo: comisión propia SOLO si cumple cuota de unidades
+          if ($aplicaEje && $updVS_Eje) {
+            $rolTmp  = $ROL_EJE;
+            $compTmp = $COMP_COMI;
+            $selSIM->bind_param('ssssssi', $rolTmp, $compTmp, $sub, $opRaw, $fin, $fin, $sid);
+            $selSIM->execute();
+            $re = $selSIM->get_result()->fetch_assoc();
+            if ($re && $re['monto_fijo'] !== null) {
+              $v = (float)$re['monto_fijo'];
+              $updVS_Eje->bind_param('di', $v, $idS);
+              $updVS_Eje->execute();
+              (stripos($tipo, 'posp') !== false) ? $stats['pospago']++ : $stats['sims']++;
+            }
           }
         }
-        // Si la vendió un Gerente, forzar comision_gerente=0
-        if ($isGerenteVendedor && $updVS_Ger) {
-          $v = 0.0;
-          $updVS_Ger->bind_param('di', $v, $idS);
-          $updVS_Ger->execute();
-        } else if ($aplicaGer && $updVS_Ger) {
-          // Solo si NO es venta de Gerente
-          $rolTmp = $ROL_GER;
+
+        // ===== Comisión de gerente sobre la venta =====
+        if ($aplicaGer && $updVS_Ger) {
+          $rolTmp  = $ROL_GER;
           $compTmp = $COMP_COMI_GER;
-          $selSIM->bind_param('ssssssi', $rolTmp, $compTmp, $sub, $op, $fin, $fin, $sid);
+          $selSIM->bind_param('ssssssi', $rolTmp, $compTmp, $sub, $opRaw, $fin, $fin, $sid);
           $selSIM->execute();
           $rg = $selSIM->get_result()->fetch_assoc();
-          if ($rg && $rg['monto_fijo'] !== null) {
-            $v = (float)$rg['monto_fijo'];
-            $updVS_Ger->bind_param('di', $v, $idS);
-            $updVS_Ger->execute();
-            $isPos ? $stats['pospago']++ : $stats['sims']++;
-          }
+          $v = ($rg && $rg['monto_fijo'] !== null) ? (float)$rg['monto_fijo'] : 0.0;
+          $updVS_Ger->bind_param('di', $v, $idS);
+          $updVS_Ger->execute();
+          (stripos($tipo, 'posp') !== false) ? $stats['pospago']++ : $stats['sims']++;
+        } else if ($updVS_Ger) {
+          $v0g = 0.0;
+          $updVS_Ger->bind_param('di', $v0g, $idS);
+          $updVS_Ger->execute();
         }
       }
       $stVS->close();
@@ -410,7 +550,6 @@ try {
        - Si NO hay cuota: ambas comisiones = 0.
     ------------------------------------------------ */
     if ($hasTC) {
-      // Primero traemos todas las TC de este usuario en la semana
       $stTC = $conn->prepare("
         SELECT id
         FROM ventas_payjoy_tc
@@ -423,7 +562,6 @@ try {
       while ($t = $rsTC->fetch_assoc()) {
         $idT = (int)$t['id'];
 
-        // Siempre partimos de 0 para evitar arrastrar valores viejos
         if ($updTC_Eje) {
           $v0 = 0.0;
           $updTC_Eje->bind_param('di', $v0, $idT);
@@ -435,19 +573,15 @@ try {
           $updTC_Ger->execute();
         }
 
-        // Comisión propia del vendedor (Ejecutivo o Gerente como VENDEDOR)
         if ($aplicaEje && $updTC_Eje) {
-          // Por política: $50 por cada TC si llegó a cuota de unidades
           $v = $TC_COMISION_EJE;
           $updTC_Eje->bind_param('di', $v, $idT);
           $updTC_Eje->execute();
           $stats['tc']++;
         }
 
-        // Comisión Gerente sobre esa venta (POR SUCURSAL):
         if ($aplicaGer && $updTC_Ger) {
-          // Si la sucursal llegó a cuota de monto, TODAS las TC comisionan al gerente
-          $v = $TC_COMISION_GER; // 20
+          $v = $TC_COMISION_GER;
           $updTC_Ger->bind_param('di', $v, $idT);
           $updTC_Ger->execute();
           $stats['tc']++;
@@ -459,12 +593,8 @@ try {
 
   /* =========================================================
      PASE EXTRA (seguridad): SIMs tipo "Regalo" NO generan comisión
-     - Sin cambiar lógica previa: solo forzamos a 0 cualquier comisión
-       existente en ventas_sims donde tipo_venta = 'Regalo' dentro
-       de la semana recalculada.
      ========================================================= */
   if ($hasSims && $colTipoSIM) {
-    // $colTipoSIM viene de una whitelist arriba, así que es seguro interpolarlo aquí.
     $sqlRegalo = "
       UPDATE ventas_sims
       SET

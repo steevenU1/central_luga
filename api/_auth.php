@@ -8,7 +8,7 @@
 // Asigna UN token distinto por origen. ¡No repitas tokens!
 const API_TOKENS_BY_ORIGIN = [
   'NANO'   => '1Sp2gd3pa*1Fba23a326*',   // cámbialo
-  'MIPLAN' => '1Sp2gd3pa*1Fba23a326', // cámbialo
+  'MIPLAN' => '1Sp2gd3pa*1Fba23a327', // cámbialo
   'LUGA'   => '1Sp2gd3pa*1Fba23a326',   // opcional (si LUGA también consume su propia API)
   // 'OTRO' => 'TOK-OTRO-xxxxx',               // opcional
 ];
@@ -23,31 +23,45 @@ const API_ALLOWLIST = [
 // =======================
 //  Utilidades internas
 // =======================
-function json_unauthorized(string $msgKey){
+function json_unauthorized(string $msgKey)
+{
   http_response_code(401);
   header('Content-Type: application/json; charset=utf-8');
-  echo json_encode(['ok'=>false, 'error'=>$msgKey], JSON_UNESCAPED_UNICODE);
+  echo json_encode(['ok' => false, 'error' => $msgKey], JSON_UNESCAPED_UNICODE);
   exit;
 }
-function json_forbidden(string $msgKey){
+function json_forbidden(string $msgKey)
+{
   http_response_code(403);
   header('Content-Type: application/json; charset=utf-8');
-  echo json_encode(['ok'=>false, 'error'=>$msgKey], JSON_UNESCAPED_UNICODE);
+  echo json_encode(['ok' => false, 'error' => $msgKey], JSON_UNESCAPED_UNICODE);
   exit;
 }
-function get_bearer(): ?string {
+function get_bearer(): ?string
+{
   $hdr = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
   if (stripos($hdr, 'Bearer ') !== 0) return null;
   return trim(substr($hdr, 7));
 }
-function resolve_origen_from_token(?string $bearer): ?string {
+function resolve_origen_from_token(?string $bearer): ?string
+{
   if (!$bearer) return null;
   // Invertimos el mapa ORIGEN->TOKEN a TOKEN->ORIGEN
   static $byToken = null;
   if ($byToken === null) {
     $byToken = [];
     foreach (API_TOKENS_BY_ORIGIN as $origin => $tok) {
-      // Usamos el token literal como índice (seguro en memoria)
+      if (isset($byToken[$tok])) {
+        // Configuración insegura: token duplicado
+        http_response_code(500);
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+          'ok' => false,
+          'error' => 'duplicate_token_config',
+          'detail' => "Token repetido entre {$byToken[$tok]} y {$origin}"
+        ], JSON_UNESCAPED_UNICODE);
+        exit;
+      }
       $byToken[$tok] = $origin;
     }
   }
@@ -64,7 +78,8 @@ function resolve_origen_from_token(?string $bearer): ?string {
  * Si pasas $allowedOrigins, además verifica que el origen esté en esa lista.
  * Aplica allowlist por IP si está configurada para ese origen.
  */
-function require_origen(?array $allowedOrigins = null): string {
+function require_origen(?array $allowedOrigins = null): string
+{
   $bearer = get_bearer();
   if (!$bearer) json_unauthorized('missing_bearer');
 
@@ -92,7 +107,8 @@ function require_origen(?array $allowedOrigins = null): string {
  * Versión antigua: valida que el Bearer coincida con el token del $issuerExpected (e.g., 'NANO').
  * Úsala solo si quieres forzar un único origen. Para multi-origen usa require_origen().
  */
-function require_bearer(string $issuerExpected) : void {
+function require_bearer(string $issuerExpected): void
+{
   $hdr = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
   if (stripos($hdr, 'Bearer ') !== 0) {
     json_unauthorized('missing_bearer');
