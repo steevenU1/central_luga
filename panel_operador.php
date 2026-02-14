@@ -116,6 +116,14 @@ $TOOLS = [
     'icon'       => 'bi-tags', // 🏷️ Etiquetas = precios
     'roles'      => ['Logistica', 'Admin'],
   ],
+  [
+    'key'        => 'administracion_sucursales',
+    'title'      => 'Administración de Sucursales',
+    'desc'       => 'Administrar sucursales, zonas y cuotas.',
+    'href'       => 'sucursales_admin.php',
+    'icon'       => 'bi-building', // � Edificio = sucursal
+    'roles'      => ['Admin','Gerente General'],
+  ],
 
 
   // ==== Ejemplos para futuro (déjalos como referencia) ====

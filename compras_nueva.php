@@ -1,4 +1,7 @@
 <?php
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
+error_reporting(E_ALL);
 // compras_nueva.php — Central 2.0 (con Descuento por renglón + soporte Accesorios)
 // Captura de factura de compra por renglones de MODELO + Otros cargos
 if (session_status() === PHP_SESSION_NONE) {
@@ -16,8 +19,13 @@ $ROL         = $_SESSION['rol'] ?? 'Ejecutivo';
 $ID_USUARIO  = (int)($_SESSION['id_usuario'] ?? 0);
 $ID_SUCURSAL = (int)($_SESSION['id_sucursal'] ?? 0);
 
+// ===== NUEVO: Subdis Admin =====
+$isSubdisAdmin = ($ROL === 'subdis_admin');
+$propiedad     = $isSubdisAdmin ? 'Subdistribuidor' : 'Luga';
+$id_subdis     = $isSubdisAdmin ? (int)($_SESSION['id_subdis'] ?? 0) : 0;
+
 // Permisos
-if (!in_array($ROL, ['Admin', 'Logistica'])) {
+if (!in_array($ROL, ['Admin', 'Logistica', 'subdis_admin'], true)) {
   header("Location: 403.php");
   exit();
 }
@@ -43,6 +51,13 @@ $res2 = $conn->query("SELECT id, nombre FROM sucursales ORDER BY nombre");
 while ($row = $res2->fetch_assoc()) {
   $sucursales[] = $row;
 }
+
+// Mapa sucursales para mostrar nombre readonly en subdis_admin
+$mapSuc = [];
+foreach ($sucursales as $s) {
+  $mapSuc[(int)$s['id']] = $s['nombre'];
+}
+$nombreSucursalActual = $mapSuc[$ID_SUCURSAL] ?? ('Sucursal #' . $ID_SUCURSAL);
 
 // Catálogo de modelos (solo activos) — incluir tipo_producto para Accesorios
 $modelos = [];
@@ -256,7 +271,14 @@ while ($row = $res3->fetch_assoc()) {
     <div class="page-head">
       <div>
         <h2 class="page-title">🧾 Nueva factura de compra</h2>
-        <div class="mt-1"><span class="role-chip"><?= h($ROL) ?></span></div>
+        <div class="mt-1">
+          <span class="role-chip"><?= h($ROL) ?></span>
+          <?php if ($isSubdisAdmin): ?>
+            <span class="role-chip" style="background:#ecfeff;color:#155e75;border-color:#a5f3fc;">
+              Propiedad: <?= h($propiedad) ?>
+            </span>
+          <?php endif; ?>
+        </div>
       </div>
       <div class="toolbar">
         <a href="proveedores.php" target="_blank" class="btn btn-light btn-sm rounded-pill border"><i class="bi bi-person-plus me-1"></i>Alta proveedor</a>
@@ -265,6 +287,10 @@ while ($row = $res3->fetch_assoc()) {
     </div>
 
     <form action="compras_guardar.php" method="POST" id="formCompra">
+      <!-- ===== NUEVO: propiedad / id_subdis (para backend) ===== -->
+      <input type="hidden" name="propiedad" value="<?= h($propiedad) ?>">
+      <input type="hidden" name="id_subdis" value="<?= (int)$id_subdis ?>">
+
       <!-- Datos de la factura -->
       <div class="card card-soft mb-3">
         <div class="card-body">
@@ -282,15 +308,24 @@ while ($row = $res3->fetch_assoc()) {
               <label class="form-label"># Factura <span class="text-danger">*</span></label>
               <input type="text" name="num_factura" class="form-control" required>
             </div>
+
+            <!-- ===== Sucursal destino: fija para subdis_admin ===== -->
             <div class="col-md-3">
               <label class="form-label">Sucursal destino <span class="text-danger">*</span></label>
-              <select name="id_sucursal" class="form-select" required>
-                <?php foreach ($sucursales as $s): ?>
-                  <?php $sid = (int)$s['id']; ?>
-                  <option value="<?= $sid ?>" <?= ($sid === $ID_SUCURSAL ? 'selected' : '') ?>><?= h($s['nombre']) ?></option>
-                <?php endforeach; ?>
-              </select>
+              <?php if ($isSubdisAdmin): ?>
+                <input type="hidden" name="id_sucursal" value="<?= (int)$ID_SUCURSAL ?>">
+                <input type="text" class="form-control bg-light" value="<?= h($nombreSucursalActual) ?>" readonly>
+                <div class="form-text">Subdis: la compra se registra en tu sucursal.</div>
+              <?php else: ?>
+                <select name="id_sucursal" class="form-select" required>
+                  <?php foreach ($sucursales as $s): ?>
+                    <?php $sid = (int)$s['id']; ?>
+                    <option value="<?= $sid ?>" <?= ($sid === $ID_SUCURSAL ? 'selected' : '') ?>><?= h($s['nombre']) ?></option>
+                  <?php endforeach; ?>
+                </select>
+              <?php endif; ?>
             </div>
+
             <div class="col-md-2">
               <label class="form-label">IVA % (default)</label>
               <input type="number" step="0.01" value="16" id="ivaDefault" class="form-control">
@@ -597,6 +632,8 @@ while ($row = $res3->fetch_assoc()) {
   </div>
 
   <!-- JS -->
+  <!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
+
   <script>
     // Datos PHP -> JS
     const modelos = <?= json_encode($modelos, JSON_UNESCAPED_UNICODE) ?>;

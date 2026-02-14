@@ -1,4 +1,6 @@
 <?php
+// nueva_venta.php — Central (con: cupón + promo regalo + ✅ promo 2do con descuento)
+
 // ✅ Iniciamos sesión aquí porque moveremos el include del navbar más abajo
 if (session_status() === PHP_SESSION_NONE) {
   session_start();
@@ -16,6 +18,10 @@ $id_usuario           = (int)($_SESSION['id_usuario'] ?? 0);
 $id_sucursal_usuario  = (int)($_SESSION['id_sucursal'] ?? 0);
 $nombre_usuario       = trim($_SESSION['nombre'] ?? 'Usuario');
 
+$ROL = $_SESSION['rol'] ?? 'Ejecutivo';
+// ✅ Roles Subdis_* pueden editar el precio
+$isSubdis = (stripos($ROL, 'Subdis_') === 0);
+
 // Traer sucursales
 $sql_suc = "SELECT id, nombre FROM sucursales ORDER BY nombre";
 $sucursales = $conn->query($sql_suc)->fetch_all(MYSQLI_ASSOC);
@@ -26,10 +32,9 @@ foreach ($sucursales as $s) {
   $mapSuc[(int)$s['id']] = $s['nombre'];
 }
 
-// 🔓 Sucursales que pueden editar manualmente el precio_venta
-// 👉 Cambia 999 por el ID real de la sucursal que debe poder editar el precio.
-$SUCURSALES_PRECIO_LIBRE = [42];
-$editablePrecioInicial = in_array($id_sucursal_usuario, $SUCURSALES_PRECIO_LIBRE, true);
+// 🔓 Regla NUEVA: solo Subdis_* puede editar manualmente el precio_venta
+$SUCURSALES_PRECIO_LIBRE = []; // ya no se usa, lo dejamos vacío para no romper data-attr existente
+$editablePrecioInicial = $isSubdis;
 
 // 🔒 Evaluación del candado para la sucursal por defecto (la del usuario)
 list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_captura($conn, $id_sucursal_usuario);
@@ -53,7 +58,6 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
   <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
 
-  <!-- ===== Overrides del NAVBAR SOLO para esta vista ===== -->
   <style>
     :root {
       --brand: #0d6efd;
@@ -199,7 +203,6 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
       margin-bottom: .25rem;
     }
 
-    /* Banner candado */
     .alert-candado {
       border-left: 6px solid #dc3545;
     }
@@ -225,6 +228,28 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
 
     .text-success-soft {
       color: #15803d;
+    }
+
+    /* ✅ Bloqueo visual sin perder POST */
+    .select-lock {
+      background: #e9ecef !important;
+      cursor: not-allowed !important;
+    }
+
+    .select-lock+.select2-container .select2-selection {
+      background: #e9ecef !important;
+      cursor: not-allowed !important;
+    }
+
+    .promo-pill {
+      display: inline-flex;
+      gap: .5rem;
+      align-items: center;
+      padding: .35rem .6rem;
+      border-radius: 999px;
+      font-size: .85rem;
+      border: 1px solid rgba(2, 8, 20, .08);
+      background: #fff;
     }
   </style>
 </head>
@@ -261,12 +286,12 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
         <a href="panel.php" class="btn btn-outline-secondary"><i class="bi bi-arrow-left"></i> Volver al Panel</a>
       </div>
 
-      <!-- 🔒 Banner de candado (estado inicial por la sucursal del usuario) -->
+      <!-- 🔒 Banner de candado -->
       <div id="banner_candado" class="alert alert-danger alert-candado d-<?= $bloquearInicial ? 'block' : 'none' ?>">
         <div class="d-flex align-items-center justify-content-between">
           <div class="d-flex align-items-center gap-2">
             <i class="bi bi-lock-fill fs-4"></i>
-            <div>
+            <div id="candado_msg">
               <strong>Captura bloqueada.</strong>
               <?= htmlspecialchars($motivoBloqueoInicial) ?>
               <div class="small">Genera el corte de <strong><?= htmlspecialchars($ayerCandado) ?></strong> para continuar.</div>
@@ -304,8 +329,21 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
         <input type="hidden" name="nombre_cliente" id="nombre_cliente" value="">
         <input type="hidden" name="telefono_cliente" id="telefono_cliente" value="">
         <input type="hidden" name="correo_cliente" id="correo_cliente" value="">
-        <!-- 🔗 Monto de cupón aplicado (para backend) -->
+
+        <!-- 🔗 Cupón -->
         <input type="hidden" name="monto_cupon" id="monto_cupon" value="0">
+
+        <!-- 🎁 Promo regalo -->
+        <input type="hidden" name="es_regalo" id="es_regalo" value="0">
+        <input type="hidden" name="id_promo_regalo" id="id_promo_regalo" value="">
+        <input type="hidden" name="promo_regalo_aplicado" id="promo_regalo_aplicado" value="0">
+        <input type="hidden" name="promo_regalo_id" id="promo_regalo_id" value="0">
+
+        <!-- ✅ Promo 2do con descuento -->
+        <input type="hidden" name="promo_desc_aplicado" id="promo_desc_aplicado" value="0">
+        <input type="hidden" name="promo_desc_id" id="promo_desc_id" value="0">
+        <input type="hidden" name="promo_desc_pct" id="promo_desc_pct" value="0">
+        <input type="hidden" name="tag_venta_principal" id="tag_venta_principal" value="">
 
         <div class="card card-elev mb-4">
           <div class="card-body">
@@ -344,7 +382,6 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
 
             <div class="section-title"><i class="bi bi-people"></i> Datos del cliente</div>
 
-            <!-- Vista compacta del cliente + botón para abrir modal -->
             <div class="row g-3 mb-3">
               <div class="col-md-8">
                 <div class="border rounded-3 p-3 bg-light">
@@ -373,11 +410,17 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
               </div>
             </div>
 
-            <!-- TAG sigue en el formulario porque lo usamos en financiamiento -->
             <div class="row g-3 mb-2">
               <div class="col-md-4" id="tag_field">
                 <label for="tag" class="form-label">TAG (ID del crédito)</label>
                 <input type="text" name="tag" id="tag" class="form-control" placeholder="Ej. PJ-123ABC">
+              </div>
+
+              <!-- ✅ Tag venta principal SOLO cuando es "2do con descuento" y tipo=Financiamiento -->
+              <div class="col-md-4 d-none" id="tag_principal_field">
+                <label for="tag_principal" class="form-label req">TAG de la venta principal</label>
+                <input type="text" id="tag_principal" class="form-control" placeholder="Ej. PJ-123ABC (venta principal)">
+                <div class="form-text">Se valida en backend que la venta principal tenga un equipo participante.</div>
               </div>
             </div>
 
@@ -396,13 +439,82 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
               </div>
             </div>
 
+            <!-- 🎁 UI Promo regalo -->
+            <div id="wrap_promo_regalo" class="mt-3 d-none">
+              <div class="alert alert-success mb-2">
+                <div class="d-flex align-items-start gap-2">
+                  <i class="bi bi-gift-fill fs-5"></i>
+                  <div class="w-100">
+                    <div class="fw-semibold">
+                      Promo detectada: <span id="promo_regalo_nombre">—</span>
+                    </div>
+
+                    <div class="form-check mt-2">
+                      <input class="form-check-input" type="checkbox" id="chk_regalo">
+                      <label class="form-check-label fw-semibold" for="chk_regalo">
+                        Entregar equipo de regalo (promo)
+                      </label>
+                    </div>
+
+                    <div class="small text-muted mt-1" id="promo_regalo_hint">
+                      Si activas esto, se forzará el equipo combo y contará como <strong>$0.00</strong>.
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- ✅ UI Promo 2do con descuento -->
+            <div id="wrap_promo_desc" class="mt-3 d-none">
+              <div class="alert alert-primary mb-2">
+                <div class="d-flex align-items-start gap-2">
+                  <i class="bi bi-percent fs-5"></i>
+                  <div class="w-100">
+                    <div class="fw-semibold d-flex flex-wrap align-items-center gap-2">
+                      Promoción disponible para 2do equipo con descuento
+                      <span class="promo-pill d-none" id="pill_promo_desc">
+                        <i class="bi bi-badge-percent"></i>
+                        <span id="pill_promo_desc_txt">—</span>
+                      </span>
+                    </div>
+
+                    <div class="form-check mt-2">
+                      <input class="form-check-input" type="checkbox" id="chk_descuento2">
+                      <label class="form-check-label fw-semibold" for="chk_descuento2">
+                        Aplicar promoción (2do con descuento)
+                      </label>
+                    </div>
+
+                    <div class="small text-muted mt-1">
+                      Si la activas, seleccionarás una promo y el sistema aplicará el % de descuento automáticamente.
+                      <span class="d-block mt-1">
+                        Nota: esta promo no se puede combinar con <strong>promo regalo</strong>.
+                      </span>
+                    </div>
+
+                    <div class="mt-2 d-flex flex-wrap gap-2">
+                      <button type="button" class="btn btn-outline-light btn-sm d-none" id="btn_elegir_promo_desc">
+                        <i class="bi bi-list-check me-1"></i> Elegir promo
+                      </button>
+                      <button type="button" class="btn btn-outline-light btn-sm d-none" id="btn_quitar_promo_desc">
+                        <i class="bi bi-x-circle me-1"></i> Quitar promo
+                      </button>
+                    </div>
+
+                    <div class="small text-muted mt-2 d-none" id="hint_desc_tag_principal">
+                      Si estás registrando el <strong>2do equipo como Financiamiento</strong>, captura el <strong>TAG de la venta principal</strong>.
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <hr class="my-4">
 
             <div class="section-title"><i class="bi bi-cash-coin"></i> Datos financieros</div>
             <div class="row g-3 mb-2">
               <div class="col-md-4">
                 <label class="form-label req">Precio de Venta Total ($)</label>
-                <!-- 🔒 Solo lectura por defecto, editable solo en sucursales especiales -->
                 <input
                   type="number"
                   step="0.01"
@@ -413,21 +525,24 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
                   placeholder="0.00"
                   required
                   <?= $editablePrecioInicial ? '' : 'readonly' ?>
+                  data-precio-libre-rol="<?= $editablePrecioInicial ? '1' : '0' ?>"
                   data-sucursales-libre="<?= htmlspecialchars(implode(',', $SUCURSALES_PRECIO_LIBRE)) ?>">
                 <div class="form-text <?= $editablePrecioInicial ? 'd-none' : '' ?>" id="txt_precio_auto">
                   Se calcula automáticamente según los equipos seleccionados.
                 </div>
                 <div class="form-text d-none" id="txt_precio_manual">
-                  En esta sucursal puedes ajustar manualmente el precio de venta final.
+                  Puedes ajustar manualmente el precio de venta final (Subdistribuidor).
                 </div>
                 <div class="form-text text-success-soft d-none" id="txt_cupon_info">
                   Cupón aplicado: -$<span id="lbl_cupon_monto">0.00</span> MXN
                 </div>
               </div>
+
               <div class="col-md-4" id="enganche_field">
                 <label class="form-label">Enganche ($)</label>
                 <input type="number" step="0.01" min="0" name="enganche" id="enganche" class="form-control" value="0" placeholder="0.00">
               </div>
+
               <div class="col-md-4">
                 <label id="label_forma_pago" class="form-label req">Forma de Pago</label>
                 <select name="forma_pago_enganche" id="forma_pago_enganche" class="form-control" required>
@@ -479,6 +594,7 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
               </div>
             </div>
           </div>
+
           <div class="card-footer bg-white border-0 p-3">
             <button class="btn btn-gradient text-white w-100 py-2" id="btn_submit">
               <i class="bi bi-check2-circle me-2"></i> Registrar Venta
@@ -522,6 +638,8 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
                       <li><strong>Tipo:</strong> <span id="conf_tipo">—</span></li>
                       <li><strong>Equipo principal:</strong> <span id="conf_equipo1">—</span></li>
                       <li class="d-none" id="li_equipo2"><strong>Equipo combo:</strong> <span id="conf_equipo2">—</span></li>
+                      <li class="d-none" id="li_promo_desc"><strong>Promo descuento:</strong> <span id="conf_promo_desc">—</span></li>
+                      <li class="d-none" id="li_tag_principal"><strong>TAG principal:</strong> <span id="conf_tag_principal">—</span></li>
                       <li><strong>Precio total:</strong> $<span id="conf_precio">0.00</span></li>
                       <li class="d-none" id="li_enganche"><strong>Enganche:</strong> $<span id="conf_enganche">0.00</span></li>
                       <li class="d-none" id="li_financiera"><strong>Financiera:</strong> <span id="conf_financiera">—</span></li>
@@ -534,7 +652,6 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
 
             <hr>
 
-            <!-- 🔐 Campo de contraseña para confirmar la venta -->
             <div class="mb-3">
               <label for="password_confirm" class="form-label">
                 Confirma con tu contraseña de acceso
@@ -570,7 +687,7 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
       </div>
     </div>
 
-    <!-- Modal de cupón de descuento -->
+    <!-- Modal de cupón -->
     <div class="modal fade" id="modalCupon" tabindex="-1" aria-hidden="true">
       <div class="modal-dialog modal-md modal-dialog-centered">
         <div class="modal-content">
@@ -604,7 +721,7 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
       </div>
     </div>
 
-    <!-- 🔹 Modal informativo de enganche -->
+    <!-- Modal enganche -->
     <div class="modal fade" id="modalEngancheInfo" tabindex="-1" aria-hidden="true">
       <div class="modal-dialog modal-sm modal-dialog-centered">
         <div class="modal-content">
@@ -630,7 +747,7 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
       </div>
     </div>
 
-    <!-- Modal de clientes: buscar / seleccionar / crear -->
+    <!-- Modal clientes -->
     <div class="modal fade" id="modalClientes" tabindex="-1" aria-hidden="true">
       <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
         <div class="modal-content">
@@ -641,7 +758,6 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
             <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
           </div>
           <div class="modal-body">
-            <!-- Buscador -->
             <div class="mb-3">
               <label class="form-label">Buscar por nombre, teléfono o código de cliente</label>
               <div class="input-group">
@@ -657,7 +773,6 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
 
             <hr>
 
-            <!-- Resultados -->
             <div class="mb-2 d-flex justify-content-between align-items-center">
               <span class="fw-semibold">Resultados</span>
               <span class="text-muted small" id="lbl_resultados_clientes">Sin buscar aún.</span>
@@ -675,15 +790,12 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
                     <th></th>
                   </tr>
                 </thead>
-                <tbody id="tbody_clientes">
-                  <!-- JS -->
-                </tbody>
+                <tbody id="tbody_clientes"></tbody>
               </table>
             </div>
 
             <hr>
 
-            <!-- Crear nuevo cliente -->
             <div class="mb-2">
               <button class="btn btn-outline-success btn-sm" type="button" data-bs-toggle="collapse" data-bs-target="#collapseNuevoCliente">
                 <i class="bi bi-person-plus me-1"></i> Crear nuevo cliente
@@ -725,16 +837,68 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
       </div>
     </div>
 
+    <!-- ✅ Modal Promo 2do con descuento -->
+    <div class="modal fade" id="modalPromoDesc" tabindex="-1" aria-hidden="true">
+      <div class="modal-dialog modal-md modal-dialog-centered">
+        <div class="modal-content">
+          <div class="modal-header bg-light">
+            <h5 class="modal-title">
+              <i class="bi bi-badge-percent text-primary me-2"></i>
+              Seleccionar promoción
+            </h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+          </div>
+          <div class="modal-body">
+            <div class="mb-2">
+              <div class="small text-muted">
+                Elige la promo que aplicará el <strong>% de descuento</strong>.
+              </div>
+            </div>
+
+            <label class="form-label req">Promoción</label>
+            <select id="promo_desc_select" class="form-control">
+              <option value="">Cargando...</option>
+            </select>
+
+            <div class="mt-3 small text-muted">
+              <strong>Tip:</strong> si cambias el equipo principal o la sucursal, la promo se reinicia para evitar inconsistencias.
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-outline-secondary" id="btn_cancel_promo_desc" data-bs-dismiss="modal">
+              Cancelar
+            </button>
+            <button type="button" class="btn btn-primary" id="btn_aplicar_promo_desc">
+              Aplicar
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bootstrap JS (necesario para Modals) -->
+    <!-- Si tu navbar ya incluye bootstrap.bundle, puedes dejar esto comentado.
+         Si NO, descoméntalo para evitar "bootstrap is not defined". -->
+    <!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->
+
     <script>
       $(document).ready(function() {
         const idSucursalUsuario = <?= $id_sucursal_usuario ?>;
         const mapaSucursales = <?= json_encode($mapSuc, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
+
         const modalConfirm = new bootstrap.Modal(document.getElementById('modalConfirmacion'));
         const modalClientes = new bootstrap.Modal(document.getElementById('modalClientes'));
         const modalCupon = new bootstrap.Modal(document.getElementById('modalCupon'));
         const modalEngancheInfo = new bootstrap.Modal(document.getElementById('modalEngancheInfo'));
+        const modalPromoDesc = new bootstrap.Modal(document.getElementById('modalPromoDesc'));
 
-        // 🔹 Sucursales con precio editable (vienen del data-attribute del input)
+        // ✅ Permiso por rol (Subdis_*) desde PHP (data-attribute)
+        const precioLibrePorRol = ($('#precio_venta').data('precio-libre-rol') == 1);
+
+        function puedeEditarPrecio() {
+          return !!precioLibrePorRol;
+        }
+
         const sucursalesPrecioLibre = (String($('#precio_venta').data('sucursales-libre') || ''))
           .split(',')
           .map(s => parseInt(s.trim(), 10))
@@ -746,17 +910,12 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
           return sucursalesPrecioLibre.includes(id);
         }
 
-        // Flag para saber si el usuario ya tocó manualmente el precio en sucursales libres
         let precioEditadoManualmente = false;
-
         $('#precio_venta').on('input', function() {
-          const idSuc = $('#id_sucursal').val();
-          if (esSucursalPrecioLibre(idSuc)) {
-            precioEditadoManualmente = true;
-          }
+          if (puedeEditarPrecio()) precioEditadoManualmente = true;
         });
 
-        // 🔹 Mostrar aviso de enganche solo una vez al enfocar el campo
+        // Enganche modal una vez
         let engancheModalShown = false;
         $('#enganche').on('focus', function() {
           if (!engancheModalShown) {
@@ -765,11 +924,197 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
           }
         });
 
-        // Estado del cupón
-        let cuponDisponible = 0; // monto configurado
-        let cuponAplicado = false; // si el usuario lo aceptó
+        // Cupón
+        let cuponDisponible = 0;
+        let cuponAplicado = false;
 
-        // ==== 🔒 Helpers de candado (UI) ====
+        // ===== 🎁 Promo regalo (2x1) =====
+        let promoRegaloAplica = false;
+        let promoRegaloId = null;
+        let promoRegaloNombre = '';
+        let tipoVentaPrevio = '';
+
+        // ===== ✅ Promo 2do con descuento =====
+        let promoDescEligible = false;          // si equipo1 está en equipo_descuento_principal (según backend)
+        let promoDescList = [];                 // promos disponibles para elegir
+        let promoDescNombre = '';
+        let promoDescPct = 0;
+
+        function resetPromoDescUI(hardOff = true) {
+          promoDescEligible = false;
+          promoDescList = [];
+          promoDescNombre = '';
+          promoDescPct = 0;
+
+          $('#wrap_promo_desc').addClass('d-none');
+          $('#chk_descuento2').prop('checked', false);
+          $('#btn_elegir_promo_desc').addClass('d-none');
+          $('#btn_quitar_promo_desc').addClass('d-none');
+          $('#pill_promo_desc').addClass('d-none');
+          $('#pill_promo_desc_txt').text('—');
+
+          // hidden
+          if (hardOff) {
+            $('#promo_desc_aplicado').val('0');
+            $('#promo_desc_id').val('0');
+            $('#promo_desc_pct').val('0');
+            $('#tag_venta_principal').val('');
+          }
+
+          // UI campo tag principal
+          $('#tag_principal_field').addClass('d-none');
+          $('#tag_principal').val('');
+          $('#hint_desc_tag_principal').addClass('d-none');
+        }
+
+        function setPromoDescApplied(promoId, nombre, pct) {
+          $('#promo_desc_aplicado').val('1');
+          $('#promo_desc_id').val(String(promoId || 0));
+          $('#promo_desc_pct').val(String(pct || 0));
+
+          promoDescNombre = nombre || 'Promo';
+          promoDescPct = parseFloat(pct) || 0;
+
+          $('#pill_promo_desc_txt').text(`${promoDescNombre} (${promoDescPct.toFixed(0)}%)`);
+          $('#pill_promo_desc').removeClass('d-none');
+
+          $('#btn_elegir_promo_desc').removeClass('d-none');
+          $('#btn_quitar_promo_desc').removeClass('d-none');
+
+          // Si es Financiamiento (2da venta separada), pedir tag principal
+          if ($('#tipo_venta').val() === 'Financiamiento') {
+            $('#tag_principal_field').removeClass('d-none');
+            $('#hint_desc_tag_principal').removeClass('d-none');
+          } else {
+            $('#tag_principal_field').addClass('d-none');
+            $('#hint_desc_tag_principal').addClass('d-none');
+          }
+
+          recalcPrecioVenta();
+        }
+
+        function clearPromoDescAppliedOnly() {
+          $('#promo_desc_aplicado').val('0');
+          $('#promo_desc_id').val('0');
+          $('#promo_desc_pct').val('0');
+          $('#tag_venta_principal').val('');
+
+          promoDescNombre = '';
+          promoDescPct = 0;
+
+          $('#pill_promo_desc').addClass('d-none');
+          $('#pill_promo_desc_txt').text('—');
+
+          $('#tag_principal_field').addClass('d-none');
+          $('#hint_desc_tag_principal').addClass('d-none');
+          $('#tag_principal').val('');
+
+          recalcPrecioVenta();
+        }
+
+        // ===== Promo regalo: reset =====
+        function resetPromoRegaloUI() {
+          promoRegaloAplica = false;
+          promoRegaloId = null;
+          promoRegaloNombre = '';
+
+          $('#wrap_promo_regalo').addClass('d-none');
+          $('#promo_regalo_nombre').text('—');
+          $('#chk_regalo').prop('checked', false);
+
+          $('#es_regalo').val('0');
+          $('#id_promo_regalo').val('');
+          $('#promo_regalo_aplicado').val('0');
+          $('#promo_regalo_id').val('0');
+
+          $('#tipo_venta')
+            .removeClass('select-lock')
+            .removeAttr('data-locked');
+
+          tipoVentaPrevio = '';
+        }
+
+        function aplicarEstadoRegaloUI(isOn) {
+          if (isOn) {
+            // ❌ No mezclar regalo con promo descuento
+            if ($('#promo_desc_aplicado').val() === '1' || $('#chk_descuento2').is(':checked')) {
+              $('#chk_regalo').prop('checked', false);
+              alert('No puedes combinar Promo Regalo con Promo 2do con descuento.');
+              return;
+            }
+
+            if ($('#tipo_venta').val() !== 'Financiamiento+Combo') {
+              tipoVentaPrevio = $('#tipo_venta').val() || '';
+            }
+
+            $('#tipo_venta').val('Financiamiento+Combo').trigger('change');
+
+            $('#tipo_venta')
+              .addClass('select-lock')
+              .attr('data-locked', '1');
+
+            $('#combo').show();
+
+            $('#es_regalo').val('1');
+            $('#id_promo_regalo').val(promoRegaloId ? String(promoRegaloId) : '');
+            $('#promo_regalo_aplicado').val('1');
+            $('#promo_regalo_id').val(promoRegaloId ? String(promoRegaloId) : '0');
+
+            const suc = $('#id_sucursal').val();
+            const invPrincipal = $('#equipo1').val();
+
+            $.ajax({
+              url: 'ajax_promo_regalo_combos.php',
+              method: 'POST',
+              data: {
+                promo_id: promoRegaloId,
+                id_sucursal: suc,
+                exclude_inventario: invPrincipal
+              },
+              success: function(html) {
+                $('#equipo2').html(html).val('').trigger('change');
+                refreshEquipoLocks();
+                recalcPrecioVenta();
+              },
+              error: function(xhr) {
+                console.warn('No se pudo filtrar combos promo:', xhr.responseText || xhr.statusText);
+              }
+            });
+
+          } else {
+            cargarEquipos($('#id_sucursal').val());
+
+            $('#es_regalo').val('0');
+            $('#id_promo_regalo').val('');
+            $('#promo_regalo_aplicado').val('0');
+            $('#promo_regalo_id').val('0');
+
+            $('#tipo_venta')
+              .removeClass('select-lock')
+              .removeAttr('data-locked');
+
+            if (tipoVentaPrevio) {
+              $('#tipo_venta').val(tipoVentaPrevio).trigger('change');
+            }
+            tipoVentaPrevio = '';
+          }
+
+          refreshEquipoLocks();
+          recalcPrecioVenta();
+        }
+
+        $('#chk_regalo').on('change', function() {
+          const on = $(this).is(':checked');
+          if (on) {
+            if (!promoRegaloAplica || !promoRegaloId) {
+              $(this).prop('checked', false);
+              return;
+            }
+          }
+          aplicarEstadoRegaloUI(on);
+        });
+
+        // ===== Candado UI =====
         function setLockedUI(locked, msgHtml) {
           const $banner = $('#banner_candado');
           const $form = $('#form_venta');
@@ -777,7 +1122,7 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
 
           if (locked) {
             $banner.removeClass('d-none').addClass('d-block');
-            if (msgHtml) $banner.find('div:first').find('div:eq(1)').html(msgHtml);
+            if (msgHtml) $banner.find('#candado_msg').html(msgHtml);
             $form.attr('data-locked', '1');
             $form.find('input,select,textarea,button').prop('disabled', true);
             $btn.prop('disabled', true).text('Bloqueado por corte pendiente');
@@ -789,7 +1134,6 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
           }
         }
 
-        // Estado inicial según PHP
         <?php if ($bloquearInicial): ?>
           setLockedUI(true);
         <?php else: ?>
@@ -812,7 +1156,7 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
           return $('#tipo_venta').val() === 'Financiamiento+Combo';
         }
 
-        // ====== Cliente seleccionado (helpers) ======
+        // ===== Cliente =====
         function limpiarCliente() {
           $('#id_cliente').val('');
           $('#nombre_cliente').val('');
@@ -848,7 +1192,6 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
             .html('<i class="bi bi-person-check me-1"></i> Cliente seleccionado');
         }
 
-        // Abrir modal clientes
         $('#btn_open_modal_clientes').on('click', function() {
           $('#cliente_buscar_q').val('');
           $('#tbody_clientes').empty();
@@ -857,7 +1200,6 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
           modalClientes.show();
         });
 
-        // Buscar clientes en modal
         $('#btn_buscar_modal').on('click', function() {
           const q = $('#cliente_buscar_q').val().trim();
           const idSucursal = $('#id_sucursal').val();
@@ -890,9 +1232,8 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
             clientes.forEach(function(c) {
               const $tr = $('<tr>');
 
-              // 🔹 Resaltar clientes de la sucursal del usuario
               if (parseInt(c.id_sucursal, 10) === idSucursalUsuario) {
-                $tr.addClass('table-success'); // verde suave
+                $tr.addClass('table-success');
               }
 
               $tr.append($('<td>').text(c.codigo_cliente || '—'));
@@ -900,8 +1241,6 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
               $tr.append($('<td>').text(c.telefono || ''));
               $tr.append($('<td>').text(c.correo || ''));
               $tr.append($('<td>').text(c.fecha_alta || ''));
-
-              // 🔹 Nueva columna: Sucursal
               $tr.append($('<td>').text(c.sucursal_nombre || '—'));
 
               const $btnSel = $('<button type="button" class="btn btn-sm btn-primary">')
@@ -921,7 +1260,6 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
           });
         });
 
-        // 🔹 Permitir buscar con Enter en el campo de búsqueda
         $('#cliente_buscar_q').on('keydown', function(e) {
           if (e.key === 'Enter') {
             e.preventDefault();
@@ -929,7 +1267,6 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
           }
         });
 
-        // Guardar nuevo cliente desde modal
         $('#btn_guardar_nuevo_cliente').on('click', function() {
           const nombre = $('#nuevo_nombre').val().trim();
           let tel = $('#nuevo_telefono').val().trim();
@@ -961,7 +1298,6 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
             setClienteSeleccionado(c);
             modalClientes.hide();
 
-            // Limpiar formulario de nuevo cliente
             $('#nuevo_nombre').val('');
             $('#nuevo_telefono').val('');
             $('#nuevo_correo').val('');
@@ -973,7 +1309,7 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
           });
         });
 
-        // ======= CUPÓN: helpers visuales =======
+        // ===== Cupón UI =====
         function actualizarInfoCupon() {
           if (cuponAplicado && cuponDisponible > 0) {
             $('#txt_cupon_info').removeClass('d-none');
@@ -986,11 +1322,8 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
           }
         }
 
-        // 🔹 Actualiza si el precio puede editarse o no según sucursal
         function actualizarBloqueoPrecio() {
-          const idSucSel = $('#id_sucursal').val();
-          const esLibre = esSucursalPrecioLibre(idSucSel);
-
+          const esLibre = puedeEditarPrecio();
           $('#precio_venta').prop('readonly', !esLibre);
 
           if (esLibre) {
@@ -999,57 +1332,233 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
           } else {
             $('#txt_precio_auto').removeClass('d-none');
             $('#txt_precio_manual').addClass('d-none');
-            // Al salir de una sucursal libre, reseteamos el flag de edición manual
             precioEditadoManualmente = false;
           }
         }
 
-        // 🔹 Recalcular precio total según equipos y tipo (aplica cupón si está aceptado)
+        // ✅ Calcula precio base para un option (combo usa precio_combo si existe, si no precio_lista)
+        function getBasePriceFromOption($opt, preferCombo) {
+          if (!$opt || !$opt.length) return 0;
+          const pLista = parseFloat($opt.data('precio-lista')) || 0;
+          const pCombo = parseFloat($opt.data('precio-combo'));
+          if (preferCombo && !isNaN(pCombo) && pCombo > 0) return pCombo;
+          return pLista;
+        }
+
+        // Recalcular precio total
         function recalcPrecioVenta() {
           let total = 0;
+          const tipo = $('#tipo_venta').val();
+          const esRegalo = ($('#es_regalo').val() === '1');
+          const aplicaDesc = ($('#promo_desc_aplicado').val() === '1');
+          const pct = parseFloat($('#promo_desc_pct').val()) || 0;
 
           const $opt1 = $('#equipo1').find('option:selected');
           if ($opt1.length && $opt1.val()) {
-            const pLista1 = parseFloat($opt1.data('precio-lista')) || 0;
-            total += pLista1;
+            let p1 = getBasePriceFromOption($opt1, false);
+
+            // ✅ Si tipo=Financiamiento y es "2do con descuento", aplicar descuento al EQUIPO1
+            if (tipo === 'Financiamiento' && aplicaDesc && pct > 0) {
+              p1 = p1 * (1 - (pct / 100));
+            }
+            total += p1;
           }
 
           if (isFinanciamientoCombo()) {
             const $opt2 = $('#equipo2').find('option:selected');
             if ($opt2.length && $opt2.val()) {
-              const pLista2 = parseFloat($opt2.data('precio-lista')) || 0;
-              const pCombo2 = parseFloat($opt2.data('precio-combo'));
-              const precio2 = (!isNaN(pCombo2) && pCombo2 > 0) ? pCombo2 : pLista2;
-              total += precio2;
+              if (esRegalo) {
+                total += 0;
+              } else {
+                let p2 = getBasePriceFromOption($opt2, true);
+
+                // ✅ Si tipo=Financiamiento+Combo y aplica descuento, descuento al EQUIPO2
+                if (aplicaDesc && pct > 0) {
+                  p2 = p2 * (1 - (pct / 100));
+                }
+                total += p2;
+              }
             }
           }
 
-          // Aplicar cupón si el usuario aceptó
-          if (cuponAplicado && cuponDisponible > 0) {
-            total = total - cuponDisponible;
-          }
+          if (cuponAplicado && cuponDisponible > 0) total = total - cuponDisponible;
           if (total < 0) total = 0;
 
-          const esLibre = esSucursalPrecioLibre($('#id_sucursal').val());
-
+          const esLibre = puedeEditarPrecio();
           if (!esLibre || !precioEditadoManualmente) {
-            if (total > 0) {
-              $('#precio_venta').val(total.toFixed(2));
-            } else {
-              $('#precio_venta').val('');
-            }
+            $('#precio_venta').val(total > 0 ? total.toFixed(2) : '');
           }
 
           const precio = parseFloat($('#precio_venta').val()) || 0;
           $('#conf_precio').text(precio.toFixed(2));
         }
 
+        // Locks equipo1 != equipo2
+        function refreshEquipoLocks() {
+          const v1 = $('#equipo1').val();
+          const v2 = $('#equipo2').val();
+
+          $('#equipo1 option, #equipo2 option').prop('disabled', false);
+
+          if (v1) $('#equipo2 option[value="' + v1 + '"]').prop('disabled', true);
+          if (v2) $('#equipo1 option[value="' + v2 + '"]').prop('disabled', true);
+
+          if (v1 && v2 && v1 === v2) {
+            $('#equipo2').val(null).trigger('change');
+          }
+        }
+
+        // ======= Promo 2do con descuento: cargar elegibilidad + promos =======
+        function checkPromoDescuentoForEquipo1(idInventario) {
+          // endpoint esperado:
+          // ajax_promo_descuento_check.php { id_inventario } -> {ok, aplica, promos:[{id,nombre,pct}]}
+          $.ajax({
+            url: 'ajax_promo_descuento_check.php',
+            method: 'POST',
+            dataType: 'json',
+            data: { id_inventario: idInventario },
+            success: function(res) {
+              if (res && res.ok && res.aplica && Array.isArray(res.promos) && res.promos.length) {
+                promoDescEligible = true;
+                promoDescList = res.promos;
+
+                $('#wrap_promo_desc').removeClass('d-none');
+                $('#btn_elegir_promo_desc').removeClass('d-none');
+
+                // si ya estaba aplicada una promo pero ya no existe, la quitamos
+                const currentId = parseInt($('#promo_desc_id').val(), 10) || 0;
+                if (currentId) {
+                  const exists = promoDescList.some(p => parseInt(p.id,10) === currentId);
+                  if (!exists) clearPromoDescAppliedOnly();
+                }
+
+              } else {
+                // no aplica
+                resetPromoDescUI(true);
+              }
+            },
+            error: function() {
+              // si falla, no mostramos para no romper UX
+              resetPromoDescUI(true);
+            }
+          });
+        }
+
+        function abrirModalPromoDesc() {
+          // llenar select con promoDescList
+          const $sel = $('#promo_desc_select');
+          $sel.empty();
+
+          if (!promoDescList.length) {
+            $sel.append('<option value="">Sin promos disponibles</option>');
+            return;
+          }
+
+          $sel.append('<option value="">Seleccione...</option>');
+          promoDescList.forEach(p => {
+            const id = parseInt(p.id, 10) || 0;
+            const nombre = String(p.nombre || 'Promo');
+            const pct = parseFloat(p.pct) || 0;
+            $sel.append(`<option value="${id}" data-pct="${pct}">${nombre} (${pct.toFixed(0)}%)</option>`);
+          });
+
+          // preselección si ya existe
+          const cur = $('#promo_desc_id').val();
+          if (cur && cur !== '0') $sel.val(cur);
+
+          modalPromoDesc.show();
+        }
+
+        $('#chk_descuento2').on('change', function() {
+          const on = $(this).is(':checked');
+
+          // no permitir si regalo activo
+          if (on && $('#es_regalo').val() === '1') {
+            $(this).prop('checked', false);
+            alert('No puedes combinar Promo Regalo con Promo 2do con descuento.');
+            return;
+          }
+
+          if (on) {
+            if (!promoDescEligible) {
+              $(this).prop('checked', false);
+              return;
+            }
+
+            $('#btn_elegir_promo_desc').removeClass('d-none');
+            $('#btn_quitar_promo_desc').removeClass('d-none');
+
+            abrirModalPromoDesc();
+          } else {
+            clearPromoDescAppliedOnly();
+            $('#btn_elegir_promo_desc').addClass('d-none');
+            $('#btn_quitar_promo_desc').addClass('d-none');
+          }
+
+          recalcPrecioVenta();
+        });
+
+        $('#btn_elegir_promo_desc').on('click', function() {
+          if (!promoDescEligible) return;
+          abrirModalPromoDesc();
+        });
+
+        $('#btn_quitar_promo_desc').on('click', function() {
+          $('#chk_descuento2').prop('checked', false);
+          clearPromoDescAppliedOnly();
+          $('#btn_elegir_promo_desc').removeClass('d-none');
+          $('#btn_quitar_promo_desc').addClass('d-none');
+        });
+
+        $('#btn_aplicar_promo_desc').on('click', function() {
+          const $opt = $('#promo_desc_select').find('option:selected');
+          const promoId = parseInt($('#promo_desc_select').val(), 10) || 0;
+          if (!promoId) {
+            alert('Selecciona una promoción.');
+            return;
+          }
+
+          const pct = parseFloat($opt.data('pct')) || 0;
+          const nombre = ($opt.text() || '').trim();
+
+          setPromoDescApplied(promoId, nombre, pct);
+          modalPromoDesc.hide();
+        });
+
+        // Tag principal (solo UI). Se manda hidden al backend
+        $('#tag_principal').on('input', function() {
+          const v = ($(this).val() || '').trim();
+          $('#tag_venta_principal').val(v);
+        });
+
+        // ===== Tipo venta change =====
         $('#tipo_venta').on('change', function() {
+          if ($(this).attr('data-locked') === '1') {
+            $(this).val('Financiamiento+Combo');
+            return;
+          }
+
           $('#combo').toggle(isFinanciamientoCombo());
           if (!isFinanciamientoCombo()) {
             $('#equipo2').val(null).trigger('change');
             $('#equipo1 option, #equipo2 option').prop('disabled', false);
+
+            if ($('#es_regalo').val() === '1') resetPromoRegaloUI();
           }
+
+          // Si cambiamos de tipo, si hay promo desc aplicada, ajustar campo tag principal
+          if ($('#promo_desc_aplicado').val() === '1') {
+            if ($('#tipo_venta').val() === 'Financiamiento') {
+              $('#tag_principal_field').removeClass('d-none');
+              $('#hint_desc_tag_principal').removeClass('d-none');
+            } else {
+              $('#tag_principal_field').addClass('d-none');
+              $('#hint_desc_tag_principal').addClass('d-none');
+              $('#tag_principal').val('');
+              $('#tag_venta_principal').val('');
+            }
+          }
+
           toggleVenta();
           refreshEquipoLocks();
           recalcPrecioVenta();
@@ -1080,135 +1589,33 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
             $('#financiera').val('');
             $('#enganche_efectivo').val(0);
             $('#enganche_tarjeta').val(0);
+
+            // Si es contado, el tag principal no aplica
+            $('#tag_principal_field').addClass('d-none');
+            $('#tag_principal').val('');
+            $('#tag_venta_principal').val('');
           }
         }
         toggleVenta();
 
-        // ===== Bloqueo cruzado equipo1 != equipo2 =====
-        function refreshEquipoLocks() {
-          const v1 = $('#equipo1').val();
-          const v2 = $('#equipo2').val();
+        // ===== Cargar equipos (se redefine) =====
+        function cargarEquipos(sucursalId) { /* redefinido */ }
 
-          $('#equipo1 option, #equipo2 option').prop('disabled', false);
-
-          if (v1) {
-            $('#equipo2 option[value="' + v1 + '"]').prop('disabled', true);
-          }
-          if (v2) {
-            $('#equipo1 option[value="' + v2 + '"]').prop('disabled', true);
-          }
-
-          if (v1 && v2 && v1 === v2) {
-            $('#equipo2').val(null).trigger('change');
-          }
-        }
-
-        // Cambio de equipo principal: aquí revisamos cupón
-        $('#equipo1').on('change', function() {
-          const idInv = $('#equipo1').val();
-
-          // Resetear estado de cupón
-          cuponDisponible = 0;
-          cuponAplicado = false;
-          actualizarInfoCupon();
-
-          if (!idInv) {
-            refreshEquipoLocks();
-            recalcPrecioVenta();
-            return;
-          }
-
-          // Consultar cupón por AJAX
-          $.ajax({
-            url: 'ajax_cupon_producto.php',
-            method: 'POST',
-            dataType: 'json',
-            data: {
-              id_inventario: idInv
-            },
-            success: function(res) {
-              console.log('Cupon response:', res);
-              let d = 0;
-              if (res && res.ok) {
-                d = parseFloat(res.monto_cupon) || 0;
-              }
-              if (d > 0) {
-                cuponDisponible = d;
-                $('#modal_cupon_monto').text(d.toFixed(2));
-                modalCupon.show();
-              }
-              refreshEquipoLocks();
-              recalcPrecioVenta();
-            },
-            error: function() {
-              refreshEquipoLocks();
-              recalcPrecioVenta();
-            }
-          });
-        });
-
-        $('#equipo2').on('change', function() {
-          refreshEquipoLocks();
-          recalcPrecioVenta();
-        });
-
-        $('#equipo2').on('select2:select', function(e) {
-          const v1 = $('#equipo1').val();
-          const elegido = e.params.data.id;
-          if (v1 && elegido === v1) {
-            $(this).val(null).trigger('change');
-          }
-          refreshEquipoLocks();
-          recalcPrecioVenta();
-        });
-
-        $('#equipo1').on('select2:select', function() {
-          refreshEquipoLocks();
-          recalcPrecioVenta();
-        });
-
-        // Botones del modal de cupón
-        $('#btn_aplicar_cupon').on('click', function() {
-          if (cuponDisponible > 0) {
-            cuponAplicado = true;
-            actualizarInfoCupon();
-            recalcPrecioVenta();
-          }
-          modalCupon.hide();
-        });
-
-        $('#btn_no_aplicar_cupon').on('click', function() {
-          cuponAplicado = false;
-          actualizarInfoCupon();
-          recalcPrecioVenta();
-        });
-
-        // ===== Carga de equipos por sucursal (se redefine más abajo) =====
-        function cargarEquipos(sucursalId) {
-          /* redefinido en initEquipos */
-        }
-
-        // ===== Cambio de sucursal: aviso + consulta candado en caliente + bloqueo precio =====
+        // Cambio sucursal: aviso + candado + reset promos
         $('#id_sucursal').on('change', function() {
           const seleccionada = parseInt($(this).val());
-          if (seleccionada !== idSucursalUsuario) {
-            $('#alerta_sucursal').removeClass('d-none');
-          } else {
-            $('#alerta_sucursal').addClass('d-none');
-          }
+          if (seleccionada !== idSucursalUsuario) $('#alerta_sucursal').removeClass('d-none');
+          else $('#alerta_sucursal').addClass('d-none');
+
           cargarEquipos(seleccionada);
 
-          // 🔎 Checar candado por AJAX
-          $.post('ajax_check_corte.php', {
-            id_sucursal: seleccionada
-          }, function(res) {
+          $.post('ajax_check_corte.php', { id_sucursal: seleccionada }, function(res) {
             if (!res || !res.ok) return;
-
             if (res.bloquear) {
               const html = `
-          <strong>Captura bloqueada.</strong> ${res.motivo}
-          <div class="small">Genera el corte de <strong>${res.ayer}</strong> para continuar.</div>
-        `;
+                <strong>Captura bloqueada.</strong> ${res.motivo}
+                <div class="small">Genera el corte de <strong>${res.ayer}</strong> para continuar.</div>
+              `;
               setLockedUI(true, html);
             } else {
               setLockedUI(false);
@@ -1217,10 +1624,13 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
             console.warn('No se pudo verificar el candado por AJAX. El back-end seguirá validando.');
           });
 
-          // Actualizar permiso de edición de precio
           actualizarBloqueoPrecio();
-          // Al cambiar de sucursal, si es libre, el cálculo llenará el precio la primera vez
           precioEditadoManualmente = false;
+
+          // reset promos al cambiar sucursal
+          resetPromoRegaloUI();
+          resetPromoDescUI(true);
+
           recalcPrecioVenta();
         });
 
@@ -1247,21 +1657,36 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
           if (!forma) errores.push('Selecciona la forma de pago.');
           if (!$('#equipo1').val()) errores.push('Selecciona el equipo principal.');
 
-          // 🔒 Cliente obligatorio SIEMPRE (cualquier tipo de venta)
-          if (!idCliente) {
-            errores.push('Debes seleccionar un cliente antes de registrar la venta.');
-          }
-          if (!tel) {
-            errores.push('El cliente seleccionado debe tener teléfono.');
-          } else if (!/^\d{10}$/.test(tel)) {
-            errores.push('El teléfono del cliente debe tener 10 dígitos.');
-          }
+          if (!idCliente) errores.push('Debes seleccionar un cliente antes de registrar la venta.');
+          if (!tel) errores.push('El cliente seleccionado debe tener teléfono.');
+          else if (!/^\d{10}$/.test(tel)) errores.push('El teléfono del cliente debe tener 10 dígitos.');
 
           if (isFinanciamientoCombo()) {
             const v1 = $('#equipo1').val();
             const v2 = $('#equipo2').val();
             if (!v2) errores.push('Selecciona el equipo combo.');
             if (v1 && v2 && v1 === v2) errores.push('El equipo combo debe ser distinto del principal.');
+          }
+
+          const esRegalo = ($('#es_regalo').val() === '1');
+          if (esRegalo && !$('#equipo2').val()) {
+            errores.push('La promo de regalo requiere seleccionar el equipo combo (regalo).');
+          }
+
+          // ✅ Promo descuento: si checkbox encendido, debe existir promo elegida
+          if ($('#chk_descuento2').is(':checked')) {
+            const aplicado = ($('#promo_desc_aplicado').val() === '1');
+            const promoId = parseInt($('#promo_desc_id').val(), 10) || 0;
+            const pct = parseFloat($('#promo_desc_pct').val()) || 0;
+            if (!aplicado || promoId <= 0 || pct <= 0) {
+              errores.push('Selecciona una promo válida para "2do con descuento".');
+            }
+
+            // ✅ Si es Financiamiento (2da venta separada): pedir TAG principal
+            if ($('#tipo_venta').val() === 'Financiamiento') {
+              const tagP = ($('#tag_venta_principal').val() || '').trim();
+              if (!tagP) errores.push('Captura el TAG de la venta principal para validar el descuento.');
+            }
           }
 
           if (esFin) {
@@ -1283,8 +1708,7 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
 
         function poblarModal() {
           const idSucSel = $('#id_sucursal').val();
-          const sucNom = mapaSucursales[idSucSel] || '—';
-          $('#conf_sucursal').text(sucNom);
+          $('#conf_sucursal').text(mapaSucursales[idSucSel] || '—');
 
           const tipo = $('#tipo_venta').val() || '—';
           $('#conf_tipo').text(tipo);
@@ -1298,6 +1722,22 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
             $('#li_equipo2').removeClass('d-none');
           } else {
             $('#li_equipo2').addClass('d-none');
+          }
+
+          // Promo descuento en confirmación
+          if ($('#promo_desc_aplicado').val() === '1') {
+            $('#conf_promo_desc').text($('#pill_promo_desc_txt').text() || '—');
+            $('#li_promo_desc').removeClass('d-none');
+          } else {
+            $('#li_promo_desc').addClass('d-none');
+          }
+
+          const tagP = ($('#tag_venta_principal').val() || '').trim();
+          if (tagP) {
+            $('#conf_tag_principal').text(tagP);
+            $('#li_tag_principal').removeClass('d-none');
+          } else {
+            $('#li_tag_principal').addClass('d-none');
           }
 
           const precio = parseFloat($('#precio_venta').val()) || 0;
@@ -1328,30 +1768,24 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
         $('#form_venta').on('submit', function(e) {
           if ($('#form_venta').attr('data-locked') === '1') {
             e.preventDefault();
-            $('html, body').animate({
-              scrollTop: 0
-            }, 300);
+            $('html, body').animate({ scrollTop: 0 }, 300);
             return;
           }
 
           if (permitSubmit) return;
           e.preventDefault();
-          const errores = validarFormulario();
 
+          const errores = validarFormulario();
           if (errores.length > 0) {
             $('#errores').removeClass('d-none')
               .html('<strong>Corrige lo siguiente:</strong><ul class="mb-0"><li>' + errores.join('</li><li>') + '</li></ul>');
-            window.scrollTo({
-              top: 0,
-              behavior: 'smooth'
-            });
+            window.scrollTo({ top: 0, behavior: 'smooth' });
             return;
           }
 
           $('#errores').addClass('d-none').empty();
           poblarModal();
 
-          // 🔐 Resetear campo de contraseña y botón de confirmar cada vez
           $('#password_confirm').val('');
           $('#btn_confirmar_envio')
             .prop('disabled', false)
@@ -1368,34 +1802,30 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
             return;
           }
 
-          $('#btn_confirmar_envio')
-            .prop('disabled', true)
-            .text('Confirmando...');
-          $('#btn_submit')
-            .prop('disabled', true)
-            .text('Enviando...');
+          $('#btn_confirmar_envio').prop('disabled', true).text('Confirmando...');
+          $('#btn_submit').prop('disabled', true).text('Enviando...');
 
           permitSubmit = true;
           modalConfirm.hide();
           $('#form_venta')[0].submit();
         });
 
-        // Inicial: definimos cargarEquipos REAL aquí para que siempre refresque precio también
+        // ===== Init Equipos =====
         function initEquipos() {
           cargarEquipos = function(sucursalId) {
             $.ajax({
               url: 'ajax_productos_por_sucursal.php',
               method: 'POST',
-              data: {
-                id_sucursal: sucursalId
-              },
+              data: { id_sucursal: sucursalId },
               success: function(response) {
                 $('#equipo1, #equipo2').html(response).val('').trigger('change');
 
-                // Resetear cupón al cambiar de sucursal
                 cuponDisponible = 0;
                 cuponAplicado = false;
                 actualizarInfoCupon();
+
+                resetPromoRegaloUI();
+                resetPromoDescUI(true);
 
                 refreshEquipoLocks();
                 recalcPrecioVenta();
@@ -1407,6 +1837,9 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
                 cuponDisponible = 0;
                 cuponAplicado = false;
                 actualizarInfoCupon();
+
+                resetPromoRegaloUI();
+                resetPromoDescUI(true);
 
                 refreshEquipoLocks();
                 recalcPrecioVenta();
@@ -1420,14 +1853,115 @@ list($bloquearInicial, $motivoBloqueoInicial, $ayerCandado) = debe_bloquear_capt
         }
         initEquipos();
 
-        // Inicial: actualizar modo de precio (auto vs editable) según sucursal actual
         actualizarBloqueoPrecio();
-
-        // De inicio, sin cliente
         limpiarCliente();
+
+        // ===== Eventos equipos (cupón + promo regalo + promo descuento) =====
+        $('#equipo1').on('change', function() {
+          const idInv = $('#equipo1').val();
+
+          // reset cupón
+          cuponDisponible = 0;
+          cuponAplicado = false;
+          actualizarInfoCupon();
+
+          // reset promos
+          resetPromoRegaloUI();
+          resetPromoDescUI(true);
+
+          if (!idInv) {
+            refreshEquipoLocks();
+            recalcPrecioVenta();
+            return;
+          }
+
+          // 1) Cupón
+          $.ajax({
+            url: 'ajax_cupon_producto.php',
+            method: 'POST',
+            dataType: 'json',
+            data: { id_inventario: idInv },
+            success: function(res) {
+              let d = 0;
+              if (res && res.ok) d = parseFloat(res.monto_cupon) || 0;
+              if (d > 0) {
+                cuponDisponible = d;
+                $('#modal_cupon_monto').text(d.toFixed(2));
+                modalCupon.show();
+              }
+              refreshEquipoLocks();
+              recalcPrecioVenta();
+            },
+            error: function() {
+              refreshEquipoLocks();
+              recalcPrecioVenta();
+            }
+          });
+
+          // 2) Promo regalo
+          $.ajax({
+            url: 'ajax_promo_regalo_check.php',
+            method: 'POST',
+            dataType: 'json',
+            data: { id_inventario: idInv },
+            success: function(res) {
+              if (res && res.ok && res.aplica && res.promo_id) {
+                promoRegaloAplica = true;
+                promoRegaloId = parseInt(res.promo_id, 10);
+                promoRegaloNombre = res.nombre || 'Promo';
+                $('#promo_regalo_nombre').text(promoRegaloNombre);
+                $('#wrap_promo_regalo').removeClass('d-none');
+              } else {
+                resetPromoRegaloUI();
+              }
+            },
+            error: function() {
+              resetPromoRegaloUI();
+            }
+          });
+
+          // 3) ✅ Promo 2do con descuento (elegibilidad + promos)
+          checkPromoDescuentoForEquipo1(idInv);
+        });
+
+        $('#equipo2').on('change', function() {
+          refreshEquipoLocks();
+          recalcPrecioVenta();
+        });
+
+        $('#equipo2').on('select2:select', function(e) {
+          const v1 = $('#equipo1').val();
+          const elegido = e.params.data.id;
+          if (v1 && elegido === v1) {
+            $(this).val(null).trigger('change');
+          }
+          refreshEquipoLocks();
+          recalcPrecioVenta();
+        });
+
+        $('#equipo1').on('select2:select', function() {
+          refreshEquipoLocks();
+          recalcPrecioVenta();
+        });
+
+        // Cupón modal botones
+        $('#btn_aplicar_cupon').on('click', function() {
+          if (cuponDisponible > 0) {
+            cuponAplicado = true;
+            actualizarInfoCupon();
+            recalcPrecioVenta();
+          }
+          modalCupon.hide();
+        });
+
+        $('#btn_no_aplicar_cupon').on('click', function() {
+          cuponAplicado = false;
+          actualizarInfoCupon();
+          recalcPrecioVenta();
+        });
+
       });
     </script>
 
 </body>
-
 </html>
