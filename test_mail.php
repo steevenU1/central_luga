@@ -1,15 +1,11 @@
 <?php
-require __DIR__ . '/mailer.php';
+require_once __DIR__ . '/includes/mail_hostinger.php';
 
-$destinatario = 'facturacionefr@gmail.com'; // cámbialo
+$r = send_mail_hostinger([
+  'to' => 'e.fernandez.r@outlook.com',
+  'subject' => 'Test SMTP Hostinger',
+  'html' => '<b>Si lees esto, jaló 😎</b><br><small>Enviado desde Hostinger</small>'
+]);
 
-$asunto = 'Prueba SMTP Hostinger';
-$html = "<h3>Prueba OK</h3><p>Si ves esto, PHPMailer ya quedó.</p>";
-
-list($ok, $err) = enviarCorreo($destinatario, $asunto, $html);
-
-if ($ok) {
-    echo "✅ Correo enviado correctamente a {$destinatario}";
-} else {
-    echo "❌ Error al enviar: {$err}";
-}
+header('Content-Type: text/plain; charset=utf-8');
+var_export($r);
