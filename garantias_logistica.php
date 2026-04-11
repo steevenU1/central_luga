@@ -217,11 +217,33 @@ $sql = "SELECT
             gc.es_reparable,
             gc.requiere_cotizacion,
             s.nombre AS sucursal_nombre,
-            u.nombre AS capturista_nombre
+            u.nombre AS capturista_nombre,
+            COUNT(gd.id) AS total_documentos
         FROM garantias_casos gc
         LEFT JOIN sucursales s ON s.id = gc.id_sucursal
         LEFT JOIN usuarios u ON u.id = gc.id_usuario_captura
+        LEFT JOIN garantias_documentos gd ON gd.id_garantia = gc.id
         $whereSql
+        GROUP BY
+            gc.id,
+            gc.folio,
+            gc.fecha_captura,
+            gc.fecha_dictamen,
+            gc.cliente_nombre,
+            gc.cliente_telefono,
+            gc.marca,
+            gc.modelo,
+            gc.color,
+            gc.capacidad,
+            gc.imei_original,
+            gc.imei2_original,
+            gc.dictamen_preliminar,
+            gc.motivo_no_procede,
+            gc.estado,
+            gc.es_reparable,
+            gc.requiere_cotizacion,
+            s.nombre,
+            u.nombre
         ORDER BY
             CASE
                 WHEN gc.estado IN ('capturada','recepcion_registrada','en_revision_logistica') THEN 1
@@ -350,6 +372,15 @@ $estados = [
         }
         .tabs-soft .btn{
             border-radius:999px;
+        }
+        .actions-wrap{
+            display:flex;
+            flex-wrap:wrap;
+            gap:.35rem;
+            justify-content:center;
+        }
+        .btn-docs{
+            min-width: 96px;
         }
     </style>
 </head>
@@ -506,7 +537,7 @@ $estados = [
                             <th>Dictamen</th>
                             <th>Estado</th>
                             <th>Ruta</th>
-                            <th class="text-center">Acción</th>
+                            <th class="text-center">Acciones</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -516,6 +547,7 @@ $estados = [
                                 if ((int)$row['requiere_cotizacion'] === 1 || (int)$row['es_reparable'] === 1) {
                                     $ruta = 'Reparación / cotización';
                                 }
+                                $totalDocs = (int)($row['total_documentos'] ?? 0);
                             ?>
                             <tr>
                                 <td>
@@ -564,9 +596,20 @@ $estados = [
                                     <span class="badge text-bg-light border"><?= h($ruta) ?></span>
                                 </td>
                                 <td class="text-center">
-                                    <a href="garantias_detalle.php?id=<?= (int)$row['id'] ?>" class="btn btn-sm btn-outline-primary">
-                                        <i class="bi bi-eye me-1"></i>Gestionar
-                                    </a>
+                                    <div class="actions-wrap">
+                                        <a href="garantias_detalle.php?id=<?= (int)$row['id'] ?>" class="btn btn-sm btn-outline-primary">
+                                            <i class="bi bi-eye me-1"></i>Gestionar
+                                        </a>
+
+                                        <a href="generar_documento_garantia.php?id=<?= (int)$row['id'] ?>" class="btn btn-sm btn-outline-success" target="_blank">
+                                            <i class="bi bi-file-earmark-text me-1"></i>Formato
+                                        </a>
+
+                                        <a href="garantias_detalle.php?id=<?= (int)$row['id'] ?>#documentos" class="btn btn-sm btn-outline-secondary btn-docs">
+                                            <i class="bi bi-folder2-open me-1"></i>Docs
+                                            <span class="badge text-bg-light ms-1"><?= $totalDocs ?></span>
+                                        </a>
+                                    </div>
                                 </td>
                             </tr>
                         <?php endwhile; ?>

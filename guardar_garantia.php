@@ -76,12 +76,63 @@ function table_exists(mysqli $conn, string $table): bool {
     return $ok;
 }
 
+function column_exists(mysqli $conn, string $table, string $column): bool {
+    $sql = "SELECT 1
+            FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME = ?
+              AND COLUMN_NAME = ?
+            LIMIT 1";
+    $st = $conn->prepare($sql);
+    $st->bind_param("ss", $table, $column);
+    $st->execute();
+    $ok = ($st->get_result()->num_rows > 0);
+    $st->close();
+    return $ok;
+}
+
+function parse_date_flexible(?string $dateStr): ?DateTime {
+    $dateStr = trim((string)$dateStr);
+    if ($dateStr === '') return null;
+
+    $tz = new DateTimeZone('America/Mexico_City');
+
+    $formats = [
+        'Y-m-d',
+        'Y-m-d H:i:s',
+        'Y-m-d H:i',
+        'd/m/Y',
+        'd/m/Y H:i:s',
+        'd/m/Y H:i',
+        DateTime::ATOM,
+    ];
+
+    foreach ($formats as $fmt) {
+        $dt = DateTime::createFromFormat($fmt, $dateStr, $tz);
+        if ($dt instanceof DateTime) {
+            return $dt;
+        }
+    }
+
+    $ts = strtotime($dateStr);
+    if ($ts === false) return null;
+
+    $dt = new DateTime('now', $tz);
+    $dt->setTimestamp($ts);
+    return $dt;
+}
+
 function diff_days_from_today(?string $dateStr): ?int {
-    if (!$dateStr) return null;
-    $base = strtotime($dateStr . ' 00:00:00');
+    $base = parse_date_flexible($dateStr);
     if (!$base) return null;
-    $today = strtotime(date('Y-m-d') . ' 00:00:00');
-    return (int)floor(($today - $base) / 86400);
+
+    $tz = new DateTimeZone('America/Mexico_City');
+    $today = new DateTime('today', $tz);
+
+    $base->setTime(0, 0, 0);
+
+    $seconds = $today->getTimestamp() - $base->getTimestamp();
+    return (int)floor($seconds / 86400);
 }
 
 function bindParamsDynamic(mysqli_stmt $stmt, string $types, array &$params): void {
@@ -165,6 +216,12 @@ function generar_folio_garantia(mysqli $conn): string {
     return $prefijo . str_pad((string)$next, 4, '0', STR_PAD_LEFT);
 }
 
+/**
+ * Política:
+ * 0-30 días   => garantía con distribuidor
+ * 31-90 días  => revisión con proveedor
+ * >90 días    => no procede por garantía vencida
+ */
 function dictaminar_backend(array $data): array {
     $origen = (string)($data['origen'] ?? '');
     $fechaCompra = $data['fecha_compra'] ?? null;
@@ -179,110 +236,168 @@ function dictaminar_backend(array $data): array {
 
     if (!$origen && empty($data['imei_original'])) {
         return [
+            'dias_compra'         => $diasCompra,
             'dictamen_preliminar' => 'revision_logistica',
             'motivo_no_procede'   => null,
             'detalle_no_procede'  => 'No existe información suficiente para calcular el dictamen.',
             'estado'              => 'capturada',
             'es_reparable'        => 0,
-            'requiere_cotizacion' => 0
+            'requiere_cotizacion' => 0,
+            'tipo_atencion'       => 'revision_tecnica',
+            'cobertura'           => 'indefinida'
         ];
     }
 
     if (!empty($garantiaAbiertaId)) {
         return [
+            'dias_compra'         => $diasCompra,
             'dictamen_preliminar' => 'no_procede',
             'motivo_no_procede'   => 'GARANTIA_PREVIA_ABIERTA',
             'detalle_no_procede'  => 'El IMEI ya cuenta con una garantía activa en proceso.',
             'estado'              => 'capturada',
             'es_reparable'        => 0,
-            'requiere_cotizacion' => 0
+            'requiere_cotizacion' => 0,
+            'tipo_atencion'       => 'postventa',
+            'cobertura'           => 'bloqueada'
         ];
     }
 
     if ($origen === 'manual') {
         return [
+            'dias_compra'         => $diasCompra,
             'dictamen_preliminar' => 'imei_no_localizado',
             'motivo_no_procede'   => 'IMEI_NO_LOCALIZADO',
             'detalle_no_procede'  => 'No se encontró el IMEI en ventas ni en reemplazos previos. Requiere validación manual.',
             'estado'              => 'capturada',
             'es_reparable'        => 0,
-            'requiere_cotizacion' => 0
+            'requiere_cotizacion' => 0,
+            'tipo_atencion'       => 'revision_tecnica',
+            'cobertura'           => 'indefinida'
         ];
     }
 
     if ((string)$danoFisico === '1') {
         return [
+            'dias_compra'         => $diasCompra,
             'dictamen_preliminar' => 'no_procede',
             'motivo_no_procede'   => 'DANO_FISICO',
             'detalle_no_procede'  => 'Se detectó daño físico imputable al cliente.',
             'estado'              => 'capturada',
             'es_reparable'        => 1,
-            'requiere_cotizacion' => 1
+            'requiere_cotizacion' => 1,
+            'tipo_atencion'       => 'postventa',
+            'cobertura'           => 'excluida'
         ];
     }
 
     if ((string)$humedad === '1') {
         return [
+            'dias_compra'         => $diasCompra,
             'dictamen_preliminar' => 'no_procede',
             'motivo_no_procede'   => 'HUMEDAD',
             'detalle_no_procede'  => 'Se detectó humedad en el equipo.',
             'estado'              => 'capturada',
             'es_reparable'        => 1,
-            'requiere_cotizacion' => 1
+            'requiere_cotizacion' => 1,
+            'tipo_atencion'       => 'postventa',
+            'cobertura'           => 'excluida'
         ];
     }
 
     if ((string)$bloqueo === '1') {
         return [
+            'dias_compra'         => $diasCompra,
             'dictamen_preliminar' => 'no_procede',
             'motivo_no_procede'   => 'BLOQUEO_CUENTA',
             'detalle_no_procede'  => 'El bloqueo por patrón, PIN o cuenta no forma parte de la garantía.',
             'estado'              => 'capturada',
             'es_reparable'        => 0,
-            'requiere_cotizacion' => 0
+            'requiere_cotizacion' => 0,
+            'tipo_atencion'       => 'postventa',
+            'cobertura'           => 'excluida'
         ];
     }
 
     if ((string)$appFin === '0') {
         return [
+            'dias_compra'         => $diasCompra,
             'dictamen_preliminar' => 'revision_logistica',
             'motivo_no_procede'   => null,
             'detalle_no_procede'  => 'La app financiera no está presente y requiere validación adicional por logística.',
             'estado'              => 'en_revision_logistica',
             'es_reparable'        => 0,
-            'requiere_cotizacion' => 0
+            'requiere_cotizacion' => 0,
+            'tipo_atencion'       => 'revision_tecnica',
+            'cobertura'           => 'revision_logistica'
         ];
     }
 
-    if ($diasCompra !== null && $diasCompra > 90) {
+    if ($diasCompra === null) {
         return [
-            'dictamen_preliminar' => 'no_procede',
-            'motivo_no_procede'   => 'GARANTIA_VENCIDA',
-            'detalle_no_procede'  => "El equipo supera el periodo de cobertura sugerido ({$diasCompra} días desde compra).",
-            'estado'              => 'capturada',
-            'es_reparable'        => 1,
-            'requiere_cotizacion' => 1
-        ];
-    }
-
-    if ($diasCompra !== null && $diasCompra <= 30 && (string)$danoFisico !== '1' && (string)$humedad !== '1') {
-        return [
-            'dictamen_preliminar' => 'procede',
+            'dias_compra'         => null,
+            'dictamen_preliminar' => 'revision_logistica',
             'motivo_no_procede'   => null,
-            'detalle_no_procede'  => 'Cumple condiciones iniciales para garantía. Requiere validación final de logística.',
+            'detalle_no_procede'  => 'No se pudo calcular la antigüedad del equipo con la fecha de compra recibida.',
             'estado'              => 'en_revision_logistica',
             'es_reparable'        => 0,
-            'requiere_cotizacion' => 0
+            'requiere_cotizacion' => 0,
+            'tipo_atencion'       => 'revision_tecnica',
+            'cobertura'           => 'indefinida'
+        ];
+    }
+
+    if ($diasCompra > 90) {
+        return [
+            'dias_compra'         => $diasCompra,
+            'dictamen_preliminar' => 'no_procede',
+            'motivo_no_procede'   => 'GARANTIA_VENCIDA',
+            'detalle_no_procede'  => "El equipo supera el periodo máximo de cobertura ({$diasCompra} días desde compra).",
+            'estado'              => 'capturada',
+            'es_reparable'        => 1,
+            'requiere_cotizacion' => 1,
+            'tipo_atencion'       => 'postventa',
+            'cobertura'           => 'vencida'
+        ];
+    }
+
+    if ($diasCompra >= 31 && $diasCompra <= 90) {
+        return [
+            'dias_compra'         => $diasCompra,
+            'dictamen_preliminar' => 'revision_proveedor',
+            'motivo_no_procede'   => 'REVISION_PROVEEDOR_31_90',
+            'detalle_no_procede'  => "El equipo tiene {$diasCompra} días desde compra. Ya no entra en garantía directa con distribuidor y debe canalizarse a revisión con proveedor.",
+            'estado'              => 'en_revision_logistica',
+            'es_reparable'        => 0,
+            'requiere_cotizacion' => 0,
+            'tipo_atencion'       => 'revision_tecnica',
+            'cobertura'           => 'proveedor_31_90'
+        ];
+    }
+
+    if ($diasCompra >= 0 && $diasCompra <= 30) {
+        return [
+            'dias_compra'         => $diasCompra,
+            'dictamen_preliminar' => 'procede',
+            'motivo_no_procede'   => null,
+            'detalle_no_procede'  => "Cumple condiciones iniciales para garantía con distribuidor. Antigüedad: {$diasCompra} días.",
+            'estado'              => 'en_revision_logistica',
+            'es_reparable'        => 0,
+            'requiere_cotizacion' => 0,
+            'tipo_atencion'       => 'garantia',
+            'cobertura'           => 'distribuidor_0_30'
         ];
     }
 
     return [
+        'dias_compra'         => $diasCompra,
         'dictamen_preliminar' => 'revision_logistica',
         'motivo_no_procede'   => null,
         'detalle_no_procede'  => 'No se detectó rechazo automático, pero el caso requiere validación logística.',
         'estado'              => 'en_revision_logistica',
         'es_reparable'        => 0,
-        'requiere_cotizacion' => 0
+        'requiere_cotizacion' => 0,
+        'tipo_atencion'       => 'revision_tecnica',
+        'cobertura'           => 'revision_logistica'
     ];
 }
 
@@ -307,6 +422,7 @@ $origen = htrim($_POST['origen'] ?? 'manual');
 $idVenta = int_or_null($_POST['id_venta'] ?? null);
 $idDetalleVenta = int_or_null($_POST['id_detalle_venta'] ?? null);
 $idProducto = int_or_null($_POST['id_producto'] ?? null);
+$idCliente = int_or_null($_POST['id_cliente'] ?? null);
 $idGarantiaPadre = int_or_null($_POST['id_garantia_padre'] ?? null);
 $idGarantiaRaiz = int_or_null($_POST['id_garantia_raiz'] ?? null);
 
@@ -318,6 +434,23 @@ $marca = null_if_empty($_POST['marca'] ?? null);
 $modelo = null_if_empty($_POST['modelo'] ?? null);
 $color = null_if_empty($_POST['color'] ?? null);
 $capacidad = null_if_empty($_POST['capacidad'] ?? null);
+$proveedor = null_if_empty($_POST['proveedor'] ?? null);
+
+$esCombo = yn_to_nullable_int($_POST['es_combo'] ?? 0);
+if ($esCombo === null) {
+    $esCombo = 0;
+}
+
+$tipoEquipoVenta = null_if_empty($_POST['tipo_equipo_venta'] ?? null);
+if ($tipoEquipoVenta !== null) {
+    $tipoEquipoVenta = strtolower(trim($tipoEquipoVenta));
+    if (!in_array($tipoEquipoVenta, ['principal', 'combo'], true)) {
+        $tipoEquipoVenta = null;
+    }
+}
+if ($tipoEquipoVenta === null) {
+    $tipoEquipoVenta = ((int)$esCombo === 1) ? 'combo' : 'principal';
+}
 
 $imeiOriginal = sanitize_imei($_POST['imei_original'] ?? $imeiBusqueda);
 $imei2Original = sanitize_imei($_POST['imei2_original'] ?? '');
@@ -331,7 +464,7 @@ $modalidadVenta = null_if_empty($_POST['modalidad_venta'] ?? null);
 $financiera = null_if_empty($_POST['financiera_hidden'] ?? $_POST['financiera'] ?? null);
 
 $fechaRecepcion = null_if_empty($_POST['fecha_recepcion'] ?? date('Y-m-d'));
-$tipoAtencion = null_if_empty($_POST['tipo_atencion'] ?? 'garantia');
+$tipoAtencionPost = null_if_empty($_POST['tipo_atencion'] ?? 'garantia');
 
 $descripcionFalla = htrim($_POST['descripcion_falla'] ?? '');
 $observacionesTienda = null_if_empty($_POST['observaciones_tienda'] ?? null);
@@ -349,6 +482,33 @@ $checkBloqueoPatronGoogle = yn_to_nullable_int($_POST['check_bloqueo_patron_goog
 $requiereCotizacionPost = isset($_POST['requiere_cotizacion']) ? (int)$_POST['requiere_cotizacion'] : 0;
 $prioridad = null_if_empty($_POST['prioridad'] ?? 'normal');
 $garantiaAbiertaId = int_or_null($_POST['garantia_abierta_id'] ?? null);
+
+/* =========================================================
+   PARCHE: RECUPERAR PROVEEDOR DESDE PRODUCTOS SI NO LLEGÓ
+========================================================= */
+if (
+    $proveedor === null &&
+    $idProducto !== null &&
+    $idProducto > 0 &&
+    table_exists($conn, 'productos') &&
+    column_exists($conn, 'productos', 'proveedor')
+) {
+    $sqlProveedor = "SELECT proveedor
+                     FROM productos
+                     WHERE id = ?
+                     LIMIT 1";
+    $stProveedor = $conn->prepare($sqlProveedor);
+    if ($stProveedor) {
+        $stProveedor->bind_param("i", $idProducto);
+        $stProveedor->execute();
+        $rowProveedor = $stProveedor->get_result()->fetch_assoc();
+        $stProveedor->close();
+
+        if ($rowProveedor && array_key_exists('proveedor', $rowProveedor)) {
+            $proveedor = null_if_empty($rowProveedor['proveedor']);
+        }
+    }
+}
 
 /* =========================================================
    VALIDACIONES
@@ -373,6 +533,10 @@ if ($origen !== 'manual' && $clienteNombre === '') {
 
 if ($garantiaAbiertaId) {
     $errores[] = 'El IMEI ya cuenta con una garantía abierta.';
+}
+
+if ($clienteCorreo !== null && !filter_var($clienteCorreo, FILTER_VALIDATE_EMAIL)) {
+    $errores[] = 'El correo del cliente no tiene un formato válido.';
 }
 
 if (!empty($errores)) {
@@ -427,12 +591,20 @@ $dictamen = dictaminar_backend([
     'check_app_financiera' => $checkAppFinanciera,
 ]);
 
+$diasCompra = $dictamen['dias_compra'];
 $dictamenPreliminar = $dictamen['dictamen_preliminar'];
 $motivoNoProcede = $dictamen['motivo_no_procede'];
 $detalleNoProcede = $dictamen['detalle_no_procede'];
 $estadoInicial = $dictamen['estado'];
 $esReparable = (int)$dictamen['es_reparable'];
+$tipoAtencion = (string)$dictamen['tipo_atencion'];
+$cobertura = (string)$dictamen['cobertura'];
+
 $requiereCotizacion = $requiereCotizacionPost === 1 ? 1 : (int)$dictamen['requiere_cotizacion'];
+
+if ($tipoAtencionPost && $dictamenPreliminar === 'procede') {
+    $tipoAtencion = 'garantia';
+}
 
 /* =========================================================
    TIPO ORIGEN
@@ -445,75 +617,87 @@ if ($origen === 'venta') {
 }
 
 /* =========================================================
-   INSERT
+   VALIDAR EXISTENCIA DE COLUMNAS OPCIONALES
+========================================================= */
+$garantiasTieneIdCliente = column_exists($conn, 'garantias_casos', 'id_cliente');
+$garantiasTieneEsCombo = column_exists($conn, 'garantias_casos', 'es_combo');
+$garantiasTieneTipoEquipoVenta = column_exists($conn, 'garantias_casos', 'tipo_equipo_venta');
+$garantiasTieneProveedor = column_exists($conn, 'garantias_casos', 'proveedor');
+$clientesDisponible = table_exists($conn, 'clientes');
+
+/* =========================================================
+   INSERT / TRANSACCION
 ========================================================= */
 $conn->begin_transaction();
 
 try {
+    /* -----------------------------------------
+       1) Actualizar catálogo de clientes
+    ----------------------------------------- */
+    if ($clientesDisponible && $idCliente && $idCliente > 0) {
+        $sqlCliente = "SELECT id, id_sucursal
+                       FROM clientes
+                       WHERE id = ?
+                       LIMIT 1";
+        $stCliente = $conn->prepare($sqlCliente);
+        if (!$stCliente) {
+            throw new Exception("Error en prepare() al consultar cliente: " . $conn->error);
+        }
+
+        $stCliente->bind_param("i", $idCliente);
+        $stCliente->execute();
+        $clienteDB = $stCliente->get_result()->fetch_assoc();
+        $stCliente->close();
+
+        if ($clienteDB) {
+            $sqlUpdCliente = "UPDATE clientes
+                              SET nombre = ?,
+                                  telefono = ?,
+                                  correo = ?,
+                                  ultima_compra = NOW(),
+                                  id_sucursal = CASE
+                                      WHEN id_sucursal IS NULL OR id_sucursal = 0 THEN ?
+                                      ELSE id_sucursal
+                                  END
+                              WHERE id = ?
+                              LIMIT 1";
+            $stUpdCliente = $conn->prepare($sqlUpdCliente);
+            if (!$stUpdCliente) {
+                throw new Exception("Error en prepare() al actualizar cliente: " . $conn->error);
+            }
+
+            $stUpdCliente->bind_param(
+                "sssii",
+                $clienteNombre,
+                $clienteTelefono,
+                $clienteCorreo,
+                $idSucursalSesion,
+                $idCliente
+            );
+
+            if (!$stUpdCliente->execute()) {
+                throw new Exception("Error al actualizar datos del cliente: " . $stUpdCliente->error);
+            }
+            $stUpdCliente->close();
+        }
+    }
+
+    /* -----------------------------------------
+       2) Insertar garantía
+    ----------------------------------------- */
     $folio = generar_folio_garantia($conn);
 
-    $sql = "INSERT INTO garantias_casos (
-                folio,
-                tipo_origen,
-                id_venta,
-                id_detalle_venta,
-                id_garantia_padre,
-                id_garantia_raiz,
-                nivel_reincidencia,
-                id_sucursal,
-                id_usuario_captura,
-                cliente_nombre,
-                cliente_telefono,
-                cliente_correo,
-                id_producto_original,
-                marca,
-                modelo,
-                color,
-                capacidad,
-                imei_original,
-                imei2_original,
-                fecha_compra,
-                tag_venta,
-                modalidad_venta,
-                financiera,
-                descripcion_falla,
-                observaciones_tienda,
-                check_encendido,
-                check_dano_fisico,
-                check_humedad,
-                check_pantalla,
-                check_camara,
-                check_bocina_microfono,
-                check_puerto_carga,
-                check_app_financiera,
-                check_bloqueo_patron_google,
-                dictamen_preliminar,
-                motivo_no_procede,
-                detalle_no_procede,
-                estado,
-                es_reparable,
-                requiere_cotizacion,
-                fecha_recepcion,
-                fecha_dictamen,
-                created_at,
-                updated_at
-            ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?,
-                ?, ?,
-                ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?,
-                ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?,
-                ?, ?,
-                ?, NOW(), NOW(), NOW()
-            )";
-
-    $st = $conn->prepare($sql);
-    if (!$st) {
-        throw new Exception("Error en prepare() de garantias_casos: " . $conn->error);
-    }
+    $columnas = [
+        'folio',
+        'tipo_origen',
+        'id_venta',
+        'id_detalle_venta',
+        'id_garantia_padre',
+        'id_garantia_raiz',
+        'nivel_reincidencia',
+        'id_sucursal',
+        'id_usuario_captura'
+    ];
 
     $params = [
         $folio,
@@ -524,28 +708,93 @@ try {
         $idGarantiaRaiz,
         $nivelReincidencia,
         $idSucursalSesion,
-        $idUsuarioSesion,
+        $idUsuarioSesion
+    ];
 
+    if ($garantiasTieneIdCliente) {
+        $columnas[] = 'id_cliente';
+        $params[] = $idCliente;
+    }
+
+    $columnas = array_merge($columnas, [
+        'cliente_nombre',
+        'cliente_telefono',
+        'cliente_correo',
+        'id_producto_original'
+    ]);
+
+    $params = array_merge($params, [
         $clienteNombre,
         $clienteTelefono,
         $clienteCorreo,
+        $idProducto
+    ]);
 
-        $idProducto,
+    if ($garantiasTieneEsCombo) {
+        $columnas[] = 'es_combo';
+        $params[] = $esCombo;
+    }
+
+    if ($garantiasTieneTipoEquipoVenta) {
+        $columnas[] = 'tipo_equipo_venta';
+        $params[] = $tipoEquipoVenta;
+    }
+
+    $columnas = array_merge($columnas, [
+        'marca',
+        'modelo',
+        'color',
+        'capacidad'
+    ]);
+
+    $params = array_merge($params, [
         $marca,
         $modelo,
         $color,
-        $capacidad,
+        $capacidad
+    ]);
+
+    if ($garantiasTieneProveedor) {
+        $columnas[] = 'proveedor';
+        $params[] = $proveedor;
+    }
+
+    $columnas = array_merge($columnas, [
+        'imei_original',
+        'imei2_original',
+        'fecha_compra',
+        'tag_venta',
+        'modalidad_venta',
+        'financiera',
+        'descripcion_falla',
+        'observaciones_tienda',
+        'check_encendido',
+        'check_dano_fisico',
+        'check_humedad',
+        'check_pantalla',
+        'check_camara',
+        'check_bocina_microfono',
+        'check_puerto_carga',
+        'check_app_financiera',
+        'check_bloqueo_patron_google',
+        'dictamen_preliminar',
+        'motivo_no_procede',
+        'detalle_no_procede',
+        'estado',
+        'es_reparable',
+        'requiere_cotizacion',
+        'fecha_recepcion'
+    ]);
+
+    $params = array_merge($params, [
         $imeiOriginal,
         $imei2Original,
-
         $fechaCompra,
         $tagVenta,
         $modalidadVenta,
         $financiera,
-
         $descripcionFalla,
         $observacionesTienda,
-
         $checkEncendido,
         $checkDanoFisico,
         $checkHumedad,
@@ -555,17 +804,33 @@ try {
         $checkPuertoCarga,
         $checkAppFinanciera,
         $checkBloqueoPatronGoogle,
-
         $dictamenPreliminar,
         $motivoNoProcede,
         $detalleNoProcede,
         $estadoInicial,
-
         $esReparable,
         $requiereCotizacion,
-
         $fechaRecepcion
-    ];
+    ]);
+
+    $placeholders = array_fill(0, count($columnas), '?');
+    $columnasSql = implode(",\n                    ", $columnas);
+    $placeholdersSql = implode(", ", $placeholders);
+
+    $sql = "INSERT INTO garantias_casos (
+                    {$columnasSql},
+                    fecha_dictamen,
+                    created_at,
+                    updated_at
+                ) VALUES (
+                    {$placeholdersSql},
+                    NOW(), NOW(), NOW()
+                )";
+
+    $st = $conn->prepare($sql);
+    if (!$st) {
+        throw new Exception("Error en prepare() de garantias_casos: " . $conn->error);
+    }
 
     $types = '';
     foreach ($params as $p) {
@@ -581,6 +846,9 @@ try {
     $idGarantia = (int)$st->insert_id;
     $st->close();
 
+    /* -----------------------------------------
+       3) Ajustar raíz si aplica
+    ----------------------------------------- */
     if (!$idGarantiaRaiz) {
         $sqlRaiz = "UPDATE garantias_casos
                     SET id_garantia_raiz = ?
@@ -599,6 +867,9 @@ try {
         $idGarantiaRaiz = $idGarantia;
     }
 
+    /* -----------------------------------------
+       4) Eventos
+    ----------------------------------------- */
     registrar_evento(
         $conn,
         $idGarantia,
@@ -613,7 +884,13 @@ try {
             'prioridad' => $prioridad,
             'imei_original' => $imeiOriginal,
             'imei2_original' => $imei2Original,
-            'dictamen_preliminar' => $dictamenPreliminar
+            'dictamen_preliminar' => $dictamenPreliminar,
+            'dias_compra' => $diasCompra,
+            'cobertura' => $cobertura,
+            'id_cliente' => $idCliente,
+            'es_combo' => $esCombo,
+            'tipo_equipo_venta' => $tipoEquipoVenta,
+            'proveedor' => $proveedor
         ],
         $idUsuarioSesion,
         $nombreUsuarioSesion,
@@ -630,7 +907,12 @@ try {
         [
             'fecha_recepcion' => $fechaRecepcion,
             'cliente_nombre' => $clienteNombre,
-            'descripcion_falla' => $descripcionFalla
+            'cliente_telefono' => $clienteTelefono,
+            'cliente_correo' => $clienteCorreo,
+            'descripcion_falla' => $descripcionFalla,
+            'es_combo' => $esCombo,
+            'tipo_equipo_venta' => $tipoEquipoVenta,
+            'proveedor' => $proveedor
         ],
         $idUsuarioSesion,
         $nombreUsuarioSesion,
@@ -649,7 +931,13 @@ try {
             'motivo_no_procede' => $motivoNoProcede,
             'detalle_no_procede' => $detalleNoProcede,
             'es_reparable' => $esReparable,
-            'requiere_cotizacion' => $requiereCotizacion
+            'requiere_cotizacion' => $requiereCotizacion,
+            'tipo_atencion' => $tipoAtencion,
+            'dias_compra' => $diasCompra,
+            'cobertura' => $cobertura,
+            'es_combo' => $esCombo,
+            'tipo_equipo_venta' => $tipoEquipoVenta,
+            'proveedor' => $proveedor
         ],
         $idUsuarioSesion,
         $nombreUsuarioSesion,

@@ -7,7 +7,6 @@ if (!isset($_SESSION['id_usuario'])) {
 }
 
 require_once __DIR__ . '/db.php';
-require_once __DIR__ . '/navbar.php';
 
 date_default_timezone_set('America/Mexico_City');
 mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
@@ -63,6 +62,31 @@ function fmt_datetime(?string $dt): string {
     if (!$dt || $dt === '0000-00-00' || $dt === '0000-00-00 00:00:00') return '-';
     $ts = strtotime($dt);
     return $ts ? date('d/m/Y H:i', $ts) : '-';
+}
+
+function to_datetime_local(?string $dt): string {
+    if (!$dt || $dt === '0000-00-00' || $dt === '0000-00-00 00:00:00') {
+        return date('Y-m-d\TH:i');
+    }
+    $ts = strtotime($dt);
+    return $ts ? date('Y-m-d\TH:i', $ts) : date('Y-m-d\TH:i');
+}
+
+function to_mysql_datetime(?string $dt): ?string {
+    $dt = trim((string)$dt);
+    if ($dt === '') return null;
+
+    $dt = str_replace('T', ' ', $dt);
+
+    // Si viene sin segundos, se agregan
+    if (preg_match('/^\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}$/', $dt)) {
+        $dt .= ':00';
+    }
+
+    $ts = strtotime($dt);
+    if ($ts === false) return null;
+
+    return date('Y-m-d H:i:s', $ts);
 }
 
 function badge_estado(string $estado): string {
@@ -223,6 +247,29 @@ if (!$reparacion) {
 }
 
 /* =========================================================
+   VALORES INICIALES FORM
+========================================================= */
+$valorDecision = '';
+if ((string)$caso['estado'] === 'cotizacion_aceptada') {
+    $valorDecision = 'acepta';
+} elseif ((string)$caso['estado'] === 'cotizacion_rechazada') {
+    $valorDecision = 'rechaza';
+} elseif (isset($reparacion['cliente_acepta']) && $reparacion['cliente_acepta'] !== null) {
+    $valorDecision = ((int)$reparacion['cliente_acepta'] === 1) ? 'acepta' : 'rechaza';
+}
+
+if (!empty($reparacion['fecha_respuesta_cliente']) && $reparacion['fecha_respuesta_cliente'] !== '0000-00-00 00:00:00') {
+    $valorFechaRespuesta = to_datetime_local($reparacion['fecha_respuesta_cliente']);
+} elseif (!empty($caso['fecha_autorizacion_cliente']) && $caso['fecha_autorizacion_cliente'] !== '0000-00-00 00:00:00') {
+    $valorFechaRespuesta = to_datetime_local($caso['fecha_autorizacion_cliente']);
+} else {
+    $valorFechaRespuesta = date('Y-m-d\TH:i');
+}
+
+$valorNombreAutoriza = $caso['cliente_nombre'] ?? '';
+$valorComentarios = $reparacion['observaciones_cliente'] ?? '';
+
+/* =========================================================
    GUARDAR RESPUESTA
 ========================================================= */
 $error = null;
@@ -230,16 +277,22 @@ $ok = isset($_GET['ok']) ? (int)$_GET['ok'] : 0;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['guardar_respuesta'])) {
     $decision = (string)($_POST['decision_cliente'] ?? '');
-    $fechaRespuesta = null_if_empty($_POST['fecha_respuesta'] ?? date('Y-m-d\TH:i'));
+    $fechaRespuestaInput = null_if_empty($_POST['fecha_respuesta'] ?? date('Y-m-d\TH:i'));
+    $fechaRespuesta = to_mysql_datetime($fechaRespuestaInput);
     $nombreAutoriza = null_if_empty($_POST['nombre_autoriza'] ?? null);
     $comentarios = null_if_empty($_POST['comentarios_cliente'] ?? null);
+
+    $valorDecision = $decision;
+    $valorFechaRespuesta = $fechaRespuestaInput ?: date('Y-m-d\TH:i');
+    $valorNombreAutoriza = (string)$nombreAutoriza;
+    $valorComentarios = (string)$comentarios;
 
     if (!in_array($decision, ['acepta', 'rechaza'], true)) {
         $error = 'Debes seleccionar si el cliente acepta o rechaza la cotización.';
     }
 
     if (!$fechaRespuesta) {
-        $error = 'Debes capturar la fecha y hora de respuesta.';
+        $error = 'Debes capturar una fecha y hora válidas.';
     }
 
     if (!$error) {
@@ -250,45 +303,79 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['guardar_respuesta']))
             $estadoNuevo = $decision === 'acepta' ? 'cotizacion_aceptada' : 'cotizacion_rechazada';
             $estadoRep = $decision === 'acepta' ? 'aceptada_por_cliente' : 'rechazada_por_cliente';
 
-            // actualizar caso
+            $comentarioFinal = $comentarios;
+            if ($nombreAutoriza) {
+                $comentarioFinal = "Autoriza: {$nombreAutoriza}" . ($comentarios ? "\n\n" . $comentarios : '');
+            }
+
+            /* -------------------------
+               actualizar caso
+            ------------------------- */
             $sqlUpCaso = "UPDATE garantias_casos
                           SET estado = ?,
                               cliente_acepta_cotizacion = ?,
                               fecha_autorizacion_cliente = ?,
+                              observaciones_logistica = ?,
                               updated_at = NOW()
                           WHERE id = ?";
             $st = $conn->prepare($sqlUpCaso);
             if (!$st) {
                 throw new Exception("Error en update del caso: " . $conn->error);
             }
+
             $acepta = $decision === 'acepta' ? 1 : 0;
-            $st->bind_param("sisi", $estadoNuevo, $acepta, $fechaRespuesta, $idGarantia);
+            $st->bind_param("sissi", $estadoNuevo, $acepta, $fechaRespuesta, $comentarioFinal, $idGarantia);
+
             if (!$st->execute()) {
                 throw new Exception("Error al actualizar el caso: " . $st->error);
             }
             $st->close();
 
-            // actualizar reparación
-            $sqlUpRep = "UPDATE garantias_reparaciones
-                         SET cliente_acepta = ?,
-                             fecha_respuesta_cliente = ?,
-                             estado = ?,
-                             observaciones_cliente = ?,
-                             updated_at = NOW()
-                         WHERE id = ?";
-            $st = $conn->prepare($sqlUpRep);
-            if (!$st) {
-                throw new Exception("Error en update de reparación: " . $conn->error);
-            }
+            /* -------------------------
+               actualizar reparación
+            ------------------------- */
             $aceptaRep = $decision === 'acepta' ? 1 : 0;
             $idRep = (int)$reparacion['id'];
-            $st->bind_param("isssi", $aceptaRep, $fechaRespuesta, $estadoRep, $comentarios, $idRep);
+
+            if ($decision === 'rechaza') {
+                $sqlUpRep = "UPDATE garantias_reparaciones
+                             SET cliente_acepta = ?,
+                                 fecha_respuesta_cliente = ?,
+                                 fecha_devolucion = ?,
+                                 estado = ?,
+                                 observaciones_cliente = ?,
+                                 updated_at = NOW()
+                             WHERE id = ?";
+                $st = $conn->prepare($sqlUpRep);
+                if (!$st) {
+                    throw new Exception("Error en update de reparación: " . $conn->error);
+                }
+
+                $st->bind_param("issssi", $aceptaRep, $fechaRespuesta, $fechaRespuesta, $estadoRep, $comentarioFinal, $idRep);
+            } else {
+                $sqlUpRep = "UPDATE garantias_reparaciones
+                             SET cliente_acepta = ?,
+                                 fecha_respuesta_cliente = ?,
+                                 estado = ?,
+                                 observaciones_cliente = ?,
+                                 updated_at = NOW()
+                             WHERE id = ?";
+                $st = $conn->prepare($sqlUpRep);
+                if (!$st) {
+                    throw new Exception("Error en update de reparación: " . $conn->error);
+                }
+
+                $st->bind_param("isssi", $aceptaRep, $fechaRespuesta, $estadoRep, $comentarioFinal, $idRep);
+            }
+
             if (!$st->execute()) {
                 throw new Exception("Error al actualizar la reparación: " . $st->error);
             }
             $st->close();
 
-            // evento
+            /* -------------------------
+               evento
+            ------------------------- */
             $tipoEvento = $decision === 'acepta' ? 'cotizacion_aceptada' : 'cotizacion_rechazada';
             $descripcion = $decision === 'acepta'
                 ? 'Se registró que el cliente aceptó la cotización de reparación.'
@@ -306,6 +393,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['guardar_respuesta']))
                     'fecha_respuesta' => $fechaRespuesta,
                     'nombre_autoriza' => $nombreAutoriza,
                     'comentarios_cliente' => $comentarios,
+                    'comentario_final' => $comentarioFinal,
                     'costo_total' => $reparacion['costo_total'] ?? null
                 ],
                 $ID_USUARIO,
@@ -323,6 +411,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['guardar_respuesta']))
         }
     }
 }
+
+/* =========================================================
+   NAVBAR YA DESPUÉS DEL POST
+========================================================= */
+require_once __DIR__ . '/navbar.php';
 ?>
 <!doctype html>
 <html lang="es">
@@ -498,6 +591,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['guardar_respuesta']))
                         <div class="kv-label">Diagnóstico del proveedor</div>
                         <div class="kv-value"><?= nl2br(h($reparacion['diagnostico_proveedor'])) ?></div>
                     </div>
+
+                    <div class="col-12">
+                        <div class="kv-label">Observaciones previas del cliente</div>
+                        <div class="kv-value"><?= !empty($reparacion['observaciones_cliente']) ? nl2br(h($reparacion['observaciones_cliente'])) : '-' ?></div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -517,8 +615,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['guardar_respuesta']))
                         <label class="form-label fw-semibold">Respuesta del cliente</label>
                         <select name="decision_cliente" class="form-select" required>
                             <option value="">Selecciona una opción</option>
-                            <option value="acepta" <?= (string)$caso['estado'] === 'cotizacion_aceptada' ? 'selected' : '' ?>>Acepta la reparación</option>
-                            <option value="rechaza" <?= (string)$caso['estado'] === 'cotizacion_rechazada' ? 'selected' : '' ?>>Rechaza la reparación</option>
+                            <option value="acepta" <?= $valorDecision === 'acepta' ? 'selected' : '' ?>>Acepta la reparación</option>
+                            <option value="rechaza" <?= $valorDecision === 'rechaza' ? 'selected' : '' ?>>Rechaza la reparación</option>
                         </select>
                     </div>
 
@@ -528,7 +626,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['guardar_respuesta']))
                             type="datetime-local"
                             name="fecha_respuesta"
                             class="form-control"
-                            value="<?= date('Y-m-d\TH:i') ?>"
+                            value="<?= h($valorFechaRespuesta) ?>"
                             required
                         >
                     </div>
@@ -539,7 +637,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['guardar_respuesta']))
                             type="text"
                             name="nombre_autoriza"
                             class="form-control"
-                            value="<?= h($caso['cliente_nombre']) ?>"
+                            value="<?= h($valorNombreAutoriza) ?>"
                             placeholder="Cliente o persona autorizada"
                         >
                     </div>
@@ -551,7 +649,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['guardar_respuesta']))
                             class="form-control"
                             rows="4"
                             placeholder="Ejemplo: cliente informado por llamada, acepta el costo, solicita tiempo estimado, etc."
-                        ></textarea>
+                        ><?= h($valorComentarios) ?></textarea>
                     </div>
 
                     <div class="d-grid gap-2">

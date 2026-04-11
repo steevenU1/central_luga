@@ -74,8 +74,7 @@ function bindParamsDynamic(mysqli_stmt $stmt, string $types, array &$params): vo
     foreach ($params as $k => $v) {
         $refs[] = &$params[$k];
     }
-    array_unshift($refs, $stmt);
-    call_user_func_array('mysqli_stmt_bind_param', $refs);
+    call_user_func_array([$stmt, 'bind_param'], $refs);
 }
 
 function registrar_evento(
@@ -210,6 +209,7 @@ $proveedorNombre = null_if_empty($_POST['proveedor_nombre'] ?? null);
 $diagnosticoProveedor = null_if_empty($_POST['diagnostico_proveedor'] ?? null);
 $costoRevision = dec_or_zero($_POST['costo_revision'] ?? 0);
 $costoReparacion = dec_or_zero($_POST['costo_reparacion'] ?? 0);
+$costoTotal = $costoRevision + $costoReparacion;
 $tiempoEstimadoDias = int_or_null($_POST['tiempo_estimado_dias'] ?? null);
 
 if ($idGarantia <= 0) {
@@ -300,7 +300,6 @@ switch ($accion) {
         $tipoEvento = 'envio_proveedor';
         $descripcionEvento = 'El equipo fue enviado a proveedor para diagnóstico.';
         $camposCaso['fecha_envio_proveedor'] = date('Y-m-d H:i:s');
-        $camposCaso['es_reparable'] = 1;
         $camposCaso['requiere_cotizacion'] = 1;
         $datosEvento = [
             'accion' => $accion,
@@ -322,6 +321,7 @@ switch ($accion) {
             'diagnostico_proveedor' => $diagnosticoProveedor,
             'costo_revision' => $costoRevision,
             'costo_reparacion' => $costoReparacion,
+            'costo_total' => $costoTotal,
             'tiempo_estimado_dias' => $tiempoEstimadoDias,
             'observaciones' => $observaciones
         ];
@@ -377,6 +377,7 @@ switch ($accion) {
         $tipoEvento = 'cierre';
         $descripcionEvento = 'Logística cerró el caso.';
         $camposCaso['fecha_cierre'] = date('Y-m-d H:i:s');
+        $camposCaso['observaciones_cierre'] = $observaciones;
         $datosEvento = [
             'accion' => $accion,
             'observaciones' => $observaciones
@@ -402,7 +403,7 @@ try {
     foreach ($camposCaso as $col => $val) {
         $sets[] = "{$col} = ?";
         $params[] = $val;
-        $types .= is_int($val) ? 'i' : 's';
+        $types .= is_int($val) ? 'i' : (is_float($val) ? 'd' : 's');
     }
 
     $sets[] = "updated_at = NOW()";
@@ -429,7 +430,7 @@ try {
     /* -------------------------
        Upsert reparación
     ------------------------- */
-    if (in_array($accion, ['enviar_proveedor', 'cotizacion_disponible', 'cotizacion_aceptada', 'cotizacion_rechazada', 'en_reparacion', 'marcar_reparado'], true)) {
+    if (in_array($accion, ['enviar_proveedor', 'cotizacion_disponible', 'cotizacion_aceptada', 'cotizacion_rechazada', 'en_reparacion', 'marcar_reparado', 'cerrar_caso'], true)) {
         $repData = [];
 
         if ($proveedorNombre !== null) {
@@ -457,6 +458,7 @@ try {
             $repData['reparable'] = 1;
             $repData['costo_revision'] = $costoRevision;
             $repData['costo_reparacion'] = $costoReparacion;
+            $repData['costo_total'] = $costoTotal;
             $repData['tiempo_estimado_dias'] = $tiempoEstimadoDias;
             $repData['fecha_respuesta_proveedor'] = date('Y-m-d H:i:s');
             $repData['id_usuario_logistica'] = $ID_USUARIO;
@@ -470,6 +472,9 @@ try {
             $repData['cliente_acepta'] = 1;
             $repData['fecha_respuesta_cliente'] = date('Y-m-d H:i:s');
             $repData['estado'] = 'aceptada_por_cliente';
+            if ($observaciones !== null) {
+                $repData['observaciones_cliente'] = $observaciones;
+            }
         }
 
         if ($accion === 'cotizacion_rechazada') {
@@ -477,18 +482,41 @@ try {
             $repData['cliente_acepta'] = 0;
             $repData['fecha_respuesta_cliente'] = date('Y-m-d H:i:s');
             $repData['estado'] = 'rechazada_por_cliente';
+            if ($observaciones !== null) {
+                $repData['observaciones_cliente'] = $observaciones;
+            }
         }
 
         if ($accion === 'en_reparacion') {
             $repData['id_garantia'] = $idGarantia;
+            $repData['tipo_servicio'] = 'reparacion';
             $repData['estado'] = 'en_reparacion';
             $repData['fecha_ingreso_reparacion'] = date('Y-m-d H:i:s');
+            $repData['id_usuario_logistica'] = $ID_USUARIO;
+            if ($observaciones !== null) {
+                $repData['observaciones_logistica'] = $observaciones;
+            }
         }
 
         if ($accion === 'marcar_reparado') {
             $repData['id_garantia'] = $idGarantia;
             $repData['estado'] = 'reparada';
             $repData['fecha_equipo_reparado'] = date('Y-m-d H:i:s');
+            $repData['id_usuario_logistica'] = $ID_USUARIO;
+            if ($observaciones !== null) {
+                $repData['observaciones_logistica'] = $observaciones;
+            }
+        }
+
+        if ($accion === 'cerrar_caso') {
+            if ($estadoAnterior === 'cotizacion_rechazada') {
+                $repData['id_garantia'] = $idGarantia;
+                $repData['fecha_devolucion'] = date('Y-m-d H:i:s');
+                $repData['estado'] = 'devuelta_sin_reparacion';
+                if ($observaciones !== null) {
+                    $repData['observaciones_logistica'] = $observaciones;
+                }
+            }
         }
 
         if (!empty($repData)) {

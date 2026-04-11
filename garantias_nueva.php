@@ -37,6 +37,7 @@ function h($s): string {
 }
 
 $fechaHoy = date('Y-m-d');
+$ES_PUEDE_VER_PROVEEDOR = in_array($ROL, ['Admin', 'Administrador', 'Logistica'], true);
 ?>
 <!doctype html>
 <html lang="es">
@@ -45,7 +46,6 @@ $fechaHoy = date('Y-m-d');
     <title>Nueva Garantía | Central</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
 
-    <!-- Bootstrap / Icons -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
 
@@ -162,6 +162,21 @@ $fechaHoy = date('Y-m-d');
             border-radius:16px;
             padding:14px;
             background:#fff;
+            min-height: 170px;
+        }
+
+        .check-card-title{
+            font-weight:700;
+            color:#212529;
+            margin-bottom:.2rem;
+        }
+
+        .check-card-help{
+            font-size:.82rem;
+            color:#6c757d;
+            line-height:1.35;
+            margin-bottom:.75rem;
+            min-height: 38px;
         }
 
         .check-card .form-check{
@@ -190,10 +205,6 @@ $fechaHoy = date('Y-m-d');
             color:#6b7280;
         }
 
-        .hidden{
-            display:none !important;
-        }
-
         .imei-found-chip{
             font-size:.88rem;
         }
@@ -203,12 +214,18 @@ $fechaHoy = date('Y-m-d');
             height:1rem;
             border-width:.18em;
         }
+
+        .section-helper{
+            margin-top:-.2rem;
+            margin-bottom:1rem;
+            font-size:.9rem;
+            color:#6b7280;
+        }
     </style>
 </head>
 <body>
 
 <div class="page-wrap">
-    <!-- HERO -->
     <div class="hero-card mb-4">
         <div class="p-4 p-md-5">
             <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3">
@@ -232,9 +249,7 @@ $fechaHoy = date('Y-m-d');
 
     <form id="formGarantia" method="post" action="guardar_garantia.php" novalidate>
         <div class="row g-4">
-            <!-- IZQUIERDA -->
             <div class="col-lg-8">
-                <!-- BUSQUEDA -->
                 <div class="soft-card p-4 mb-4">
                     <div class="section-title">
                         <i class="bi bi-search"></i>
@@ -270,12 +285,11 @@ $fechaHoy = date('Y-m-d');
                     <div id="busquedaStatus" class="mt-3"></div>
                 </div>
 
-                <!-- DATOS AUTOLLENADOS -->
                 <div class="soft-card p-4 mb-4">
                     <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
                         <div class="section-title mb-0">
                             <i class="bi bi-database-check"></i>
-                            <span>Datos recuperados automáticamente</span>
+                            <span>Datos del equipo</span>
                         </div>
                         <span id="chipOrigen" class="badge text-bg-secondary imei-found-chip">Sin consulta</span>
                     </div>
@@ -296,15 +310,15 @@ $fechaHoy = date('Y-m-d');
 
                         <div class="col-md-6">
                             <label class="label-mini">Cliente</label>
-                            <input type="text" class="form-control readonly-box" id="cliente_nombre_label" readonly>
+                            <input type="text" class="form-control" id="cliente_nombre" name="cliente_nombre" placeholder="Nombre del cliente">
                         </div>
                         <div class="col-md-3">
                             <label class="label-mini">Teléfono</label>
-                            <input type="text" class="form-control readonly-box" id="cliente_telefono_label" readonly>
+                            <input type="text" class="form-control" id="cliente_telefono" name="cliente_telefono" placeholder="Teléfono del cliente">
                         </div>
                         <div class="col-md-3">
                             <label class="label-mini">Correo</label>
-                            <input type="text" class="form-control readonly-box" id="cliente_correo_label" readonly>
+                            <input type="email" class="form-control" id="cliente_correo" name="cliente_correo" placeholder="correo@dominio.com">
                         </div>
 
                         <div class="col-md-3">
@@ -349,10 +363,21 @@ $fechaHoy = date('Y-m-d');
                             <label class="label-mini">Financiera</label>
                             <input type="text" class="form-control readonly-box" id="financiera_label" readonly>
                         </div>
+
+                        <div class="col-md-6">
+                            <label class="label-mini">Tipo de equipo en la venta</label>
+                            <input type="text" class="form-control readonly-box" id="tipo_equipo_venta_label" readonly>
+                        </div>
+
+                        <?php if ($ES_PUEDE_VER_PROVEEDOR): ?>
+                        <div class="col-md-6">
+                            <label class="label-mini">Proveedor</label>
+                            <input type="text" class="form-control readonly-box" id="proveedor_label" readonly>
+                        </div>
+                        <?php endif; ?>
                     </div>
                 </div>
 
-                <!-- RECEPCION Y FALLA -->
                 <div class="soft-card p-4 mb-4">
                     <div class="section-title">
                         <i class="bi bi-clipboard2-pulse"></i>
@@ -391,39 +416,87 @@ $fechaHoy = date('Y-m-d');
                     </div>
                 </div>
 
-                <!-- CHECKLIST -->
                 <div class="soft-card p-4 mb-4">
                     <div class="section-title">
                         <i class="bi bi-ui-checks-grid"></i>
                         <span>Checklist técnico inicial</span>
                     </div>
+                    <div class="section-helper">
+                        Marca el estado observado al momento de recibir el equipo. Cada punto indica específicamente qué debe validarse.
+                    </div>
 
                     <div class="check-grid">
                         <?php
                         $checks = [
-                            'check_encendido' => 'Encendido',
-                            'check_dano_fisico' => 'Daño físico',
-                            'check_humedad' => 'Humedad',
-                            'check_pantalla' => 'Pantalla',
-                            'check_camara' => 'Cámara',
-                            'check_bocina_microfono' => 'Bocina / Micrófono',
-                            'check_puerto_carga' => 'Puerto de carga',
-                            'check_app_financiera' => 'App financiera instalada',
-                            'check_bloqueo_patron_google' => 'Bloqueo por patrón / Google'
+                            'check_encendido' => [
+                                'label' => 'Encendido',
+                                'help'  => 'Validar si el equipo enciende correctamente y logra iniciar.',
+                                'yes'   => 'Sí',
+                                'no'    => 'No'
+                            ],
+                            'check_dano_fisico' => [
+                                'label' => 'Daño físico',
+                                'help'  => 'Validar si presenta golpes, quebraduras, piezas rotas o deformaciones visibles.',
+                                'yes'   => 'Presenta',
+                                'no'    => 'No presenta'
+                            ],
+                            'check_humedad' => [
+                                'label' => 'Humedad',
+                                'help'  => 'Validar si existen indicios de humedad o contacto con líquidos.',
+                                'yes'   => 'Se detecta',
+                                'no'    => 'No se detecta'
+                            ],
+                            'check_pantalla' => [
+                                'label' => 'Pantalla',
+                                'help'  => 'Validar funcionamiento del display y respuesta táctil.',
+                                'yes'   => 'Funciona',
+                                'no'    => 'No funciona'
+                            ],
+                            'check_camara' => [
+                                'label' => 'Cámara',
+                                'help'  => 'Validar si la cámara abre y captura imagen correctamente.',
+                                'yes'   => 'Funciona',
+                                'no'    => 'No funciona'
+                            ],
+                            'check_bocina_microfono' => [
+                                'label' => 'Bocina / Micrófono',
+                                'help'  => 'Validar audio de salida y correcta captación de voz.',
+                                'yes'   => 'Funciona',
+                                'no'    => 'No funciona'
+                            ],
+                            'check_puerto_carga' => [
+                                'label' => 'Puerto de carga',
+                                'help'  => 'Validar si el equipo carga correctamente al conectar el cable.',
+                                'yes'   => 'Funciona',
+                                'no'    => 'No funciona'
+                            ],
+                            'check_app_financiera' => [
+                                'label' => 'App financiera instalada',
+                                'help'  => 'Validar si el equipo tiene instalada alguna app financiera o de bloqueo.',
+                                'yes'   => 'Sí tiene',
+                                'no'    => 'No tiene'
+                            ],
+                            'check_bloqueo_patron_google' => [
+                                'label' => 'Bloqueo por patrón / Google',
+                                'help'  => 'Validar si el equipo tiene patrón, PIN o cuenta Google activa.',
+                                'yes'   => 'Sí tiene',
+                                'no'    => 'No tiene'
+                            ]
                         ];
-                        foreach ($checks as $name => $label):
+                        foreach ($checks as $name => $cfg):
                         ?>
                             <div class="check-card">
-                                <div class="fw-semibold mb-2"><?= h($label) ?></div>
+                                <div class="check-card-title"><?= h($cfg['label']) ?></div>
+                                <div class="check-card-help"><?= h($cfg['help']) ?></div>
 
                                 <div class="form-check">
                                     <input class="form-check-input checklist-radio" type="radio" name="<?= h($name) ?>" id="<?= h($name) ?>_si" value="1">
-                                    <label class="form-check-label" for="<?= h($name) ?>_si">Sí</label>
+                                    <label class="form-check-label" for="<?= h($name) ?>_si"><?= h($cfg['yes']) ?></label>
                                 </div>
 
                                 <div class="form-check">
                                     <input class="form-check-input checklist-radio" type="radio" name="<?= h($name) ?>" id="<?= h($name) ?>_no" value="0">
-                                    <label class="form-check-label" for="<?= h($name) ?>_no">No</label>
+                                    <label class="form-check-label" for="<?= h($name) ?>_no"><?= h($cfg['no']) ?></label>
                                 </div>
 
                                 <div class="form-check">
@@ -441,7 +514,6 @@ $fechaHoy = date('Y-m-d');
                     </div>
                 </div>
 
-                <!-- REPARACION OPCIONAL -->
                 <div class="soft-card p-4 mb-4">
                     <div class="section-title">
                         <i class="bi bi-tools"></i>
@@ -470,7 +542,6 @@ $fechaHoy = date('Y-m-d');
                 </div>
             </div>
 
-            <!-- DERECHA -->
             <div class="col-lg-4">
                 <div class="sticky-summary">
                     <div class="soft-card p-4 mb-4">
@@ -523,26 +594,18 @@ $fechaHoy = date('Y-m-d');
                                 <i class="bi bi-eraser me-1"></i>Limpiar formulario
                             </button>
                         </div>
-
-                        <div class="mt-3 muted-note">
-                            El guardado enviará la información a <strong>guardar_garantia.php</strong>. En el siguiente paso armamos ese archivo para registrar el caso y su bitácora.
-                        </div>
                     </div>
                 </div>
             </div>
         </div>
 
-        <!-- HIDDEN FIELDS -->
         <input type="hidden" name="origen" id="origen">
         <input type="hidden" name="id_venta" id="id_venta">
         <input type="hidden" name="id_detalle_venta" id="id_detalle_venta">
         <input type="hidden" name="id_producto" id="id_producto">
+        <input type="hidden" name="id_cliente" id="id_cliente">
         <input type="hidden" name="id_garantia_padre" id="id_garantia_padre">
         <input type="hidden" name="id_garantia_raiz" id="id_garantia_raiz">
-
-        <input type="hidden" name="cliente_nombre" id="cliente_nombre">
-        <input type="hidden" name="cliente_telefono" id="cliente_telefono">
-        <input type="hidden" name="cliente_correo" id="cliente_correo">
 
         <input type="hidden" name="marca" id="marca">
         <input type="hidden" name="modelo" id="modelo">
@@ -556,6 +619,10 @@ $fechaHoy = date('Y-m-d');
         <input type="hidden" name="modalidad_venta" id="modalidad_venta">
         <input type="hidden" name="financiera" id="financiera_hidden">
 
+        <input type="hidden" name="es_combo" id="es_combo">
+        <input type="hidden" name="tipo_equipo_venta" id="tipo_equipo_venta">
+        <input type="hidden" name="proveedor" id="proveedor">
+
         <input type="hidden" name="dictamen_preliminar" id="dictamen_preliminar">
         <input type="hidden" name="motivo_no_procede" id="motivo_no_procede">
         <input type="hidden" name="detalle_no_procede" id="detalle_no_procede">
@@ -563,7 +630,6 @@ $fechaHoy = date('Y-m-d');
     </form>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 (() => {
     const $ = (id) => document.getElementById(id);
@@ -574,6 +640,8 @@ $fechaHoy = date('Y-m-d');
     const btnRecalcular = $('btnRecalcularDictamen');
     const btnLimpiar = $('btnLimpiar');
     const statusWrap = $('busquedaStatus');
+
+    const ES_PUEDE_VER_PROVEEDOR = <?= $ES_PUEDE_VER_PROVEEDOR ? 'true' : 'false' ?>;
 
     let busquedaActual = null;
 
@@ -603,23 +671,36 @@ $fechaHoy = date('Y-m-d');
         statusWrap.innerHTML = `<div class="alert alert-${type} mb-0">${html}</div>`;
     }
 
+    function capitalizarTipoEquipo(valor) {
+        const v = String(valor || '').toLowerCase().trim();
+        if (v === 'combo') return 'Combo';
+        if (v === 'principal') return 'Principal';
+        return '';
+    }
+
     function resetAutofill() {
         [
             'origen_label','fecha_venta_label','tag_venta_label',
-            'cliente_nombre_label','cliente_telefono_label','cliente_correo_label',
             'marca_label','modelo_label','color_label','capacidad_label',
             'imei1_label','imei2_label','sucursal_label','vendedor_label',
-            'modalidad_label','financiera_label'
+            'modalidad_label','financiera_label','tipo_equipo_venta_label'
         ].forEach(id => setText(id, ''));
 
+        if (ES_PUEDE_VER_PROVEEDOR) {
+            setText('proveedor_label', '');
+        }
+
         [
-            'origen','id_venta','id_detalle_venta','id_producto','id_garantia_padre','id_garantia_raiz',
-            'cliente_nombre','cliente_telefono','cliente_correo',
+            'origen','id_venta','id_detalle_venta','id_producto','id_cliente','id_garantia_padre','id_garantia_raiz',
             'marca','modelo','color','capacidad',
             'imei_original','imei2_original',
             'fecha_compra','tag_venta','modalidad_venta','financiera_hidden',
-            'garantia_abierta_id'
+            'garantia_abierta_id','es_combo','tipo_equipo_venta','proveedor'
         ].forEach(id => setHidden(id, ''));
+
+        setText('cliente_nombre', '');
+        setText('cliente_telefono', '');
+        setText('cliente_correo', '');
 
         $('chipOrigen').className = 'badge text-bg-secondary imei-found-chip';
         $('chipOrigen').textContent = 'Sin consulta';
@@ -643,6 +724,55 @@ $fechaHoy = date('Y-m-d');
         }
     }
 
+    function formatFechaBonita(dateStr) {
+        const dt = parseFlexibleDate(dateStr);
+        if (!dt) return '';
+        const d = String(dt.getDate()).padStart(2, '0');
+        const m = String(dt.getMonth() + 1).padStart(2, '0');
+        const y = dt.getFullYear();
+        return `${d}/${m}/${y}`;
+    }
+
+    function parseFlexibleDate(dateStr) {
+        if (!dateStr) return null;
+
+        let s = String(dateStr).trim();
+        if (!s) return null;
+
+        let m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+        if (m) {
+            const y = parseInt(m[1], 10);
+            const mo = parseInt(m[2], 10) - 1;
+            const d = parseInt(m[3], 10);
+            const dt = new Date(y, mo, d);
+            return isNaN(dt.getTime()) ? null : dt;
+        }
+
+        m = s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+        if (m) {
+            const d = parseInt(m[1], 10);
+            const mo = parseInt(m[2], 10) - 1;
+            const y = parseInt(m[3], 10);
+            const dt = new Date(y, mo, d);
+            return isNaN(dt.getTime()) ? null : dt;
+        }
+
+        const dt = new Date(s);
+        return isNaN(dt.getTime()) ? null : dt;
+    }
+
+    function diffDays(dateStr) {
+        const a = parseFlexibleDate(dateStr);
+        if (!a) return null;
+
+        const hoy = new Date();
+        const b = new Date(hoy.getFullYear(), hoy.getMonth(), hoy.getDate());
+        const base = new Date(a.getFullYear(), a.getMonth(), a.getDate());
+
+        const ms = b.getTime() - base.getTime();
+        return Math.max(0, Math.floor(ms / 86400000));
+    }
+
     function cargarDesdeBusqueda(data) {
         resetAutofill();
 
@@ -661,12 +791,12 @@ $fechaHoy = date('Y-m-d');
         const garantiaOrigen = data.garantia_origen || {};
         const garantiaAbierta = data.garantia_abierta || {};
 
-        setText('fecha_venta_label', venta.fecha_venta || '');
+        setText('fecha_venta_label', formatFechaBonita(venta.fecha_venta || ''));
         setText('tag_venta_label', venta.tag || '');
 
-        setText('cliente_nombre_label', cliente.nombre || '');
-        setText('cliente_telefono_label', cliente.telefono || '');
-        setText('cliente_correo_label', cliente.correo || '');
+        setText('cliente_nombre', cliente.nombre || '');
+        setText('cliente_telefono', cliente.telefono || '');
+        setText('cliente_correo', cliente.correo || '');
 
         setText('marca_label', equipo.marca || '');
         setText('modelo_label', equipo.modelo || '');
@@ -679,17 +809,19 @@ $fechaHoy = date('Y-m-d');
         setText('vendedor_label', operacion.vendedor_nombre || '');
         setText('modalidad_label', venta.modalidad || '');
         setText('financiera_label', venta.financiera || '');
+        setText('tipo_equipo_venta_label', capitalizarTipoEquipo(venta.tipo_equipo_venta || ''));
+
+        if (ES_PUEDE_VER_PROVEEDOR) {
+            setText('proveedor_label', equipo.proveedor || '');
+        }
 
         setHidden('id_venta', venta.id_venta || '');
         setHidden('id_detalle_venta', venta.id_detalle_venta || '');
         setHidden('id_producto', venta.id_producto || '');
+        setHidden('id_cliente', venta.id_cliente || cliente.id || '');
 
         setHidden('id_garantia_padre', garantiaOrigen.id_garantia || garantiaOrigen.id_garantia_padre || '');
         setHidden('id_garantia_raiz', garantiaOrigen.id_garantia_raiz || garantiaOrigen.id_garantia || '');
-
-        setHidden('cliente_nombre', cliente.nombre || '');
-        setHidden('cliente_telefono', cliente.telefono || '');
-        setHidden('cliente_correo', cliente.correo || '');
 
         setHidden('marca', equipo.marca || '');
         setHidden('modelo', equipo.modelo || '');
@@ -702,6 +834,11 @@ $fechaHoy = date('Y-m-d');
         setHidden('tag_venta', venta.tag || '');
         setHidden('modalidad_venta', venta.modalidad || '');
         setHidden('financiera_hidden', venta.financiera || '');
+
+        setHidden('es_combo', (venta.es_combo ?? 0));
+        setHidden('tipo_equipo_venta', venta.tipo_equipo_venta || '');
+        setHidden('proveedor', equipo.proveedor || '');
+
         setHidden('garantia_abierta_id', garantiaAbierta.id || '');
 
         renderValidaciones();
@@ -791,6 +928,8 @@ $fechaHoy = date('Y-m-d');
         const imei = $('imei_original').value;
         const fechaCompra = $('fecha_compra').value;
         const garantiaAbiertaId = $('garantia_abierta_id').value;
+        const idCliente = $('id_cliente').value;
+        const tipoEquipoVenta = $('tipo_equipo_venta').value;
 
         if (imei) {
             items.push(`<div class="mb-2"><i class="bi bi-check-circle text-success me-1"></i> IMEI principal detectado: <strong>${escapeHtml(imei)}</strong></div>`);
@@ -806,10 +945,35 @@ $fechaHoy = date('Y-m-d');
             items.push(`<div class="mb-2"><i class="bi bi-question-circle text-secondary me-1"></i> Equipo no localizado. El caso quedará sujeto a revisión manual.</div>`);
         }
 
+        if (tipoEquipoVenta) {
+            items.push(`<div class="mb-2"><i class="bi bi-phone text-info me-1"></i> El equipo localizado corresponde a: <strong>${escapeHtml(capitalizarTipoEquipo(tipoEquipoVenta))}</strong>.</div>`);
+        }
+
+        if (idCliente) {
+            items.push(`<div class="mb-2"><i class="bi bi-person-check text-success me-1"></i> Cliente ligado a la venta detectado correctamente.</div>`);
+        } else {
+            items.push(`<div class="mb-2"><i class="bi bi-person-exclamation text-warning me-1"></i> La venta no trae cliente ligado o no fue identificado.</div>`);
+        }
+
         if (fechaCompra) {
             const dias = diffDays(fechaCompra);
-            const color = dias <= 30 ? 'success' : (dias <= 90 ? 'warning' : 'danger');
-            items.push(`<div class="mb-2"><i class="bi bi-calendar-event text-${color} me-1"></i> Antigüedad desde compra: <strong>${dias}</strong> día(s).</div>`);
+
+            if (dias === null) {
+                items.push(`<div class="mb-2"><i class="bi bi-calendar-x text-warning me-1"></i> No fue posible interpretar la fecha de venta para calcular antigüedad.</div>`);
+            } else {
+                let color = 'danger';
+                let leyenda = 'Fuera de cobertura';
+
+                if (dias <= 30) {
+                    color = 'success';
+                    leyenda = 'Dentro de garantía con distribuidor';
+                } else if (dias <= 90) {
+                    color = 'warning';
+                    leyenda = 'Revisión con proveedor';
+                }
+
+                items.push(`<div class="mb-2"><i class="bi bi-calendar-event text-${color} me-1"></i> Antigüedad desde compra: <strong>${dias}</strong> día(s). <span class="text-muted">(${leyenda})</span></div>`);
+            }
         }
 
         if (garantiaAbiertaId) {
@@ -819,20 +983,13 @@ $fechaHoy = date('Y-m-d');
         wrap.innerHTML = items.join('') || 'Sin validaciones todavía.';
     }
 
-    function diffDays(dateStr) {
-        if (!dateStr) return 9999;
-        const a = new Date(dateStr + 'T00:00:00');
-        const b = new Date();
-        const ms = b.getTime() - a.getTime();
-        return Math.max(0, Math.floor(ms / 86400000));
-    }
-
     function renderDictamen() {
         const box = $('dictamenBox');
         const titulo = $('dictamenTitulo');
         const texto = $('dictamenTexto');
         const motivo = $('motivo_no_procede_label');
         const obs = $('observacion_sistema_label');
+        const tipoAtencion = $('tipo_atencion');
 
         let resultado = 'revision_logistica';
         let tituloTxt = 'Revisión logística';
@@ -895,21 +1052,33 @@ $fechaHoy = date('Y-m-d');
             resultado = 'revision_logistica';
             tituloTxt = 'Revisión logística';
             textoTxt = 'La app financiera no está presente y requiere validación adicional.';
-            motivoTxt = '';
             detalleTxt = 'Se recomienda revisión por logística antes de continuar.';
             box.className = 'dictamen-box dictamen-revision';
-        } else if (diasCompra !== null && diasCompra > 90) {
+        } else if (diasCompra === null) {
+            resultado = 'revision_logistica';
+            tituloTxt = 'Revisión logística';
+            textoTxt = 'No se pudo calcular correctamente la antigüedad del equipo.';
+            detalleTxt = 'Valida la fecha de venta antes de continuar.';
+            box.className = 'dictamen-box dictamen-revision';
+        } else if (diasCompra > 90) {
             resultado = 'no_procede';
             tituloTxt = 'No procede';
-            textoTxt = 'El equipo supera el periodo de cobertura sugerido.';
+            textoTxt = 'El equipo supera el periodo máximo de cobertura.';
             motivoTxt = 'GARANTIA_VENCIDA';
-            detalleTxt = `Han transcurrido ${diasCompra} día(s) desde la fecha de compra.`;
+            detalleTxt = `Han transcurrido ${diasCompra} día(s) desde la fecha de compra. Ya excede los 90 días.`;
             box.className = 'dictamen-box dictamen-no';
-        } else if (diasCompra !== null && diasCompra <= 30 && danoFisico !== '1' && humedad !== '1') {
+        } else if (diasCompra >= 31 && diasCompra <= 90) {
+            resultado = 'revision_proveedor';
+            tituloTxt = 'Revisión con proveedor';
+            textoTxt = 'El caso ya no entra en garantía directa con distribuidor, pero aún está dentro del periodo de revisión con proveedor.';
+            motivoTxt = 'REVISION_PROVEEDOR_31_90';
+            detalleTxt = `Han transcurrido ${diasCompra} día(s) desde la venta. El equipo debe canalizarse a revisión con proveedor, no a garantía directa con tienda.`;
+            box.className = 'dictamen-box dictamen-revision';
+        } else if (diasCompra >= 0 && diasCompra <= 30) {
             resultado = 'procede';
             tituloTxt = 'Procede preliminarmente';
-            textoTxt = 'El caso cumple condiciones iniciales para garantía.';
-            detalleTxt = 'Se recomienda envío a logística para validación final y seguimiento.';
+            textoTxt = 'El caso cumple condiciones iniciales para garantía con distribuidor.';
+            detalleTxt = `Han transcurrido ${diasCompra} día(s) desde la venta. El equipo está dentro de los 30 días de garantía con distribuidor.`;
             box.className = 'dictamen-box dictamen-procede';
         } else {
             resultado = 'revision_logistica';
@@ -927,6 +1096,16 @@ $fechaHoy = date('Y-m-d');
         setHidden('dictamen_preliminar', resultado);
         setHidden('motivo_no_procede', motivoTxt);
         setHidden('detalle_no_procede', detalleTxt);
+
+        if (tipoAtencion) {
+            if (resultado === 'procede') {
+                tipoAtencion.value = 'garantia';
+            } else if (resultado === 'revision_proveedor' || resultado === 'revision_logistica') {
+                tipoAtencion.value = 'revision_tecnica';
+            } else {
+                tipoAtencion.value = 'postventa';
+            }
+        }
     }
 
     function escapeHtml(str) {
@@ -948,7 +1127,6 @@ $fechaHoy = date('Y-m-d');
         renderValidaciones();
     }
 
-    // Eventos
     btnBuscar.addEventListener('click', buscarIMEI);
 
     imeiInput.addEventListener('keydown', (e) => {
@@ -988,7 +1166,6 @@ $fechaHoy = date('Y-m-d');
         }
     });
 
-    // Inicial
     resetAutofill();
     renderDictamen();
     renderValidaciones();

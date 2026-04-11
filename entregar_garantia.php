@@ -7,7 +7,6 @@ if (!isset($_SESSION['id_usuario'])) {
 }
 
 require_once __DIR__ . '/db.php';
-require_once __DIR__ . '/navbar.php';
 
 date_default_timezone_set('America/Mexico_City');
 mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
@@ -69,6 +68,30 @@ function fmt_date(?string $dt): string {
     if (!$dt || $dt === '0000-00-00' || $dt === '0000-00-00 00:00:00') return '-';
     $ts = strtotime($dt);
     return $ts ? date('d/m/Y', $ts) : '-';
+}
+
+function to_datetime_local(?string $dt): string {
+    if (!$dt || $dt === '0000-00-00' || $dt === '0000-00-00 00:00:00') {
+        return date('Y-m-d\TH:i');
+    }
+    $ts = strtotime($dt);
+    return $ts ? date('Y-m-d\TH:i', $ts) : date('Y-m-d\TH:i');
+}
+
+function to_mysql_datetime(?string $dt): ?string {
+    $dt = trim((string)$dt);
+    if ($dt === '') return null;
+
+    $dt = str_replace('T', ' ', $dt);
+
+    if (preg_match('/^\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}$/', $dt)) {
+        $dt .= ':00';
+    }
+
+    $ts = strtotime($dt);
+    if ($ts === false) return null;
+
+    return date('Y-m-d H:i:s', $ts);
 }
 
 function badge_estado(string $estado): string {
@@ -203,7 +226,7 @@ if (!puede_operar_caso($caso, $ROL, $ID_USUARIO, $ID_SUCURSAL)) {
 /* =========================================================
    VALIDAR ESTADO
 ========================================================= */
-$estadosPermitidos = ['reemplazo_capturado', 'reparado', 'garantia_autorizada'];
+$estadosPermitidos = ['reemplazo_capturado', 'reparado', 'garantia_autorizada', 'cotizacion_rechazada'];
 if (!in_array((string)$caso['estado'], $estadosPermitidos, true)) {
     exit('Este caso no está listo para entrega. Estado actual: ' . h($caso['estado']));
 }
@@ -247,19 +270,48 @@ if (table_exists($conn, 'garantias_reparaciones')) {
 }
 
 /* =========================================================
+   DATOS DE LA ENTREGA
+========================================================= */
+$tipoEntrega = 'garantia';
+if ($reemplazo) {
+    $tipoEntrega = 'reemplazo';
+} elseif ($reparacion && (string)$caso['estado'] === 'reparado') {
+    $tipoEntrega = 'reparacion';
+} elseif ((string)$caso['estado'] === 'cotizacion_rechazada') {
+    $tipoEntrega = 'devolucion_sin_reparacion';
+}
+
+/* =========================================================
+   VALORES INICIALES FORM
+========================================================= */
+$valorFechaEntrega = !empty($caso['fecha_entrega']) && $caso['fecha_entrega'] !== '0000-00-00 00:00:00'
+    ? to_datetime_local($caso['fecha_entrega'])
+    : date('Y-m-d\TH:i');
+
+$valorNombreRecibe = $caso['cliente_nombre'] ?? '';
+$valorComentariosEntrega = $caso['observaciones_cierre'] ?? '';
+$valorCerrarAlEntregar = 1;
+
+/* =========================================================
    GUARDAR ENTREGA
 ========================================================= */
 $error = null;
 $ok = isset($_GET['ok']) ? (int)$_GET['ok'] : 0;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirmar_entrega'])) {
-    $fechaEntrega = null_if_empty($_POST['fecha_entrega'] ?? date('Y-m-d\TH:i'));
+    $fechaEntregaInput = null_if_empty($_POST['fecha_entrega'] ?? date('Y-m-d\TH:i'));
+    $fechaEntrega = to_mysql_datetime($fechaEntregaInput);
     $nombreRecibe = null_if_empty($_POST['nombre_recibe'] ?? null);
     $comentariosEntrega = null_if_empty($_POST['comentarios_entrega'] ?? null);
     $cerrarAlEntregar = isset($_POST['cerrar_al_entregar']) ? 1 : 0;
 
+    $valorFechaEntrega = $fechaEntregaInput ?: date('Y-m-d\TH:i');
+    $valorNombreRecibe = (string)$nombreRecibe;
+    $valorComentariosEntrega = (string)$comentariosEntrega;
+    $valorCerrarAlEntregar = $cerrarAlEntregar;
+
     if (!$fechaEntrega) {
-        $error = 'Debes capturar la fecha y hora de entrega.';
+        $error = 'Debes capturar una fecha y hora válidas de entrega.';
     }
 
     if (!$error) {
@@ -269,7 +321,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirmar_entrega']))
             $estadoAnterior = (string)$caso['estado'];
             $estadoNuevo = $cerrarAlEntregar ? 'cerrado' : 'entregado';
 
-            // actualizar caso
+            $comentarioFinal = $comentariosEntrega;
+            if ($nombreRecibe) {
+                $comentarioFinal = "Recibe: {$nombreRecibe}" . ($comentariosEntrega ? "\n\n" . $comentariosEntrega : '');
+            }
+
+            /* -------------------------
+               actualizar caso
+            ------------------------- */
             $sqlUpCaso = "UPDATE garantias_casos
                           SET estado = ?,
                               fecha_entrega = ?,
@@ -284,13 +343,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirmar_entrega']))
                 if (!$st) {
                     throw new Exception("Error en update de caso: " . $conn->error);
                 }
-                $st->bind_param("ssssi", $estadoNuevo, $fechaEntrega, $fechaCierre, $comentariosEntrega, $idGarantia);
+                $st->bind_param("ssssi", $estadoNuevo, $fechaEntrega, $fechaCierre, $comentarioFinal, $idGarantia);
             } else {
                 $st = $conn->prepare($sqlUpCaso);
                 if (!$st) {
                     throw new Exception("Error en update de caso: " . $conn->error);
                 }
-                $st->bind_param("sssi", $estadoNuevo, $fechaEntrega, $comentariosEntrega, $idGarantia);
+                $st->bind_param("sssi", $estadoNuevo, $fechaEntrega, $comentarioFinal, $idGarantia);
             }
 
             if (!$st->execute()) {
@@ -298,24 +357,70 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirmar_entrega']))
             }
             $st->close();
 
-            // si hay reemplazo, actualizar fecha_entrega ahí también
+            /* -------------------------
+               si hay reemplazo, actualizar fecha_entrega
+            ------------------------- */
             if ($reemplazo) {
                 $sqlUpRep = "UPDATE garantias_reemplazos
-                             SET fecha_entrega = ?
+                             SET fecha_entrega = ?,
+                                 observaciones = ?
                              WHERE id = ?";
                 $st = $conn->prepare($sqlUpRep);
                 if (!$st) {
                     throw new Exception("Error en update de reemplazo: " . $conn->error);
                 }
                 $idReemplazo = (int)$reemplazo['id'];
-                $st->bind_param("si", $fechaEntrega, $idReemplazo);
+                $st->bind_param("ssi", $fechaEntrega, $comentarioFinal, $idReemplazo);
                 if (!$st->execute()) {
                     throw new Exception("Error al actualizar fecha de entrega del reemplazo: " . $st->error);
                 }
                 $st->close();
             }
 
-            // evento de entrega
+            /* -------------------------
+               si hay reparación, actualizar datos útiles
+            ------------------------- */
+            if ($reparacion && table_exists($conn, 'garantias_reparaciones')) {
+                $idRep = (int)$reparacion['id'];
+
+                if ($tipoEntrega === 'reparacion') {
+                    $sqlUpRep2 = "UPDATE garantias_reparaciones
+                                  SET fecha_equipo_reparado = COALESCE(fecha_equipo_reparado, ?),
+                                      observaciones_cliente = ?,
+                                      updated_at = NOW()
+                                  WHERE id = ?";
+                    $st = $conn->prepare($sqlUpRep2);
+                    if (!$st) {
+                        throw new Exception("Error en update de reparación entregada: " . $conn->error);
+                    }
+                    $st->bind_param("ssi", $fechaEntrega, $comentarioFinal, $idRep);
+                    if (!$st->execute()) {
+                        throw new Exception("Error al actualizar reparación entregada: " . $st->error);
+                    }
+                    $st->close();
+                }
+
+                if ($tipoEntrega === 'devolucion_sin_reparacion') {
+                    $sqlUpRep3 = "UPDATE garantias_reparaciones
+                                  SET fecha_devolucion = COALESCE(fecha_devolucion, ?),
+                                      observaciones_cliente = ?,
+                                      updated_at = NOW()
+                                  WHERE id = ?";
+                    $st = $conn->prepare($sqlUpRep3);
+                    if (!$st) {
+                        throw new Exception("Error en update de devolución sin reparación: " . $conn->error);
+                    }
+                    $st->bind_param("ssi", $fechaEntrega, $comentarioFinal, $idRep);
+                    if (!$st->execute()) {
+                        throw new Exception("Error al actualizar devolución sin reparación: " . $st->error);
+                    }
+                    $st->close();
+                }
+            }
+
+            /* -------------------------
+               evento de entrega
+            ------------------------- */
             registrar_evento(
                 $conn,
                 $idGarantia,
@@ -327,8 +432,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirmar_entrega']))
                     'fecha_entrega' => $fechaEntrega,
                     'nombre_recibe' => $nombreRecibe,
                     'comentarios_entrega' => $comentariosEntrega,
+                    'comentario_final' => $comentarioFinal,
                     'cerrado_automaticamente' => $cerrarAlEntregar,
-                    'tipo_entrega' => $reemplazo ? 'reemplazo' : (($reparacion && ($caso['estado'] === 'reparado')) ? 'reparacion' : 'garantia')
+                    'tipo_entrega' => $tipoEntrega
                 ],
                 $ID_USUARIO,
                 $NOMBRE_USUARIO,
@@ -345,7 +451,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirmar_entrega']))
                     'El caso se cerró al momento de la entrega.',
                     [
                         'fecha_cierre' => $fechaEntrega,
-                        'comentarios_cierre' => $comentariosEntrega
+                        'comentarios_cierre' => $comentarioFinal,
+                        'tipo_entrega' => $tipoEntrega
                     ],
                     $ID_USUARIO,
                     $NOMBRE_USUARIO,
@@ -365,14 +472,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirmar_entrega']))
 }
 
 /* =========================================================
-   DATOS DE LA ENTREGA
+   NAVBAR DESPUÉS DEL POST
 ========================================================= */
-$tipoEntrega = 'garantia';
-if ($reemplazo) {
-    $tipoEntrega = 'reemplazo';
-} elseif ($reparacion && (string)$caso['estado'] === 'reparado') {
-    $tipoEntrega = 'reparacion';
-}
+require_once __DIR__ . '/navbar.php';
 ?>
 <!doctype html>
 <html lang="es">
@@ -534,7 +636,7 @@ if ($reemplazo) {
                         </div>
                         <div class="col-md-6">
                             <div class="kv-label">IMEI 2 reemplazo</div>
-                            <div class="kv-value"><?= h($reemplazo['imei2_reemplazo']) ?: '-' ?></div>
+                            <div class="kv-value"><?= !empty($reemplazo['imei2_reemplazo']) ? h($reemplazo['imei2_reemplazo']) : '-' ?></div>
                         </div>
                     </div>
                 <?php elseif ($tipoEntrega === 'reparacion'): ?>
@@ -548,6 +650,27 @@ if ($reemplazo) {
                         <div class="col-md-6">
                             <div class="kv-label">IMEI</div>
                             <div class="kv-value"><?= h($caso['imei_original']) ?></div>
+                        </div>
+                        <div class="col-12">
+                            <div class="kv-label">Diagnóstico</div>
+                            <div class="kv-value"><?= !empty($reparacion['diagnostico_proveedor']) ? nl2br(h($reparacion['diagnostico_proveedor'])) : '-' ?></div>
+                        </div>
+                    </div>
+                <?php elseif ($tipoEntrega === 'devolucion_sin_reparacion'): ?>
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <div class="kv-label">Equipo devuelto</div>
+                            <div class="kv-value">
+                                <?= h(trim(($caso['marca'] ?? '') . ' ' . ($caso['modelo'] ?? ''))) ?>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="kv-label">IMEI</div>
+                            <div class="kv-value"><?= h($caso['imei_original']) ?></div>
+                        </div>
+                        <div class="col-12">
+                            <div class="kv-label">Motivo / observación</div>
+                            <div class="kv-value"><?= !empty($reparacion['observaciones_cliente']) ? nl2br(h($reparacion['observaciones_cliente'])) : 'Devolución sin reparación.' ?></div>
                         </div>
                     </div>
                 <?php else: ?>
@@ -575,7 +698,7 @@ if ($reemplazo) {
                             type="datetime-local"
                             name="fecha_entrega"
                             class="form-control"
-                            value="<?= date('Y-m-d\TH:i') ?>"
+                            value="<?= h($valorFechaEntrega) ?>"
                             required
                         >
                     </div>
@@ -587,7 +710,7 @@ if ($reemplazo) {
                             name="nombre_recibe"
                             class="form-control"
                             placeholder="Cliente o persona autorizada"
-                            value="<?= h($caso['cliente_nombre']) ?>"
+                            value="<?= h($valorNombreRecibe) ?>"
                         >
                     </div>
 
@@ -598,7 +721,7 @@ if ($reemplazo) {
                             class="form-control"
                             rows="4"
                             placeholder="Observaciones de la entrega, conformidad del cliente, notas del equipo, etc."
-                        ></textarea>
+                        ><?= h($valorComentariosEntrega) ?></textarea>
                     </div>
 
                     <div class="form-check mb-3">
@@ -608,7 +731,7 @@ if ($reemplazo) {
                             name="cerrar_al_entregar"
                             id="cerrar_al_entregar"
                             value="1"
-                            checked
+                            <?= $valorCerrarAlEntregar ? 'checked' : '' ?>
                         >
                         <label class="form-check-label" for="cerrar_al_entregar">
                             Cerrar el caso al momento de entregar

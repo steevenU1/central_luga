@@ -202,11 +202,31 @@ $sql = "SELECT
             gc.estado,
             gc.id_sucursal,
             s.nombre AS sucursal_nombre,
-            u.nombre AS capturista_nombre
+            u.nombre AS capturista_nombre,
+            COUNT(gd.id) AS total_documentos
         FROM garantias_casos gc
         LEFT JOIN sucursales s ON s.id = gc.id_sucursal
         LEFT JOIN usuarios u ON u.id = gc.id_usuario_captura
+        LEFT JOIN garantias_documentos gd ON gd.id_garantia = gc.id
         $whereSql
+        GROUP BY
+            gc.id,
+            gc.folio,
+            gc.fecha_captura,
+            gc.cliente_nombre,
+            gc.cliente_telefono,
+            gc.marca,
+            gc.modelo,
+            gc.color,
+            gc.capacidad,
+            gc.imei_original,
+            gc.imei2_original,
+            gc.dictamen_preliminar,
+            gc.motivo_no_procede,
+            gc.estado,
+            gc.id_sucursal,
+            s.nombre,
+            u.nombre
         ORDER BY gc.id DESC
         LIMIT ? OFFSET ?";
 
@@ -318,6 +338,15 @@ $estados = [
             overflow:hidden;
             text-overflow:ellipsis;
         }
+        .actions-wrap{
+            display:flex;
+            flex-wrap:wrap;
+            gap:.35rem;
+            justify-content:center;
+        }
+        .btn-docs{
+            min-width: 96px;
+        }
     </style>
 </head>
 <body>
@@ -417,11 +446,12 @@ $estados = [
                             <th>Dictamen</th>
                             <th>Estado</th>
                             <th>Motivo</th>
-                            <th class="text-center">Acción</th>
+                            <th class="text-center">Acciones</th>
                         </tr>
                     </thead>
                     <tbody>
                         <?php while ($row = $res->fetch_assoc()): ?>
+                            <?php $totalDocs = (int)($row['total_documentos'] ?? 0); ?>
                             <tr>
                                 <td>
                                     <div class="fw-semibold"><?= h($row['folio']) ?></div>
@@ -475,9 +505,20 @@ $estados = [
                                 </td>
 
                                 <td class="text-center">
-                                    <a href="garantias_detalle.php?id=<?= (int)$row['id'] ?>" class="btn btn-sm btn-outline-primary">
-                                        <i class="bi bi-eye me-1"></i>Ver
-                                    </a>
+                                    <div class="actions-wrap">
+                                        <a href="garantias_detalle.php?id=<?= (int)$row['id'] ?>" class="btn btn-sm btn-outline-primary">
+                                            <i class="bi bi-eye me-1"></i>Ver
+                                        </a>
+
+                                        <a href="generar_documento_garantia.php?id=<?= (int)$row['id'] ?>" class="btn btn-sm btn-outline-success" target="_blank">
+                                            <i class="bi bi-file-earmark-text me-1"></i>Formato
+                                        </a>
+
+                                        <a href="garantias_detalle.php?id=<?= (int)$row['id'] ?>#documentos" class="btn btn-sm btn-outline-secondary btn-docs">
+                                            <i class="bi bi-folder2-open me-1"></i>Docs
+                                            <span class="badge text-bg-light ms-1"><?= $totalDocs ?></span>
+                                        </a>
+                                    </div>
                                 </td>
                             </tr>
                         <?php endwhile; ?>

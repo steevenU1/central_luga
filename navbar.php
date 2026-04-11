@@ -5,9 +5,25 @@ if (session_status() === PHP_SESSION_NONE) {
   session_start();
 }
 include 'db.php';
+require_once __DIR__ . '/calcular_vacaciones.php';
 date_default_timezone_set('America/Mexico_City');
 
 $rolUsuario    = $_SESSION['rol'] ?? 'Ejecutivo';
+
+/* ===== Switch temporal garantías ===== */
+$habilitarPanelGarantias   = false; // cambiar a true para habilitar Panel Garantías
+$habilitarTramitarGarantia = false; // cambiar a true para habilitar Tramitar Garantía
+$rolesVentasGarantia       = ['Ejecutivo', 'Gerente', 'Admin'];
+
+$rolNorm = strtolower(trim((string)$rolUsuario));
+$rolNorm = str_replace([' ', '-'], '_', $rolNorm);
+$rolNorm = preg_replace('/_+/', '_', $rolNorm);
+
+$isSubdisAdmin = ($rolNorm === 'subdis_admin');
+$isSubdisGer   = ($rolNorm === 'subdis_gerente');
+$isSubdisEje   = ($rolNorm === 'subdis_ejecutivo');
+$isSubdis      = ($isSubdisAdmin || $isSubdisGer || $isSubdisEje);
+
 $nombreUsuario = trim($_SESSION['nombre'] ?? 'Usuario');
 $idUsuario     = (int)($_SESSION['id_usuario'] ?? 0);
 $idSucursal    = (int)($_SESSION['id_sucursal'] ?? 0);
@@ -177,6 +193,47 @@ if (($rolUsuario === 'GerenteZona')) {
 $esAdmin = in_array($rolUsuario, ['Admin', 'Super'], true);
 $primerNombre = first_name($nombreUsuario);
 
+
+/* ===== Vacaciones en menú de perfil ===== */
+$vacacionesMenuHabilitado = false;
+$vacacionesMenuTexto      = 'Sin días disponibles';
+$vacacionesMenuDias       = 0;
+$vacacionesMenuHref       = 'solicitar_vacaciones.php';
+
+if ($idUsuario > 0 && function_exists('obtener_resumen_vacaciones_usuario')) {
+  try {
+    $resVac = obtener_resumen_vacaciones_usuario($conn, $idUsuario);
+
+    $okVac           = !empty($resVac['ok']);
+    $diasDisponibles = (int)($resVac['dias_disponibles'] ?? 0);
+    $diasOtorgados   = (int)($resVac['dias_otorgados'] ?? 0);
+    $diasTomados     = (int)($resVac['dias_tomados'] ?? 0);
+
+    $vacacionesMenuDias = $diasDisponibles;
+
+    if ($okVac && $diasDisponibles > 0) {
+      $vacacionesMenuHabilitado = true;
+      $vacacionesMenuTexto = ($diasDisponibles === 1)
+        ? '1 día disponible'
+        : ($diasDisponibles . ' días disponibles');
+    } else {
+      if (!$okVac) {
+        $vacacionesMenuTexto = 'Aún sin derecho vigente';
+      } elseif ($diasOtorgados <= 0) {
+        $vacacionesMenuTexto = 'Sin periodo vacacional vigente';
+      } elseif ($diasTomados >= $diasOtorgados) {
+        $vacacionesMenuTexto = 'Días ya consumidos';
+      } else {
+        $vacacionesMenuTexto = 'Sin días disponibles';
+      }
+    }
+  } catch (Throwable $e) {
+    $vacacionesMenuHabilitado = false;
+    $vacacionesMenuTexto = 'No disponible por ahora';
+    $vacacionesMenuDias = 0;
+  }
+}
+
 /* 👇 Permiso para ver el menú Operativos */
 $puedeVerOperativos = $esAdmin || $rolUsuario === 'Logistica' || in_array($idUsuario, [6, 8], true);
 
@@ -196,8 +253,26 @@ if ($idSucursal > 0) {
   }
 }
 /* Permisos para menús especiales */
-$puedeTraspasos = in_array($rolUsuario, ['Gerente', 'GerenteSucursal', 'Admin', 'Super'], true)
-  || ($rolUsuario === 'Ejecutivo' && $sucursalSinGerente && !$omitirReglaEjecutivo);
+// === PATCH SUBDIS TRASPASOS (AUTO) ===
+$rolRaw = $_SESSION['rol'] ?? '';
+$rolN = strtolower(trim((string)$rolRaw));
+$rolN = str_replace([' ', '-'], '_', $rolN);
+$rolN = preg_replace('/_+/', '_', $rolN);
+
+$puedeTraspasos = in_array($rolN, [
+  'admin',
+  'superadmin',
+  'rh',
+  'gerente',
+  'gerente_general',
+  'gerentezona',
+  'gerentesucursal',
+  'logistica',
+  'subdis_admin',
+  'subdis_gerente',
+  'subdis_ejecutivo'
+], true);
+// === END PATCH SUBDIS TRASPASOS ===
 
 $puedeCortesYDepositos = in_array($rolUsuario, ['Gerente', 'GerenteSucursal', 'Admin', 'Super'], true)
   || ($rolUsuario === 'Ejecutivo' && $sucursalSinGerente && !$omitirReglaEjecutivo);
@@ -216,7 +291,8 @@ $grpVentas     = [
   'historial_ventas_sims.php',
   'historial_payjoy_tc.php',    // ✅ NUEVO
   'historial_ventas_accesorios.php', // ✅ NUEVO: Historial accesorios
-  'catalogo_clientes.php'
+  'catalogo_clientes.php',
+  'garantias_mis_casos.php'
 ];
 $grpInventario = ['panel.php', 'inventario_subdistribuidor.php', 'inventario_global.php', 'inventario_resumen.php', 'inventario_eulalia.php', 'inventario_retiros_v2.php', 'inventario_historico.php', 'generar_traspaso_zona.php', 'traspasos_pendientes_zona.php', 'inventario_sims_resumen.php'];
 $grpCompras    = ['compras_nueva.php', 'compras_resumen.php', 'modelos.php', 'proveedores.php', 'compras_ingreso.php'];
@@ -233,10 +309,12 @@ $grpOperacion  = [
   'zona_asistencias.php',
   'nomina_mi_semana_v2.php',
   'panel_operador.php',
-  'recargas_portal.php', // ✅ NUEVO: para resaltar el parent
-  'cortes_zona.php'
+  'recargas_portal.php',
+  'cortes_zona.php',
+  'garantias_logistica.php',
+  'auditorias_historial.php'
 ];
-$grpRH         = ['reporte_nomina_v2.php', 'reporte_nomina_gerentes_zona.php', 'admin_expedientes.php', 'admin_asistencias.php', 'productividad_ejecutivo.php'];
+$grpRH         = ['reporte_nomina_v2.php', 'reporte_nomina_gerentes_zona.php', 'admin_expedientes.php', 'admin_asistencias.php', 'productividad_ejecutivo.php', 'vacaciones_panel.php'];
 $grpOperativos = [
   'tickets_nuevo_luga.php',   // Tickets Central
   'tickets_operador.php',     // Tickets Admin (solo ids 6 y 8)
@@ -456,6 +534,20 @@ function item_active(string $f, string $c): string
     line-height: 1.12;
   }
 
+
+  .navbar-luga .dropdown-item.disabled-item {
+    opacity: .6;
+    cursor: not-allowed;
+    pointer-events: none;
+  }
+
+  .navbar-luga .dropdown-item .item-note {
+    display: block;
+    font-size: .88em;
+    color: #aab8c7;
+    margin-top: .12rem;
+  }
+
   .navbar-luga .nav-link.active-parent {
     background: rgba(255, 255, 255, .10);
     box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .12);
@@ -634,7 +726,6 @@ function item_active(string $f, string $c): string
   }
 </style>
 
-<!-- Mantener expandido en ≥1200px para evitar hamburguesa en pantallas medianas de PC -->
 <nav id="topbar" class="navbar navbar-expand-xl navbar-dark navbar-luga sticky-top">
   <div class="container-fluid">
 
@@ -649,100 +740,437 @@ function item_active(string $f, string $c): string
 
     <div class="collapse navbar-collapse" id="navbarMain">
       <ul class="navbar-nav me-auto mb-2 mb-xl-0">
-        <?php $pActive = parent_active($grpDashboard, $current); ?>
-        <li class="nav-item dropdown">
-          <a class="nav-link dropdown-toggle<?= $pActive ? ' active-parent' : '' ?>" href="#" data-bs-toggle="dropdown">
-            <i class="bi bi-speedometer2"></i>Dashboard
-          </a>
-          <ul class="dropdown-menu">
-            <li><a class="dropdown-item <?= item_active('productividad_dia.php', $current) ?>" href="productividad_dia.php">Dashboard diario</a></li>
-            <li><a class="dropdown-item <?= item_active('dashboard_unificado.php', $current) ?>" href="dashboard_unificado.php">Dashboard semanal</a></li>
-            <li><a class="dropdown-item <?= item_active('dashboard_mensual.php', $current) ?>" href="dashboard_mensual.php">Dashboard mensual</a></li>
-          </ul>
-        </li>
+        <?php if ($isSubdis): ?>
+          <?php
+          $grpDash = ['dashboard_unificado.php', 'productividad_dia.php', 'dashboard_mensual.php'];
+          $grpVentas = [
+            'nueva_venta.php',
+            'venta_accesorios.php',
+            'venta_sim_prepago.php',
+            'venta_sim_pospago.php',
+            'payjoy_tc_nueva.php',
+            'historial_ventas.php',
+            'historial_ventas_accesorios.php',
+            'historial_ventas_sims.php',
+            'historial_payjoy_tc.php'
+          ];
+          $grpTrasp = ['traspaso_nuevo.php', 'traspasos_salientes.php', 'traspasos_pendientes.php', 'generar_traspaso_sims.php', 'traspasos_sims_salientes.php', 'traspasos_sims_pendientes.php'];
+          $pDash  = parent_active($grpDash, $current);
+          $pVent  = parent_active($grpVentas, $current);
+          $pEfec  = parent_active(['cobros.php', 'depositos.php', 'generar_corte.php', 'depositos_sucursal.php'], $current);
+          $pTras  = parent_active($grpTrasp, $current);
+          ?>
+          <li class="nav-item dropdown">
+            <a class="nav-link dropdown-toggle<?= $pDash ? ' active-parent' : '' ?>" href="#" data-bs-toggle="dropdown">
+              <i class="bi bi-speedometer2"></i>Dashboard
+            </a>
+            <ul class="dropdown-menu">
+              <li><a class="dropdown-item <?= item_active('dashboard_unificado.php', $current) ?>" href="dashboard_unificado.php">📅 Semanal</a></li>
+              <li><a class="dropdown-item <?= item_active('productividad_dia.php', $current) ?>" href="productividad_dia.php">📆 Diario</a></li>
+              <li><a class="dropdown-item <?= item_active('dashboard_mensual.php', $current) ?>" href="dashboard_mensual.php">🗓️ Mensual</a></li>
+            </ul>
+          </li>
 
-        <?php $pActive = parent_active($grpVentas, $current); ?>
-        <li class="nav-item dropdown">
-          <a class="nav-link dropdown-toggle<?= $pActive ? ' active-parent' : '' ?>" href="#" data-bs-toggle="dropdown">
-            <i class="bi bi-bag-check"></i>Ventas
-          </a>
-          <ul class="dropdown-menu">
-            <?php if ($rolUsuario === 'Logistica'): ?>
-              <li class="dropdown-header">Catálogos</li>
-              <li>
-                <a class="dropdown-item <?= item_active('catalogo_clientes.php', $current) ?>" href="catalogo_clientes.php">
-                  <i class="bi bi-people me-1"></i>Clientes
-                </a>
-              </li>
-              <li>
-                <hr class="dropdown-divider">
-              </li>
-              <!-- Solo historiales para Logística -->
-              <li class="dropdown-header">Historiales</li>
-              <li><a class="dropdown-item <?= item_active('historial_ventas.php', $current) ?>" href="historial_ventas.php">Historial de ventas</a></li>
-              <li><a class="dropdown-item <?= item_active('historial_ventas_sims.php', $current) ?>" href="historial_ventas_sims.php">Historial ventas SIM</a></li>
-              <li><a class="dropdown-item <?= item_active('historial_payjoy_tc.php', $current) ?>" href="historial_payjoy_tc.php">Historial PayJoy TC</a></li>
-              <li><a class="dropdown-item <?= item_active('historial_ventas_accesorios.php', $current) ?>" href="historial_ventas_accesorios.php">Historial accesorios</a></li>
-
-            <?php else: ?>
-              <!-- Ventas nuevas -->
-              <li class="dropdown-header">Ventas nuevas</li>
-              <li><a class="dropdown-item <?= item_active('nueva_venta.php', $current) ?>" href="nueva_venta.php">Venta equipos</a></li>
-              <li><a class="dropdown-item <?= item_active('venta_sim_prepago.php', $current) ?>" href="venta_sim_prepago.php">Venta SIM prepago</a></li>
-              <li><a class="dropdown-item <?= item_active('venta_sim_pospago.php', $current) ?>" href="venta_sim_pospago.php">Venta SIM pospago</a></li>
-              <li><a class="dropdown-item <?= item_active('payjoy_tc_nueva.php', $current) ?>" href="payjoy_tc_nueva.php">PayJoy TC – Nueva</a></li>
-              <li><a class="dropdown-item <?= item_active('venta_accesorios.php', $current) ?>" href="venta_accesorios.php">Venta accesorios</a></li>
-
-              <li class="dropdown-header">Catálogos</li>
-              <li>
-                <a class="dropdown-item <?= item_active('catalogo_clientes.php', $current) ?>" href="catalogo_clientes.php">
-                  <i class="bi bi-people me-1"></i>Clientes
-                </a>
-              </li>
-
+          <li class="nav-item dropdown">
+            <a class="nav-link dropdown-toggle<?= $pVent ? ' active-parent' : '' ?>" href="#" data-bs-toggle="dropdown">
+              <i class="bi bi-bag-check"></i>Ventas
+            </a>
+            <ul class="dropdown-menu">
+              <li class="dropdown-header">Registrar</li>
+              <li><a class="dropdown-item <?= item_active('nueva_venta.php', $current) ?>" href="nueva_venta.php">📱 Venta equipos</a></li>
+              <li><a class="dropdown-item <?= item_active('venta_accesorios.php', $current) ?>" href="venta_accesorios.php">🎧 Venta accesorios</a></li>
+              <li><a class="dropdown-item <?= item_active('venta_sim_prepago.php', $current) ?>" href="venta_sim_prepago.php">📶 SIM prepago</a></li>
+              <li><a class="dropdown-item <?= item_active('venta_sim_pospago.php', $current) ?>" href="venta_sim_pospago.php">📡 SIM pospago</a></li>
+              <li><a class="dropdown-item <?= item_active('payjoy_tc_nueva.php', $current) ?>" href="payjoy_tc_nueva.php">💳 PayJoy TC</a></li>
               <li>
                 <hr class="dropdown-divider">
               </li>
+              <li class="dropdown-header">Historial</li>
+              <li><a class="dropdown-item <?= item_active('historial_ventas.php', $current) ?>" href="historial_ventas.php">🧾 Ventas equipos</a></li>
+              <li><a class="dropdown-item <?= item_active('historial_ventas_accesorios.php', $current) ?>" href="historial_ventas_accesorios.php">🧾 Ventas accesorios</a></li>
+              <li><a class="dropdown-item <?= item_active('historial_ventas_sims.php', $current) ?>" href="historial_ventas_sims.php">🧾 Ventas SIMs</a></li>
+              <li><a class="dropdown-item <?= item_active('historial_payjoy_tc.php', $current) ?>" href="historial_payjoy_tc.php">🧾 PayJoy TC</a></li>
+            </ul>
+          </li>
 
-              <!-- Historiales -->
-              <li class="dropdown-header">Historiales</li>
-              <li><a class="dropdown-item <?= item_active('historial_ventas.php', $current) ?>" href="historial_ventas.php">Historial de ventas</a></li>
-              <li><a class="dropdown-item <?= item_active('historial_ventas_sims.php', $current) ?>" href="historial_ventas_sims.php">Historial ventas SIM</a></li>
-              <li><a class="dropdown-item <?= item_active('historial_payjoy_tc.php', $current) ?>" href="historial_payjoy_tc.php">Historial PayJoy TC</a></li>
-              <li><a class="dropdown-item <?= item_active('historial_ventas_accesorios.php', $current) ?>" href="historial_ventas_accesorios.php">Historial accesorios</a></li>
-            <?php endif; ?>
-          </ul>
-        </li>
+          <li class="nav-item">
+            <a class="nav-link <?= item_active('inventario_global.php', $current) ?>" href="inventario_global.php">
+              <i class="bi bi-box-seam"></i>Inventario
+            </a>
+          </li>
 
-        <?php $pActive = parent_active($grpInventario, $current); ?>
-        <li class="nav-item dropdown">
-          <a class="nav-link dropdown-toggle<?= $pActive ? ' active-parent' : '' ?>" href="#" data-bs-toggle="dropdown">
-            <i class="bi bi-box-seam"></i>Inventario
-          </a>
-          <ul class="dropdown-menu">
-            <?php if ($rolUsuario === 'Logistica'): ?>
-              <li><a class="dropdown-item <?= item_active('inventario_global.php', $current) ?>" href="inventario_global.php">Inventario global</a></li>
-              <li><a class="dropdown-item <?= item_active('inventario_historico.php', $current) ?>" href="inventario_historico.php">Inventario histórico</a></li>
-              <li><a class="dropdown-item <?= item_active('inventario_sims_resumen.php', $current) ?>" href="inventario_sims_resumen.php">Inventario SIMs</a></li>
-              <li><a class="dropdown-item <?= item_active('inventario_retiros_v2.php', $current) ?>" href="inventario_retiros_v2.php">Retiros de inventario</a></li>
-            <?php else: ?>
-              <?php if (in_array($rolUsuario, ['Ejecutivo', 'Gerente'])): ?>
-                <li><a class="dropdown-item <?= item_active('panel.php', $current) ?>" href="panel.php">Inventario sucursal</a></li>
-                <!-- ✅ NUEVO: habilitar Resumen Global para Gerente y Ejecutivo -->
-                <li><a class="dropdown-item <?= item_active('inventario_resumen.php', $current) ?>" href="inventario_resumen.php">Resumen Global</a></li>
+          <?php if ($isSubdisAdmin): ?>
+            <?php
+            // Reusa el mismo grupo que el navbar completo
+            $pCompras = parent_active($grpCompras, $current);
+            ?>
+            <li class="nav-item dropdown">
+              <a class="nav-link dropdown-toggle<?= $pCompras ? ' active-parent' : '' ?>" href="#" data-bs-toggle="dropdown">
+                <i class="bi bi-cart-check"></i>Compras
+              </a>
+              <ul class="dropdown-menu">
+                <li><a class="dropdown-item <?= item_active('compras_nueva.php', $current) ?>" href="compras_nueva.php">Nueva factura</a></li>
+                <li><a class="dropdown-item <?= item_active('compras_resumen.php', $current) ?>" href="compras_resumen.php">Resumen de compras</a></li>
+                <li><a class="dropdown-item <?= item_active('modelos.php', $current) ?>" href="modelos.php">Catálogo de modelos</a></li>
+                <li><a class="dropdown-item <?= item_active('proveedores.php', $current) ?>" href="proveedores.php">Proveedores</a></li>
+                <li>
+                  <hr class="dropdown-divider">
+                </li>
+                <li><a class="dropdown-item" href="compras_resumen.php?estado=Pendiente">Ingreso a almacén (pendientes)</a></li>
+              </ul>
+            </li>
+          <?php endif; ?>
+
+          <li class="nav-item dropdown">
+            <a class="nav-link dropdown-toggle<?= $pEfec ? ' active-parent' : '' ?>" href="#" data-bs-toggle="dropdown">
+              <i class="bi bi-cash-coin"></i>Efectivo
+            </a>
+            <ul class="dropdown-menu">
+              <li><a class="dropdown-item <?= item_active('cobros.php', $current) ?>" href="cobros.php">💵 Generar cobro</a></li>
+              <?php if ($isSubdisAdmin): ?>
+                <li><a class="dropdown-item <?= item_active('depositos.php', $current) ?>" href="depositos.php">🏦 Validar depósitos</a></li>
+              <?php else: ?>
+                <li><a class="dropdown-item <?= item_active('generar_corte.php', $current) ?>" href="generar_corte.php">🧮 Generar corte sucursal</a></li>
+                <li><a class="dropdown-item <?= item_active('depositos_sucursal.php', $current) ?>" href="depositos_sucursal.php">🏦 Depósitos</a></li>
               <?php endif; ?>
+            </ul>
+          </li>
 
-              <?php if (in_array($rolUsuario, ['Admin', 'Subdistribuidor', 'Super'])): ?>
-                <li><a class="dropdown-item <?= item_active('inventario_subdistribuidor.php', $current) ?>" href="inventario_subdistribuidor.php">Inventario subdistribuidor</a></li>
+
+          <li class="nav-item dropdown">
+            <a class="nav-link dropdown-toggle<?= $pTras ? ' active-parent' : '' ?>" href="#" data-bs-toggle="dropdown">
+              <i class="bi bi-arrow-left-right"></i>Traspasos
+            </a>
+            <ul class="dropdown-menu">
+              <li><a class="dropdown-item <?= item_active('traspaso_nuevo.php', $current) ?>" href="traspaso_nuevo.php">Traspaso nuevo</a></li>
+              <li><a class="dropdown-item <?= item_active('traspasos_salientes.php', $current) ?>" href="traspasos_salientes.php">Traspasos salientes</a></li>
+              <li>
+                <a class="dropdown-item d-flex justify-content-between align-items-center <?= item_active('traspasos_pendientes.php', $current) ?>" href="traspasos_pendientes.php">
+                  <span>Traspasos pendientes</span>
+                  <?php if (!empty($badgeEquip) && (int)$badgeEquip > 0): ?>
+                    <span class="nav-badge badge-soft-danger"><?= (int)$badgeEquip ?></span>
+                  <?php endif; ?>
+                </a>
+              </li>
+
+              <li>
+                <hr class="dropdown-divider">
+              </li>
+
+              <li><a class="dropdown-item <?= item_active('generar_traspaso_sims.php', $current) ?>" href="generar_traspaso_sims.php">Traspaso SIMs</a></li>
+              <li>
+                <a class="dropdown-item d-flex justify-content-between align-items-center <?= item_active('traspasos_sims_pendientes.php', $current) ?>" href="traspasos_sims_pendientes.php">
+                  <span>SIMs pendientes</span>
+                  <?php if (!empty($badgeSims) && (int)$badgeSims > 0): ?>
+                    <span class="nav-badge badge-soft-danger"><?= (int)$badgeSims ?></span>
+                  <?php endif; ?>
+                </a>
+              </li>
+              <li><a class="dropdown-item <?= item_active('traspasos_sims_salientes.php', $current) ?>" href="traspasos_sims_salientes.php">SIMs salientes</a></li>
+            </ul>
+          </li>
+
+          <li class="nav-item">
+            <a class="nav-link <?= item_active('lista_precios.php', $current) ?>" href="lista_precios.php">
+              <i class="bi bi-gear"></i>Operación
+            </a>
+          </li>
+
+        <?php else: ?>
+
+          <?php $pActive = parent_active($grpDashboard, $current); ?>
+          <li class="nav-item dropdown">
+            <a class="nav-link dropdown-toggle<?= $pActive ? ' active-parent' : '' ?>" href="#" data-bs-toggle="dropdown">
+              <i class="bi bi-speedometer2"></i>Dashboard
+            </a>
+            <ul class="dropdown-menu">
+              <li><a class="dropdown-item <?= item_active('productividad_dia.php', $current) ?>" href="productividad_dia.php">Dashboard diario</a></li>
+              <li><a class="dropdown-item <?= item_active('dashboard_unificado.php', $current) ?>" href="dashboard_unificado.php">Dashboard semanal</a></li>
+              <li><a class="dropdown-item <?= item_active('dashboard_mensual.php', $current) ?>" href="dashboard_mensual.php">Dashboard mensual</a></li>
+            </ul>
+          </li>
+
+          <?php $pActive = parent_active($grpVentas, $current); ?>
+          <li class="nav-item dropdown">
+            <a class="nav-link dropdown-toggle<?= $pActive ? ' active-parent' : '' ?>" href="#" data-bs-toggle="dropdown">
+              <i class="bi bi-bag-check"></i>Ventas
+            </a>
+            <ul class="dropdown-menu">
+              <?php if ($rolUsuario === 'Logistica'): ?>
+                <li class="dropdown-header">Catálogos</li>
+                <li>
+                  <a class="dropdown-item <?= item_active('catalogo_clientes.php', $current) ?>" href="catalogo_clientes.php">
+                    <i class="bi bi-people me-1"></i>Clientes
+                  </a>
+                </li>
+                <li>
+                  <hr class="dropdown-divider">
+                </li>
+                <li class="dropdown-header">Historiales</li>
+                <li><a class="dropdown-item <?= item_active('historial_ventas.php', $current) ?>" href="historial_ventas.php">Historial de ventas</a></li>
+                <li><a class="dropdown-item <?= item_active('historial_ventas_sims.php', $current) ?>" href="historial_ventas_sims.php">Historial ventas SIM</a></li>
+                <li><a class="dropdown-item <?= item_active('historial_payjoy_tc.php', $current) ?>" href="historial_payjoy_tc.php">Historial PayJoy TC</a></li>
+                <li><a class="dropdown-item <?= item_active('historial_ventas_accesorios.php', $current) ?>" href="historial_ventas_accesorios.php">Historial accesorios</a></li>
+
+              <?php else: ?>
+                <li class="dropdown-header">Ventas nuevas</li>
+                <li><a class="dropdown-item <?= item_active('nueva_venta.php', $current) ?>" href="nueva_venta.php">Venta equipos</a></li>
+                <li><a class="dropdown-item <?= item_active('venta_sim_prepago.php', $current) ?>" href="venta_sim_prepago.php">Venta SIM prepago</a></li>
+                <li><a class="dropdown-item <?= item_active('venta_sim_pospago.php', $current) ?>" href="venta_sim_pospago.php">Venta SIM pospago</a></li>
+                <li><a class="dropdown-item <?= item_active('payjoy_tc_nueva.php', $current) ?>" href="payjoy_tc_nueva.php">PayJoy TC – Nueva</a></li>
+                <li><a class="dropdown-item <?= item_active('venta_accesorios.php', $current) ?>" href="venta_accesorios.php">Venta accesorios</a></li>
+
+                <li class="dropdown-header">Catálogos</li>
+                <li>
+                  <a class="dropdown-item <?= item_active('catalogo_clientes.php', $current) ?>" href="catalogo_clientes.php">
+                    <i class="bi bi-people me-1"></i>Clientes
+                  </a>
+                </li>
+
+                <li>
+                  <hr class="dropdown-divider">
+                </li>
+
+                <li class="dropdown-header">Historiales</li>
+                <li><a class="dropdown-item <?= item_active('historial_ventas.php', $current) ?>" href="historial_ventas.php">Historial de ventas</a></li>
+                <li><a class="dropdown-item <?= item_active('historial_ventas_sims.php', $current) ?>" href="historial_ventas_sims.php">Historial ventas SIM</a></li>
+                <li><a class="dropdown-item <?= item_active('historial_payjoy_tc.php', $current) ?>" href="historial_payjoy_tc.php">Historial PayJoy TC</a></li>
+                <li><a class="dropdown-item <?= item_active('historial_ventas_accesorios.php', $current) ?>" href="historial_ventas_accesorios.php">Historial accesorios</a></li>
+
+                <?php if (in_array($rolUsuario, $rolesVentasGarantia, true)): ?>
+                  <li>
+                    <hr class="dropdown-divider">
+                  </li>
+                  <li class="dropdown-header">Garantías</li>
+                  <?php if ($habilitarTramitarGarantia): ?>
+                    <li><a class="dropdown-item <?= item_active('garantias_mis_casos.php', $current) ?>" href="garantias_mis_casos.php">Tramitar Garantía</a></li>
+                  <?php else: ?>
+                    <li>
+                      <a class="dropdown-item disabled-item" href="#" tabindex="-1" aria-disabled="true" title="Disponible próximamente">
+                        Tramitar Garantía
+                        <span class="item-note">Disponible próximamente</span>
+                      </a>
+                    </li>
+                  <?php endif; ?>
+                <?php endif; ?>
               <?php endif; ?>
+            </ul>
+          </li>
 
-              <?php if (in_array($rolUsuario, ['Admin', 'GerenteZona', 'Super'])): ?>
+          <?php $pActive = parent_active($grpInventario, $current); ?>
+          <li class="nav-item dropdown">
+            <a class="nav-link dropdown-toggle<?= $pActive ? ' active-parent' : '' ?>" href="#" data-bs-toggle="dropdown">
+              <i class="bi bi-box-seam"></i>Inventario
+            </a>
+            <ul class="dropdown-menu">
+              <?php if ($rolUsuario === 'Logistica'): ?>
                 <li><a class="dropdown-item <?= item_active('inventario_global.php', $current) ?>" href="inventario_global.php">Inventario global</a></li>
+                <li><a class="dropdown-item <?= item_active('inventario_historico.php', $current) ?>" href="inventario_historico.php">Inventario histórico</a></li>
+                <li><a class="dropdown-item <?= item_active('inventario_sims_resumen.php', $current) ?>" href="inventario_sims_resumen.php">Inventario SIMs</a></li>
+                <li><a class="dropdown-item <?= item_active('inventario_retiros_v2.php', $current) ?>" href="inventario_retiros_v2.php">Retiros de inventario</a></li>
+              <?php else: ?>
+                <?php if (in_array($rolUsuario, ['Ejecutivo', 'Gerente'])): ?>
+                  <li><a class="dropdown-item <?= item_active('panel.php', $current) ?>" href="panel.php">Inventario sucursal</a></li>
+                  <li><a class="dropdown-item <?= item_active('inventario_resumen.php', $current) ?>" href="inventario_resumen.php">Resumen Global</a></li>
+                <?php endif; ?>
+
+                <?php if (in_array($rolUsuario, ['Admin', 'Subdistribuidor', 'Super'])): ?>
+                  <li><a class="dropdown-item <?= item_active('inventario_subdistribuidor.php', $current) ?>" href="inventario_subdistribuidor.php">Inventario subdistribuidor</a></li>
+                <?php endif; ?>
+
+                <?php if (in_array($rolUsuario, ['Admin', 'GerenteZona', 'Super'])): ?>
+                  <li><a class="dropdown-item <?= item_active('inventario_global.php', $current) ?>" href="inventario_global.php">Inventario global</a></li>
+                <?php endif; ?>
+
+                <?php if (in_array($rolUsuario, ['Gerente', 'Admin', 'Logistica'], true)): ?>
+                  <li><a class="dropdown-item <?= item_active('inventario_sims_resumen.php', $current) ?>" href="inventario_sims_resumen.php">Inventario SIMs</a></li>
+                <?php endif; ?>
+
+                <?php if ($rolUsuario === 'GerenteZona'): ?>
+                  <li>
+                    <hr class="dropdown-divider">
+                  </li>
+                  <li class="dropdown-header">Zona (GZ)</li>
+                  <li>
+                    <a class="dropdown-item <?= item_active('inventario_resumen.php', $current) ?>" href="inventario_resumen.php">
+                      Resumen Global
+                    </a>
+                  </li>
+                  <li><a class="dropdown-item <?= item_active('generar_traspaso_zona.php', $current) ?>" href="generar_traspaso_zona.php"><i class="bi bi-arrow-left-right me-1"></i>Generar traspaso (Zona)</a></li>
+                  <li>
+                    <a class="dropdown-item d-flex justify-content-between align-items-center <?= item_active('traspasos_pendientes_zona.php', $current) ?>" href="traspasos_pendientes_zona.php">
+                      <span><i class="bi bi-clock-history me-1"></i>Pendientes de zona</span>
+                      <?php if ($badgePendZona > 0): ?><span class="nav-badge badge-soft-danger"><?= (int)$badgePendZona ?></span><?php endif; ?>
+                    </a>
+                  </li>
+                <?php endif; ?>
+
+                <?php if (in_array($rolUsuario, ['Admin', 'Super'])): ?>
+                  <li>
+                    <hr class="dropdown-divider">
+                  </li>
+                  <li class="dropdown-header">Administrador</li>
+                  <li><a class="dropdown-item <?= item_active('inventario_resumen.php', $current) ?>" href="inventario_resumen.php">Resumen Global</a></li>
+                  <li><a class="dropdown-item <?= item_active('inventario_eulalia.php', $current) ?>" href="inventario_eulalia.php">Inventario Eulalia</a></li>
+                  <li><a class="dropdown-item <?= item_active('inventario_retiros_v2.php', $current) ?>" href="inventario_retiros_v2.php">**Retiros de Inventario</a></li>
+                <?php endif; ?>
+              <?php endif; ?>
+            </ul>
+          </li>
+
+          <?php if (in_array($rolUsuario, ['Admin', 'Super', 'Logistica']) || $isSubdisAdmin): ?>
+            <?php $pActive = parent_active($grpCompras, $current); ?>
+            <li class="nav-item dropdown">
+              <a class="nav-link dropdown-toggle<?= $pActive ? ' active-parent' : '' ?>" href="#" data-bs-toggle="dropdown">
+                <i class="bi bi-cart-check"></i>Compras
+              </a>
+              <ul class="dropdown-menu">
+                <li><a class="dropdown-item <?= item_active('compras_nueva.php', $current) ?>" href="compras_nueva.php">Nueva factura</a></li>
+                <li><a class="dropdown-item <?= item_active('compras_resumen.php', $current) ?>" href="compras_resumen.php">Resumen de compras</a></li>
+                <li><a class="dropdown-item <?= item_active('modelos.php', $current) ?>" href="modelos.php">Catálogo de modelos</a></li>
+                <li><a class="dropdown-item <?= item_active('proveedores.php', $current) ?>" href="proveedores.php">Proveedores</a></li>
+                <li>
+                  <hr class="dropdown-divider">
+                </li>
+                <li><a class="dropdown-item" href="compras_resumen.php?estado=Pendiente">Ingreso a almacén (pendientes)</a></li>
+                <li><a class="dropdown-item disabled" href="#" tabindex="-1" aria-disabled="true" title="Se accede desde el Resumen">compras_ingreso.php (directo)</a></li>
+              </ul>
+            </li>
+          <?php endif; ?>
+
+          <?php if ($puedeTraspasos): ?>
+            <?php $pActive = parent_active($grpTraspasos, $current); ?>
+            <li class="nav-item dropdown">
+              <a class="nav-link dropdown-toggle<?= $pActive ? ' active-parent' : '' ?>" href="#" data-bs-toggle="dropdown">
+                <i class="bi bi-arrow-left-right"></i>Traspasos
+                <?php if ($badgeEquip > 0): ?><span class="nav-badge badge-soft-danger badge-pulse ms-1"><?= (int)$badgeEquip ?></span><?php endif; ?>
+                <?php if ($badgeSims > 0):  ?><span class="nav-badge badge-soft-info  badge-pulse-blue ms-1"><?= (int)$badgeSims  ?></span><?php endif; ?>
+              </a>
+              <ul class="dropdown-menu">
+                <?php if (in_array($rolUsuario, ['Admin', 'Super', 'Logistica', 'Logística'], true)): ?>
+                  <li><a class="dropdown-item <?= item_active('generar_traspaso.php', $current) ?>" href="generar_traspaso.php">Generar traspaso desde Eulalia</a></li>
+                <?php endif; ?>
+
+                <li><a class="dropdown-item <?= item_active('generar_traspaso_sims.php', $current) ?>" href="generar_traspaso_sims.php">Generar traspaso SIMs</a></li>
+
+                <li>
+                  <hr class="dropdown-divider">
+                </li>
+                <li class="dropdown-header">SIMs</li>
+                <li>
+                  <a class="dropdown-item d-flex justify-content-between align-items-center <?= item_active('traspasos_sims_pendientes.php', $current) ?>" href="traspasos_sims_pendientes.php">
+                    <span>SIMs pendientes</span>
+                    <?php if ($badgeSims > 0): ?><span class="nav-badge badge-soft-info"><?= (int)$badgeSims ?></span><?php endif; ?>
+                  </a>
+                </li>
+                <li><a class="dropdown-item <?= item_active('traspasos_sims_salientes.php', $current) ?>" href="traspasos_sims_salientes.php">SIMs salientes</a></li>
+
+                <?php if ($rolUsuario === 'Gerente' || ($rolUsuario === 'Ejecutivo' && $sucursalSinGerente && !$omitirReglaEjecutivo)): ?>
+                  <li>
+                    <hr class="dropdown-divider">
+                  </li>
+                  <li class="dropdown-header">Equipos</li>
+                  <li><a class="dropdown-item <?= item_active('traspaso_nuevo.php', $current) ?>" href="traspaso_nuevo.php">Generar traspaso entre sucursales</a></li>
+                <?php endif; ?>
+
+                <li>
+                  <hr class="dropdown-divider">
+                </li>
+                <li class="dropdown-header">Historial de equipos</li>
+                <li>
+                  <a class="dropdown-item d-flex justify-content-between align-items-center <?= item_active('traspasos_pendientes.php', $current) ?>" href="traspasos_pendientes.php">
+                    <span>Traspasos entrantes</span>
+                    <?php if ($badgeEquip > 0): ?><span class="nav-badge badge-soft-danger"><?= (int)$badgeEquip ?></span><?php endif; ?>
+                  </a>
+                </li>
+                <li><a class="dropdown-item <?= item_active('traspasos_salientes.php', $current) ?>" href="traspasos_salientes.php">Traspasos salientes</a></li>
+              </ul>
+            </li>
+          <?php endif; ?>
+
+          <?php if ($rolUsuario !== 'Logistica'): ?>
+            <?php $pActive = parent_active($grpEfectivo, $current); ?>
+            <li class="nav-item dropdown">
+              <a class="nav-link dropdown-toggle<?= $pActive ? ' active-parent' : '' ?>" href="#" data-bs-toggle="dropdown">
+                <i class="bi bi-cash-coin"></i>Efectivo
+              </a>
+              <ul class="dropdown-menu">
+                <?php if ($rolUsuario === 'GerenteZona'): ?>
+                  <li><a class="dropdown-item <?= item_active('recoleccion_comisiones.php', $current) ?>" href="recoleccion_comisiones.php">Recolección comisiones</a></li>
+                <?php else: ?>
+                  <li><a class="dropdown-item <?= item_active('cobros.php', $current) ?>" href="cobros.php">Generar cobro</a></li>
+
+                  <?php if ($puedeCortesYDepositos): ?>
+                    <li><a class="dropdown-item <?= item_active('cortes_caja.php', $current) ?>" href="cortes_caja.php">Historial Cortes</a></li>
+                    <li><a class="dropdown-item <?= item_active('generar_corte.php', $current) ?>" href="generar_corte.php">Generar corte sucursal</a></li>
+                    <li><a class="dropdown-item <?= item_active('depositos_sucursal.php', $current) ?>" href="depositos_sucursal.php">Depósitos sucursal</a></li>
+                  <?php endif; ?>
+
+                  <?php if ($esAdmin): ?>
+                    <li><a class="dropdown-item <?= item_active('depositos.php', $current) ?>" href="depositos.php">Validar depósitos</a></li>
+                  <?php endif; ?>
+                <?php endif; ?>
+              </ul>
+            </li>
+          <?php endif; ?>
+
+          <?php $pActive = parent_active($grpOperacion, $current); ?>
+          <li class="nav-item dropdown">
+            <a class="nav-link dropdown-toggle<?= $pActive ? ' active-parent' : '' ?>" href="#" data-bs-toggle="dropdown">
+              <i class="bi bi-gear-wide-connected"></i>Operación
+            </a>
+            <ul class="dropdown-menu">
+              <li><a class="dropdown-item <?= item_active('lista_precios.php', $current) ?>" href="lista_precios.php">Lista de precios</a></li>
+
+              <li>
+                <a class="dropdown-item <?= item_active('recargas_portal.php', $current) ?>" href="recargas_portal.php">
+                  Recargas Promo
+                </a>
+              </li>
+
+              <?php if (in_array($rolUsuario, ['Admin', 'Logistica'], true)): ?>
+                <li>
+                  <a class="dropdown-item <?= item_active('panel_operador.php', $current) ?>" href="panel_operador.php">
+                    <i class="bi bi-person-gear me-1"></i>Panel Operador
+                  </a>
+                </li>
+
+                <li>
+                  <hr class="dropdown-divider">
+                </li>
+                <li class="dropdown-header">Garantías</li>
+                <?php if ($habilitarPanelGarantias): ?>
+                  <li>
+                    <a class="dropdown-item <?= item_active('garantias_logistica.php', $current) ?>" href="garantias_logistica.php">
+                      <i class="bi bi-shield-check me-1"></i>Panel Garantías
+                    </a>
+                  </li>
+                <?php else: ?>
+                  <li>
+                    <a class="dropdown-item disabled-item" href="#" tabindex="-1" aria-disabled="true" title="Disponible próximamente">
+                      <i class="bi bi-shield-check me-1"></i>Panel Garantías
+                      <span class="item-note">Disponible próximamente</span>
+                    </a>
+                  </li>
+                <?php endif; ?>
+
               <?php endif; ?>
 
-              <!-- SIMs (Resumen) para Gerente, Admin y Logistica -->
-              <?php if (in_array($rolUsuario, ['Gerente', 'Admin', 'Logistica'], true)): ?>
-                <li><a class="dropdown-item <?= item_active('inventario_sims_resumen.php', $current) ?>" href="inventario_sims_resumen.php">Inventario SIMs</a></li>
+              <?php if (in_array($rolUsuario, ['Gerente', 'Ejecutivo'], true) && $esSucursalPropia): ?>
+                <li><a class="dropdown-item <?= item_active('nomina_mi_semana_v2.php', $current) ?>" href="nomina_mi_semana_v2.php">Mi nómina</a></li>
+              <?php endif; ?>
+
+              <?php if (in_array($rolUsuario, ['Ejecutivo', 'Gerente'])): ?>
+                <li><a class="dropdown-item <?= item_active('prospectos.php', $current) ?>" href="prospectos.php">Prospectos</a></li>
+              <?php endif; ?>
+
+              <?php if ($rolUsuario === 'Gerente'): ?>
+                <li><a class="dropdown-item <?= item_active('insumos_pedido.php', $current) ?>" href="insumos_pedido.php">Pedido de insumos</a></li>
+              <?php endif; ?>
+
+              <?php if ($esAdmin): ?>
+                <li><a class="dropdown-item <?= item_active('insumos_admin.php', $current) ?>" href="insumos_admin.php">Administrar insumos</a></li>
+                <li><a class="dropdown-item <?= item_active('gestionar_usuarios.php', $current) ?>" href="gestionar_usuarios.php">Gestionar usuarios</a></li>
               <?php endif; ?>
 
               <?php if ($rolUsuario === 'GerenteZona'): ?>
@@ -750,311 +1178,128 @@ function item_active(string $f, string $c): string
                   <hr class="dropdown-divider">
                 </li>
                 <li class="dropdown-header">Zona (GZ)</li>
+                <li><a class="dropdown-item <?= item_active('zona_asistencias.php', $current) ?>" href="zona_asistencias.php"><i class="bi bi-people-fill me-1"></i>Asistencias de zona</a></li>
                 <li>
-                  <a class="dropdown-item <?= item_active('inventario_resumen.php', $current) ?>" href="inventario_resumen.php">
-                    Resumen Global
-                  </a>
-                </li>
-                <li><a class="dropdown-item <?= item_active('generar_traspaso_zona.php', $current) ?>" href="generar_traspaso_zona.php"><i class="bi bi-arrow-left-right me-1"></i>Generar traspaso (Zona)</a></li>
-                <li>
-                  <a class="dropdown-item d-flex justify-content-between align-items-center <?= item_active('traspasos_pendientes_zona.php', $current) ?>" href="traspasos_pendientes_zona.php">
-                    <span><i class="bi bi-clock-history me-1"></i>Pendientes de zona</span>
-                    <?php if ($badgePendZona > 0): ?><span class="nav-badge badge-soft-danger"><?= (int)$badgePendZona ?></span><?php endif; ?>
+                  <a class="dropdown-item <?= item_active('cortes_zona.php', $current) ?>" href="cortes_zona.php">
+                    <i class="bi bi-journal-check me-1"></i>Monitoreo cortes de caja
                   </a>
                 </li>
               <?php endif; ?>
 
-              <?php if (in_array($rolUsuario, ['Admin', 'Super'])): ?>
+              <?php if (in_array($rolUsuario, ['Gerente', 'GerenteZona', 'GerenteSucursal', 'Admin', 'Super'])): ?>
                 <li>
                   <hr class="dropdown-divider">
                 </li>
-                <li class="dropdown-header">Administrador</li>
-                <li><a class="dropdown-item <?= item_active('inventario_resumen.php', $current) ?>" href="inventario_resumen.php">Resumen Global</a></li>
-                <li><a class="dropdown-item <?= item_active('inventario_eulalia.php', $current) ?>" href="inventario_eulalia.php">Inventario Eulalia</a></li>
-                <li><a class="dropdown-item <?= item_active('inventario_retiros_v2.php', $current) ?>" href="inventario_retiros_v2.php">**Retiros de Inventario</a></li>
-              <?php endif; ?>
-            <?php endif; ?>
-          </ul>
-        </li>
-
-        <?php if (in_array($rolUsuario, ['Admin', 'Super', 'Logistica'])): ?>
-          <?php $pActive = parent_active($grpCompras, $current); ?>
-          <li class="nav-item dropdown">
-            <a class="nav-link dropdown-toggle<?= $pActive ? ' active-parent' : '' ?>" href="#" data-bs-toggle="dropdown">
-              <i class="bi bi-cart-check"></i>Compras
-            </a>
-            <ul class="dropdown-menu">
-              <li><a class="dropdown-item <?= item_active('compras_nueva.php', $current) ?>" href="compras_nueva.php">Nueva factura</a></li>
-              <li><a class="dropdown-item <?= item_active('compras_resumen.php', $current) ?>" href="compras_resumen.php">Resumen de compras</a></li>
-              <li><a class="dropdown-item <?= item_active('modelos.php', $current) ?>" href="modelos.php">Catálogo de modelos</a></li>
-              <li><a class="dropdown-item <?= item_active('proveedores.php', $current) ?>" href="proveedores.php">Proveedores</a></li>
-              <li>
-                <hr class="dropdown-divider">
-              </li>
-              <li><a class="dropdown-item" href="compras_resumen.php?estado=Pendiente">Ingreso a almacén (pendientes)</a></li>
-              <li><a class="dropdown-item disabled" href="#" tabindex="-1" aria-disabled="true" title="Se accede desde el Resumen">compras_ingreso.php (directo)</a></li>
-            </ul>
-          </li>
-        <?php endif; ?>
-
-        <?php if ($puedeTraspasos): ?>
-          <?php $pActive = parent_active($grpTraspasos, $current); ?>
-          <li class="nav-item dropdown">
-            <a class="nav-link dropdown-toggle<?= $pActive ? ' active-parent' : '' ?>" href="#" data-bs-toggle="dropdown">
-              <i class="bi bi-arrow-left-right"></i>Traspasos
-              <?php if ($badgeEquip > 0): ?><span class="nav-badge badge-soft-danger badge-pulse ms-1"><?= (int)$badgeEquip ?></span><?php endif; ?>
-              <?php if ($badgeSims > 0):  ?><span class="nav-badge badge-soft-info  badge-pulse-blue ms-1"><?= (int)$badgeSims  ?></span><?php endif; ?>
-            </a>
-            <ul class="dropdown-menu">
-              <?php if (in_array($rolUsuario, ['Admin', 'Super'])): ?>
-                <li><a class="dropdown-item <?= item_active('generar_traspaso.php', $current) ?>" href="generar_traspaso.php">Generar traspaso desde Eulalia</a></li>
-              <?php endif; ?>
-
-              <li><a class="dropdown-item <?= item_active('generar_traspaso_sims.php', $current) ?>" href="generar_traspaso_sims.php">Generar traspaso SIMs</a></li>
-
-              <li>
-                <hr class="dropdown-divider">
-              </li>
-              <li class="dropdown-header">SIMs</li>
-              <li>
-                <a class="dropdown-item d-flex justify-content-between align-items-center <?= item_active('traspasos_sims_pendientes.php', $current) ?>" href="traspasos_sims_pendientes.php">
-                  <span>SIMs pendientes</span>
-                  <?php if ($badgeSims > 0): ?><span class="nav-badge badge-soft-info"><?= (int)$badgeSims ?></span><?php endif; ?>
-                </a>
-              </li>
-              <li><a class="dropdown-item <?= item_active('traspasos_sims_salientes.php', $current) ?>" href="traspasos_sims_salientes.php">SIMs salientes</a></li>
-
-              <?php if ($rolUsuario === 'Gerente' || ($rolUsuario === 'Ejecutivo' && $sucursalSinGerente && !$omitirReglaEjecutivo)): ?>
-                <li>
-                  <hr class="dropdown-divider">
-                </li>
-                <li class="dropdown-header">Equipos</li>
-                <li><a class="dropdown-item <?= item_active('traspaso_nuevo.php', $current) ?>" href="traspaso_nuevo.php">Generar traspaso entre sucursales</a></li>
-              <?php endif; ?>
-
-              <li>
-                <hr class="dropdown-divider">
-              </li>
-              <li class="dropdown-header">Historial de equipos</li>
-              <li>
-                <a class="dropdown-item d-flex justify-content-between align-items-center <?= item_active('traspasos_pendientes.php', $current) ?>" href="traspasos_pendientes.php">
-                  <span>Traspasos entrantes</span>
-                  <?php if ($badgeEquip > 0): ?><span class="nav-badge badge-soft-danger"><?= (int)$badgeEquip ?></span><?php endif; ?>
-                </a>
-              </li>
-              <li><a class="dropdown-item <?= item_active('traspasos_salientes.php', $current) ?>" href="traspasos_salientes.php">Traspasos salientes</a></li>
-            </ul>
-          </li>
-        <?php endif; ?>
-
-        <?php if ($rolUsuario !== 'Logistica'): ?>
-          <?php $pActive = parent_active($grpEfectivo, $current); ?>
-          <li class="nav-item dropdown">
-            <a class="nav-link dropdown-toggle<?= $pActive ? ' active-parent' : '' ?>" href="#" data-bs-toggle="dropdown">
-              <i class="bi bi-cash-coin"></i>Efectivo
-            </a>
-            <ul class="dropdown-menu">
-              <?php if ($rolUsuario === 'GerenteZona'): ?>
-                <li><a class="dropdown-item <?= item_active('recoleccion_comisiones.php', $current) ?>" href="recoleccion_comisiones.php">Recolección comisiones</a></li>
-              <?php else: ?>
-                <li><a class="dropdown-item <?= item_active('cobros.php', $current) ?>" href="cobros.php">Generar cobro</a></li>
-
-                <?php if ($puedeCortesYDepositos): ?>
-                  <li><a class="dropdown-item <?= item_active('cortes_caja.php', $current) ?>" href="cortes_caja.php">Historial Cortes</a></li>
-                  <li><a class="dropdown-item <?= item_active('generar_corte.php', $current) ?>" href="generar_corte.php">Generar corte sucursal</a></li>
-                  <li><a class="dropdown-item <?= item_active('depositos_sucursal.php', $current) ?>" href="depositos_sucursal.php">Depósitos sucursal</a></li>
+                <li class="dropdown-header">Mantenimiento</li>
+                <?php if (in_array($rolUsuario, ['Gerente', 'GerenteZona', 'GerenteSucursal'])): ?>
+                  <li><a class="dropdown-item <?= item_active('mantenimiento_solicitar.php', $current) ?>" href="mantenimiento_solicitar.php">Solicitar mantenimiento</a></li>
                 <?php endif; ?>
-
                 <?php if ($esAdmin): ?>
-                  <li><a class="dropdown-item <?= item_active('depositos.php', $current) ?>" href="depositos.php">Validar depósitos</a></li>
+                  <li><a class="dropdown-item <?= item_active('mantenimiento_admin.php', $current) ?>" href="mantenimiento_admin.php">Administrar solicitudes</a></li>
                 <?php endif; ?>
               <?php endif; ?>
             </ul>
           </li>
-        <?php endif; ?>
 
-        <?php $pActive = parent_active($grpOperacion, $current); ?>
-        <li class="nav-item dropdown">
-          <a class="nav-link dropdown-toggle<?= $pActive ? ' active-parent' : '' ?>" href="#" data-bs-toggle="dropdown">
-            <i class="bi bi-gear-wide-connected"></i>Operación
-          </a>
-          <ul class="dropdown-menu">
-            <li><a class="dropdown-item <?= item_active('lista_precios.php', $current) ?>" href="lista_precios.php">Lista de precios</a></li>
-
-            <li>
-              <a class="dropdown-item <?= item_active('recargas_portal.php', $current) ?>" href="recargas_portal.php">
-                Recargas Promo
+          <?php if ($puedeVerOperativos): ?>
+            <?php $pActive = parent_active($grpOperativos, $current); ?>
+            <li class="nav-item dropdown">
+              <a class="nav-link dropdown-toggle<?= $pActive ? ' active-parent' : '' ?>" href="#" data-bs-toggle="dropdown">
+                <i class="bi bi-tools"></i>Operativos
               </a>
-            </li>
+              <ul class="dropdown-menu">
 
-            <?php if (in_array($rolUsuario, ['Admin', 'Logistica'], true)): ?>
-              <li>
-                <a class="dropdown-item <?= item_active('panel_operador.php', $current) ?>" href="panel_operador.php">
-                  <i class="bi bi-person-gear me-1"></i>Panel Operador
-                </a>
-              </li>
-            <?php endif; ?>
+                <li class="dropdown-header"><i class="bi bi-cpu me-1"></i>Sistemas</li>
+                <?php if ($esAdmin || $rolUsuario === 'Logistica'): ?>
+                  <li>
+                    <a class="dropdown-item <?= item_active('tickets_nuevo_luga.php', $current) ?>" href="tickets_nuevo_luga.php">
+                      <i class="bi bi-ticket-detailed me-1"></i>Tickets Central
+                    </a>
+                  </li>
+                <?php endif; ?>
+                <li>
+                  <a class="dropdown-item <?= item_active('portal_proyectos_listado.php', $current) ?>" href="portal_proyectos_listado.php">
+                    <i class="bi bi-code-slash me-1"></i>Solicitud de desarrollo
+                  </a>
+                </li>
 
-            <?php if (in_array($rolUsuario, ['Gerente', 'Ejecutivo'], true) && $esSucursalPropia): ?>
-              <li><a class="dropdown-item <?= item_active('nomina_mi_semana_v2.php', $current) ?>" href="nomina_mi_semana_v2.php">Mi nómina</a></li>
-            <?php endif; ?>
+                <?php if (in_array($idUsuario, [6, 8], true)): ?>
+                  <li>
+                    <a class="dropdown-item <?= item_active('tickets_operador.php', $current) ?>" href="tickets_operador.php">
+                      <i class="bi bi-shield-lock me-1"></i>Tickets Admin
+                    </a>
+                  </li>
+                <?php endif; ?>
 
-            <?php if (in_array($rolUsuario, ['Ejecutivo', 'Gerente'])): ?>
-              <li><a class="dropdown-item <?= item_active('prospectos.php', $current) ?>" href="prospectos.php">Prospectos</a></li>
-            <?php endif; ?>
-
-            <?php if ($rolUsuario === 'Gerente'): ?>
-              <li><a class="dropdown-item <?= item_active('insumos_pedido.php', $current) ?>" href="insumos_pedido.php">Pedido de insumos</a></li>
-            <?php endif; ?>
-
-            <?php if ($esAdmin): ?>
-              <li><a class="dropdown-item <?= item_active('insumos_admin.php', $current) ?>" href="insumos_admin.php">Administrar insumos</a></li>
-              <li><a class="dropdown-item <?= item_active('gestionar_usuarios.php', $current) ?>" href="gestionar_usuarios.php">Gestionar usuarios</a></li>
-            <?php endif; ?>
-
-            <?php if ($rolUsuario === 'GerenteZona'): ?>
-              <li>
-                <hr class="dropdown-divider">
-              </li>
-              <li class="dropdown-header">Zona (GZ)</li>
-              <li><a class="dropdown-item <?= item_active('zona_asistencias.php', $current) ?>" href="zona_asistencias.php"><i class="bi bi-people-fill me-1"></i>Asistencias de zona</a></li>
-              <li>
-                <a class="dropdown-item <?= item_active('cortes_zona.php', $current) ?>" href="cortes_zona.php">
-                  <i class="bi bi-journal-check me-1"></i>Monitoreo cortes de caja
-                </a>
-              </li>
-            <?php endif; ?>
-
-            <?php if (in_array($rolUsuario, ['Gerente', 'GerenteZona', 'GerenteSucursal', 'Admin', 'Super'])): ?>
-              <li>
-                <hr class="dropdown-divider">
-              </li>
-              <li class="dropdown-header">Mantenimiento</li>
-              <?php if (in_array($rolUsuario, ['Gerente', 'GerenteZona', 'GerenteSucursal'])): ?>
-                <li><a class="dropdown-item <?= item_active('mantenimiento_solicitar.php', $current) ?>" href="mantenimiento_solicitar.php">Solicitar mantenimiento</a></li>
-              <?php endif; ?>
-              <?php if ($esAdmin): ?>
-                <li><a class="dropdown-item <?= item_active('mantenimiento_admin.php', $current) ?>" href="mantenimiento_admin.php">Administrar solicitudes</a></li>
-              <?php endif; ?>
-            <?php endif; ?>
-          </ul>
-        </li>
-
-        <?php if ($esAdmin): ?>
-          <?php $pActive = parent_active($grpOperativos, $current); ?>
-          <li class="nav-item dropdown">
-            <a class="nav-link dropdown-toggle<?= $pActive ? ' active-parent' : '' ?>" href="#" data-bs-toggle="dropdown">
-              <i class="bi bi-tools"></i>Operativos
-            </a>
-            <ul class="dropdown-menu">
-              <!-- 🔝 Bitacora Sistema (solo Admin) -->
-              <!-- <?php if ($rolUsuario === 'Admin'): ?>
-                <li><a class="dropdown-item <?= item_active('tareas.php', $current) ?>" href="tareas.php">Bitacora Sistema</a></li>
                 <li>
                   <hr class="dropdown-divider">
                 </li>
-              <?php endif; ?> -->
 
-              <!-- 🔝 Tickets: siempre hasta arriba -->
-              <?php if ($esAdmin || $rolUsuario === 'Logistica'): ?>
+                <li class="dropdown-header">Cuotas</li>
+                <li><a class="dropdown-item <?= item_active('cuotas_mensuales.php', $current) ?>" href="cuotas_mensuales.php">Cuotas sucursales (mensual)</a></li>
+                <li><a class="dropdown-item <?= item_active('cuotas_mensuales_ejecutivos.php', $current) ?>" href="cuotas_mensuales_ejecutivos.php">Cuotas ejecutivos (mensual)</a></li>
+                <li><a class="dropdown-item <?= item_active('cuotas_sucursales.php', $current) ?>" href="cuotas_sucursales.php">Cuotas semanales (sucursales)</a></li>
+                <li><a class="dropdown-item <?= item_active('cargar_cuotas_semanales.php', $current) ?>" href="cargar_cuotas_semanales.php">Cargar cuotas semanales</a></li>
+
                 <li>
-                  <a class="dropdown-item <?= item_active('tickets_nuevo_luga.php', $current) ?>" href="tickets_nuevo_luga.php">
-                    <i class="bi bi-ticket-detailed me-1"></i>Tickets Central
-                  </a>
+                  <hr class="dropdown-divider">
                 </li>
-              <?php endif; ?>
 
-              <?php if (in_array($idUsuario, [6, 8], true)): ?>
+                <li class="dropdown-header">Cargas masivas</li>
+                <li><a class="dropdown-item <?= item_active('carga_masiva_productos.php', $current) ?>" href="carga_masiva_productos.php">Carga masiva de productos</a></li>
+                <li><a class="dropdown-item <?= item_active('carga_masiva_sims.php', $current) ?>" href="carga_masiva_sims.php">Carga masiva de SIMs</a></li>
+
+              </ul>
+            </li>
+          <?php endif; ?>
+
+          <?php if ($esAdmin): ?>
+            <?php $pActive = parent_active($grpRH, $current); ?>
+            <li class="nav-item dropdown">
+              <a class="nav-link dropdown-toggle<?= $pActive ? ' active-parent' : '' ?>" href="#" data-bs-toggle="dropdown">
+                <i class="bi bi-people"></i>RH
+              </a>
+              <ul class="dropdown-menu">
+                <li><a class="dropdown-item <?= item_active('reporte_nomina_v2.php', $current) ?>" href="reporte_nomina_v2.php">Reporte Nomina</a></li>
+                <li><a class="dropdown-item <?= item_active('reporte_nomina_gerentes_zona.php', $current) ?>" href="reporte_nomina_gerentes_zona.php">Gerentes zona</a></li>
+                <li><a class="dropdown-item <?= item_active('admin_asistencias.php', $current) ?>" href="admin_asistencias.php">Asistencias (Admin)</a></li>
                 <li>
-                  <a class="dropdown-item <?= item_active('tickets_operador.php', $current) ?>" href="tickets_operador.php">
-                    <i class="bi bi-shield-lock me-1"></i>Tickets Admin
-                  </a>
+                  <hr class="dropdown-divider">
                 </li>
-              <?php endif; ?>
+                <li class="dropdown-header">Expedientes</li>
+                <li><a class="dropdown-item <?= item_active('admin_expedientes.php', $current) ?>" href="admin_expedientes.php">Panel de expedientes</a></li>
+                <li>
+                  <hr class="dropdown-divider">
+                </li>
+                <li class="dropdown-header">Vacaciones</li>
+                <li><a class="dropdown-item <?= item_active('vacaciones_panel.php', $current) ?>" href="vacaciones_panel.php">Panel de Vacaciones</a></li>
+                <li>
+                  <hr class="dropdown-divider">
+                </li>
+                <?php if ($rolUsuario === 'Admin'): ?>
+                  <li class="dropdown-header">Efectividad</li>
+                  <li><a class="dropdown-item <?= item_active('productividad_ejecutivo.php', $current) ?>" href="productividad_ejecutivo.php"><i class="bi bi-clipboard-data me-1"></i>Efectividad ejecutivos</a></li>
+                <?php endif; ?>
+              </ul>
+            </li>
+          <?php endif; ?>
 
+          <?php if (true): ?>
+            <?php $pActive = parent_active(array_merge($grpCeleb, ['cuadro_honor.php']), $current); ?>
+            <li class="nav-item dropdown">
+              <a class="nav-link dropdown-toggle<?= $pActive ? ' active-parent' : '' ?>" href="#" data-bs-toggle="dropdown">
+                <i class="bi bi-balloon-heart"></i>Celebraciones
+              </a>
+              <ul class="dropdown-menu">
+                <li><a class="dropdown-item <?= item_active('cumples_aniversarios.php', $current) ?>" href="cumples_aniversarios.php">🎉 Cumpleaños & Aniversarios</a></li>
+                <li><a class="dropdown-item <?= item_active('cuadro_honor.php', $current) ?>" href="cuadro_honor.php">🏅 Cuadro de Honor</a></li>
+              </ul>
+            </li>
+          <?php endif; ?>
 
-              <li class="dropdown-header">Insumos & Precios</li>
-              <li><a class="dropdown-item <?= item_active('insumos_catalogo.php', $current) ?>" href="insumos_catalogo.php">Catálogo de insumos</a></li>
-              <li><a class="dropdown-item <?= item_active('actualizar_precios_modelo.php', $current) ?>" href="actualizar_precios_modelo.php">Actualizar precios por modelo</a></li>
-
-              <li>
-                <hr class="dropdown-divider">
-              </li>
-              <li class="dropdown-header">Cuotas & Comisiones</li>
-              <li><a class="dropdown-item <?= item_active('cuotas_mensuales.php', $current) ?>" href="cuotas_mensuales.php">Cuotas sucursales (mensual)</a></li>
-              <li><a class="dropdown-item <?= item_active('cuotas_mensuales_ejecutivos.php', $current) ?>" href="cuotas_mensuales_ejecutivos.php">Cuotas ejecutivos (mensual)</a></li>
-              <li><a class="dropdown-item <?= item_active('cuotas_sucursales.php', $current) ?>" href="cuotas_sucursales.php">Cuotas semanales (sucursales)</a></li>
-              <li><a class="dropdown-item <?= item_active('cargar_cuotas_semanales.php', $current) ?>" href="cargar_cuotas_semanales.php">Cargar cuotas semanales</a></li>
-              <li><a class="dropdown-item <?= item_active('esquemas_comisiones_ejecutivos.php', $current) ?>" href="esquemas_comisiones_ejecutivos.php">Esquemas comisiones (ejecutivos)</a></li>
-              <li><a class="dropdown-item <?= item_active('esquemas_comisiones_gerentes.php', $current) ?>" href="esquemas_comisiones_gerentes.php">Esquemas comisiones (gerentes)</a></li>
-              <li><a class="dropdown-item <?= item_active('esquemas_comisiones_pospago.php', $current) ?>" href="esquemas_comisiones_pospago.php">Esquemas comisiones (pospago)</a></li>
-              <li><a class="dropdown-item <?= item_active('comisiones_especiales_equipos.php', $current) ?>" href="comisiones_especiales_equipos.php">Comisiones especiales equipos</a></li>
-
-              <li>
-                <hr class="dropdown-divider">
-              </li>
-              <li class="dropdown-header">Cargas masivas</li>
-              <li><a class="dropdown-item <?= item_active('carga_masiva_productos.php', $current) ?>" href="carga_masiva_productos.php">Carga masiva de productos</a></li>
-              <li><a class="dropdown-item <?= item_active('carga_masiva_sims.php', $current) ?>" href="carga_masiva_sims.php">Carga masiva de SIMs</a></li>
-
-              <li>
-                <hr class="dropdown-divider">
-              </li>
-              <li class="dropdown-header">Altas</li>
-              <li><a class="dropdown-item <?= item_active('alta_usuario.php', $current) ?>" href="alta_usuario.php">Alta de usuario</a></li>
-              <li><a class="dropdown-item <?= item_active('alta_sucursal.php', $current) ?>" href="alta_sucursal.php">Alta de sucursal</a></li>
-
-              <li class="dropdown-header">Calidad</li>
-              <li>
-                <a class="dropdown-item <?= item_active('incidencias_matriz.php', $current) ?>" href="incidencias_matriz.php">
-                  <i class="bi bi-bug me-1"></i>Matriz de incidencias
-                </a>
-              </li>
-            </ul>
-          </li>
-        <?php endif; ?>
-
-        <?php if ($esAdmin): ?>
-          <?php $pActive = parent_active($grpRH, $current); ?>
-          <li class="nav-item dropdown">
-            <a class="nav-link dropdown-toggle<?= $pActive ? ' active-parent' : '' ?>" href="#" data-bs-toggle="dropdown">
-              <i class="bi bi-people"></i>RH
-            </a>
-            <ul class="dropdown-menu">
-              <li><a class="dropdown-item <?= item_active('reporte_nomina_v2.php', $current) ?>" href="reporte_nomina_v2.php">Reporte Nomina</a></li>
-              <li><a class="dropdown-item <?= item_active('reporte_nomina_gerentes_zona.php', $current) ?>" href="reporte_nomina_gerentes_zona.php">Gerentes zona</a></li>
-              <li><a class="dropdown-item <?= item_active('admin_asistencias.php', $current) ?>" href="admin_asistencias.php">Asistencias (Admin)</a></li>
-              <li>
-                <hr class="dropdown-divider">
-              </li>
-              <li class="dropdown-header">Expedientes</li>
-              <li><a class="dropdown-item <?= item_active('admin_expedientes.php', $current) ?>" href="admin_expedientes.php">Panel de expedientes</a></li>
-              <li>
-                <hr class="dropdown-divider">
-              </li>
-              <?php if ($rolUsuario === 'Admin'): ?>
-                <li class="dropdown-header">Efectividad</li>
-                <li><a class="dropdown-item <?= item_active('productividad_ejecutivo.php', $current) ?>" href="productividad_ejecutivo.php"><i class="bi bi-clipboard-data me-1"></i>Efectividad ejecutivos</a></li>
-              <?php endif; ?>
-            </ul>
-          </li>
-        <?php endif; ?>
-
-        <?php if ($rolUsuario !== 'Logistica'): ?>
-          <?php $pActive = parent_active(array_merge($grpCeleb, ['cuadro_honor.php']), $current); ?>
-          <li class="nav-item dropdown">
-            <a class="nav-link dropdown-toggle<?= $pActive ? ' active-parent' : '' ?>" href="#" data-bs-toggle="dropdown">
-              <i class="bi bi-balloon-heart"></i>Celebraciones
-            </a>
-            <ul class="dropdown-menu">
-              <li><a class="dropdown-item <?= item_active('cumples_aniversarios.php', $current) ?>" href="cumples_aniversarios.php">🎉 Cumpleaños & Aniversarios</a></li>
-              <li><a class="dropdown-item <?= item_active('cuadro_honor.php', $current) ?>" href="cuadro_honor.php">🏅 Cuadro de Honor</a></li>
-            </ul>
-          </li>
         <?php endif; ?>
       </ul>
 
-      <!-- Derecha -->
       <ul class="navbar-nav ms-auto align-items-center">
         <?php if (in_array($rolUsuario, ['Ejecutivo', 'Gerente'])): ?>
           <li class="nav-item my-1 my-xl-0 me-xl-2">
@@ -1064,7 +1309,6 @@ function item_active(string $f, string $c): string
           </li>
         <?php endif; ?>
 
-        <!-- Perfil / Cambio sucursal -->
         <li class="nav-item dropdown">
           <a class="nav-link dropdown-toggle d-flex align-items-center" href="#" data-bs-toggle="dropdown">
             <span class="me-2 position-relative">
@@ -1127,6 +1371,23 @@ function item_active(string $f, string $c): string
             <li>
               <hr class="dropdown-divider">
             </li>
+
+            <?php if ($vacacionesMenuHabilitado): ?>
+              <li>
+                <a class="dropdown-item" href="<?= e($vacacionesMenuHref) ?>">
+                  <i class="bi bi-calendar2-week me-2"></i>Solicitar vacaciones
+                  <span class="item-note"><?= e($vacacionesMenuTexto) ?></span>
+                </a>
+              </li>
+            <?php else: ?>
+              <li>
+                <a class="dropdown-item disabled-item" href="#" tabindex="-1" aria-disabled="true" title="<?= e($vacacionesMenuTexto) ?>">
+                  <i class="bi bi-calendar2-week me-2"></i>Solicitar vacaciones
+                  <span class="item-note"><?= e($vacacionesMenuTexto) ?></span>
+                </a>
+              </li>
+            <?php endif; ?>
+
             <li><a class="dropdown-item" href="mi_expediente.php"><i class="bi bi-folder-person me-2"></i>Mi expediente</a></li>
             <li><a class="dropdown-item" href="documentos_historial.php"><i class="bi bi-files me-2"></i>Mis documentos</a></li>
             <li>

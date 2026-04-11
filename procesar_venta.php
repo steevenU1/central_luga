@@ -1,19 +1,20 @@
 <?php
-/** procesar_venta.php — Central LUGA (versión con comisiones actualizadas + cupon_aplicado + cupón en tramos)
+
+/** procesar_venta.php — Central LUGA
+ * + Comisiones actualizadas
+ * + Cupón por equipo:
+ *      - monto_cupon_principal
+ *      - monto_cupon_combo
+ *      - monto_cupon (total)
+ * + ✅ Promo Regalo (2x1) por codigo_producto (backend seguro)
+ * + ✅ Promo Descuento (2º equipo % descuento) en:
+ *      A) Financiamiento+Combo (mismo registro): combo a % descuento del precio_lista
+ *      B) Doble venta (segunda venta): valida TAG origen y aplica % descuento al precio_lista del equipo seleccionado
+ * + ✅ Soporte para:
+ *      - pago_semanal
+ *      - primer_pago
  *
- * Reglas de comisiones:
- * - EJECUTIVO (campo `comision`):
- *     Equipos: [1–3499]=75, [3500–5499]=100, [5500+]=150
- *     Módem/MiFi: 50
- *     Combo: 75 fijo
- * - GERENTE (campo `comision`):
- *     Tabla Gerente: [1–3499]=25, [3500–5499]=75, [5500+]=100, Módem=25
- * - `comision_gerente`:
- *     Normal: No combo → tabla Gerente; Combo → 75 fijo.
- *     ⚠️ Ajuste: SI el vendedor es GERENTE, entonces `comision_gerente = 0`.
- * - `comision_especial` se suma SOLO a `comision`, no a `comision_gerente`.
- * - ⚠️ Ahora: si la venta lleva cupón, para el EQUIPO PRINCIPAL el tramo se calcula con
- *   (precio_lista - monto_cupon), nunca menor que 0.
+ * NOTA: Este archivo NO asume columnas nuevas; inserta campos opcionales en ventas solo si existen.
  */
 
 session_start();
@@ -29,7 +30,6 @@ date_default_timezone_set('America/Mexico_City');
 
 /* ========================
    Candado de captura por corte de AYER
-   - Sucursal del POST si viene (multi-sucursal), si no, de sesión
 ======================== */
 $id_sucursal_guard = isset($_POST['id_sucursal'])
   ? (int)$_POST['id_sucursal']
@@ -43,7 +43,6 @@ if ($bloquear) {
 
 /* ========================
    🔑 Validación de contraseña del usuario logueado
-   (candado extra para evitar capturas “con otro usuario”)
 ======================== */
 $id_usuario_sesion = (int)($_SESSION['id_usuario'] ?? 0);
 $passConfirm       = $_POST['password_confirm'] ?? '';
@@ -64,7 +63,6 @@ $stmtUser->execute();
 $resUser = $stmtUser->get_result()->fetch_assoc();
 $stmtUser->close();
 
-// Si no hay usuario, sesión chueca
 if (!$resUser) {
   header("Location: nueva_venta.php?err=" . urlencode("Sesión inválida. No se encontró el usuario en la base de datos."));
   exit();
@@ -73,20 +71,9 @@ if (!$resUser) {
 $stored = (string)($resUser['password'] ?? '');
 $okPass = false;
 
-// 1) Caso moderno: password_hash()
-if ($stored !== '' && password_verify($passConfirm, $stored)) {
-    $okPass = true;
-}
-
-// 2) Caso legacy: contraseña en texto plano
-if (!$okPass && $stored !== '' && hash_equals($stored, $passConfirm)) {
-    $okPass = true;
-}
-
-// 3) Caso legacy: contraseña guardada como MD5 (por si tu login viejo usaba md5)
-if (!$okPass && $stored !== '' && hash_equals($stored, md5($passConfirm))) {
-    $okPass = true;
-}
+if ($stored !== '' && password_verify($passConfirm, $stored)) $okPass = true;
+if (!$okPass && $stored !== '' && hash_equals($stored, $passConfirm)) $okPass = true;
+if (!$okPass && $stored !== '' && hash_equals($stored, md5($passConfirm))) $okPass = true;
 
 if (!$okPass) {
   header("Location: nueva_venta.php?err=" . urlencode("❌ Contraseña incorrecta. La venta no fue guardada."));
@@ -96,9 +83,22 @@ if (!$okPass) {
 /* ========================
    Helpers / Utilidades
 ======================== */
+function tableExists(mysqli $conn, string $table): bool
+{
+  $t = $conn->real_escape_string($table);
+  $sql = "
+    SELECT 1
+    FROM INFORMATION_SCHEMA.TABLES
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = '$t'
+    LIMIT 1
+  ";
+  $res = $conn->query($sql);
+  return $res && $res->num_rows > 0;
+}
 
-/** Verifica si existe una columna en la tabla dada */
-function columnExists(mysqli $conn, string $table, string $column): bool {
+function columnExists(mysqli $conn, string $table, string $column): bool
+{
   $t = $conn->real_escape_string($table);
   $c = $conn->real_escape_string($column);
   $sql = "
@@ -113,28 +113,54 @@ function columnExists(mysqli $conn, string $table, string $column): bool {
   return $res && $res->num_rows > 0;
 }
 
-/** Detecta el nombre de la columna de tipo de producto (compatibilidad de esquema) */
+function esFechaYmdValida(?string $fecha): bool
+{
+  $fecha = trim((string)$fecha);
+  if ($fecha === '') return false;
+  if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $fecha)) return false;
+  $dt = DateTime::createFromFormat('Y-m-d', $fecha);
+  return $dt && $dt->format('Y-m-d') === $fecha;
+}
+
 $colTipoProd = columnExists($conn, 'productos', 'tipo') ? 'tipo' : 'tipo_producto';
 
-/** Normaliza texto: minúsculas, sin acentos, sin separadores (mi-fi -> mifi) */
-function norm(string $s): string {
+function norm(string $s): string
+{
   $s = trim($s);
   if ($s === '') return '';
-  if (function_exists('mb_strtolower')) $s = mb_strtolower($s, 'UTF-8'); else $s = strtolower($s);
-  $t = @iconv('UTF-8','ASCII//TRANSLIT',$s);
+  if (function_exists('mb_strtolower')) $s = mb_strtolower($s, 'UTF-8');
+  else $s = strtolower($s);
+  $t = @iconv('UTF-8', 'ASCII//TRANSLIT', $s);
   if ($t !== false) $s = strtolower($t);
   return preg_replace('/[^a-z0-9]+/', '', $s);
 }
 
-/** Detecta si el producto es MiFi/Módem usando varias columnas del producto */
-function esMiFiModem(array $row): bool {
+function generarTagContado(mysqli $conn): string
+{
+  for ($i = 0; $i < 30; $i++) {
+    $num = random_int(0, 999999);
+    $tag = 'CONT' . str_pad((string)$num, 6, '0', STR_PAD_LEFT);
+
+    $stmt = $conn->prepare("SELECT 1 FROM ventas WHERE tag = ? LIMIT 1");
+    $stmt->bind_param("s", $tag);
+    $stmt->execute();
+    $res = $stmt->get_result();
+    $stmt->close();
+
+    if (!$res || $res->num_rows === 0) return $tag;
+  }
+  return 'CONT' . str_pad(substr((string)time(), -6), 6, '0', STR_PAD_LEFT);
+}
+
+function esMiFiModem(array $row): bool
+{
   $candidatos = [];
   $candidatos[] = isset($row['tipo_raw']) ? (string)$row['tipo_raw'] : '';
-  foreach (['nombre_comercial','subtipo','descripcion','modelo'] as $k) {
+  foreach (['nombre_comercial', 'subtipo', 'descripcion', 'modelo'] as $k) {
     if (isset($row[$k])) $candidatos[] = (string)$row[$k];
   }
   $joined = norm(implode(' ', $candidatos));
-  foreach (['modem','mifi','hotspot','router','cpe','pocketwifi'] as $n) {
+  foreach (['modem', 'mifi', 'hotspot', 'router', 'cpe', 'pocketwifi'] as $n) {
     if (strpos($joined, $n) !== false) return true;
   }
   return false;
@@ -143,17 +169,16 @@ function esMiFiModem(array $row): bool {
 /* ========================
    Tablas de comisión
 ======================== */
-
-/** EJECUTIVO — por tramo de precio base (ya puede ser lista o lista - cupón) */
-function comisionTramoEjecutivo(float $precio): float {
+function comisionTramoEjecutivo(float $precio): float
+{
   if ($precio >= 1     && $precio <= 2999) return 75.0;
   if ($precio >= 3000  && $precio <= 5498) return 100.0;
   if ($precio >= 5499)                     return 150.0;
   return 0.0;
 }
 
-/** GERENTE — por tramo de precio base o módem */
-function comisionTramoGerente(float $precio, bool $isModem): float {
+function comisionTramoGerente(float $precio, bool $isModem): float
+{
   if ($isModem) return 25.0;
   if ($precio >= 1     && $precio <= 2999) return 25.0;
   if ($precio >= 3000  && $precio <= 5498) return 75.0;
@@ -161,45 +186,22 @@ function comisionTramoGerente(float $precio, bool $isModem): float {
   return 0.0;
 }
 
-/**
- * Comisión para el campo `comision` considerando:
- * - rol del vendedor (Ejecutivo / Gerente)
- * - si es combo (75 fijo para Ejecutivo; para Gerente usamos tabla Gerente)
- * - si es módem
- * - precio base para tramo (ya con cupón si aplica)
- */
-function calcularComisionBaseParaCampoComision(
-  string $rolVendedor,
-  bool   $esCombo,
-  bool   $esModem,
-  float  $precioBase
-): float {
-  if ($rolVendedor === 'Gerente') {
-    // Para `comision`, si vende Gerente: usa tabla de Gerente (incluye módem y combos)
-    return comisionTramoGerente($precioBase, $esModem);
-  }
-
-  // Ejecutivo
-  if ($esCombo) return 75.0;       // combo fijo para Ejecutivo
-  if ($esModem) return 50.0;       // módem Ejecutivo
+function calcularComisionBaseParaCampoComision(string $rolVendedor, bool $esCombo, bool $esModem, float $precioBase): float
+{
+  if ($rolVendedor === 'Gerente') return comisionTramoGerente($precioBase, $esModem);
+  if ($esCombo) return 75.0;
+  if ($esModem) return 50.0;
   return comisionTramoEjecutivo($precioBase);
 }
 
-/** Comisión para `comision_gerente`:
- *  - Combo: 75 fijo
- *  - No combo: tabla de Gerente por precio base / módem
- */
-function calcularComisionGerenteParaCampo(
-  bool $esCombo,
-  bool $esModem,
-  float $precioBase
-): float {
+function calcularComisionGerenteParaCampo(bool $esCombo, bool $esModem, float $precioBase): float
+{
   if ($esCombo) return 75.0;
-  return comisionTramoGerente($precioBase, $isModem = $esModem);
+  return comisionTramoGerente($precioBase, $esModem);
 }
 
-/** Comisión especial por producto según catálogo (se suma SOLO a `comision`) */
-function obtenerComisionEspecial(int $id_producto, mysqli $conn, string $colTipoProd): float {
+function obtenerComisionEspecial(int $id_producto, mysqli $conn, string $colTipoProd): float
+{
   $hoy = date('Y-m-d');
 
   $stmt = $conn->prepare("
@@ -230,8 +232,8 @@ function obtenerComisionEspecial(int $id_producto, mysqli $conn, string $colTipo
   return (float)($res['monto'] ?? 0);
 }
 
-/** Verifica inventario disponible en la sucursal seleccionada */
-function validarInventario(mysqli $conn, int $id_inv, int $id_sucursal): bool {
+function validarInventario(mysqli $conn, int $id_inv, int $id_sucursal): bool
+{
   $stmt = $conn->prepare("
     SELECT COUNT(*) FROM inventario
     WHERE id=? AND estatus='Disponible' AND id_sucursal=?
@@ -244,15 +246,241 @@ function validarInventario(mysqli $conn, int $id_inv, int $id_sucursal): bool {
   return (int)$ok > 0;
 }
 
+/* ========================
+   Promo Regalo helpers
+======================== */
+function obtenerCodigoProductoPorInventario(mysqli $conn, int $idInventario): string
+{
+  $st = $conn->prepare("
+    SELECT p.codigo_producto
+    FROM inventario i
+    INNER JOIN productos p ON p.id = i.id_producto
+    WHERE i.id = ?
+    LIMIT 1
+  ");
+  $st->bind_param("i", $idInventario);
+  $st->execute();
+  $row = $st->get_result()->fetch_assoc();
+  $st->close();
+
+  return strtoupper(trim((string)($row['codigo_producto'] ?? '')));
+}
+
+function getColEstadoPromos(mysqli $conn): string
+{
+  $hasActiva = false;
+  $hasActivo = false;
+
+  $chk = $conn->query("SHOW COLUMNS FROM promos_regalo LIKE 'activa'");
+  if ($chk && $chk->num_rows > 0) $hasActiva = true;
+
+  $chk2 = $conn->query("SHOW COLUMNS FROM promos_regalo LIKE 'activo'");
+  if ($chk2 && $chk2->num_rows > 0) $hasActivo = true;
+
+  if ($hasActiva) return 'pr.activa';
+  if ($hasActivo) return 'pr.activo';
+  return '1';
+}
+
+function buscarPromoRegaloActivaPorInventario(mysqli $conn, int $idInventario): ?array
+{
+  $hoy = date('Y-m-d');
+  $codigo = obtenerCodigoProductoPorInventario($conn, $idInventario);
+  if ($codigo === '') return null;
+
+  $colEstado = getColEstadoPromos($conn);
+
+  $sql = "
+    SELECT pr.id, pr.nombre
+    FROM promos_regalo pr
+    INNER JOIN promos_regalo_principales pp ON pp.id_promo = pr.id
+    WHERE ($colEstado = 1)
+      AND pr.fecha_inicio <= ?
+      AND pr.fecha_fin >= ?
+      AND UPPER(TRIM(pp.codigo_producto_principal)) = ?
+    LIMIT 1
+  ";
+  $st2 = $conn->prepare($sql);
+  $st2->bind_param("sss", $hoy, $hoy, $codigo);
+  $st2->execute();
+  $promo = $st2->get_result()->fetch_assoc();
+  $st2->close();
+
+  if (!$promo) return null;
+
+  return [
+    'id' => (int)$promo['id'],
+    'nombre' => (string)($promo['nombre'] ?? ''),
+    'codigo_producto' => $codigo
+  ];
+}
+
+function validarRegaloElegible(mysqli $conn, int $inventarioRegalo): bool
+{
+  if (!columnExists($conn, 'productos', 'promocion')) return false;
+  $needle = 'exclusivo en combo con un equipo financiado';
+
+  $st = $conn->prepare("
+    SELECT COALESCE(p.promocion,'') AS promo_txt
+    FROM inventario i
+    INNER JOIN productos p ON p.id = i.id_producto
+    WHERE i.id = ?
+    LIMIT 1
+  ");
+  $st->bind_param("i", $inventarioRegalo);
+  $st->execute();
+  $r = $st->get_result()->fetch_assoc();
+  $st->close();
+
+  $txt = trim((string)($r['promo_txt'] ?? ''));
+  if ($txt === '') return false;
+
+  if (function_exists('mb_strtolower')) $txt = mb_strtolower($txt, 'UTF-8');
+  else $txt = strtolower($txt);
+  return (strpos($txt, $needle) !== false);
+}
+
+/* ========================
+   Promo Descuento helpers
+======================== */
+function buscarPromoDescuentoActivaPorCodigoPrincipal(mysqli $conn, string $codigoPrincipal, string $financiera = ''): ?array
+{
+  if (!tableExists($conn, 'promos_equipos_descuento')) return null;
+  if (!tableExists($conn, 'promos_equipos_descuento_principal')) return null;
+
+  $hoy = date('Y-m-d');
+  $codigoPrincipal = strtoupper(trim($codigoPrincipal));
+  if ($codigoPrincipal === '') return null;
+
+  $financiera = trim($financiera);
+
+  $sql = "
+    SELECT 
+      pr.id,
+      pr.nombre,
+      pr.porcentaje_descuento,
+      pr.tipo_precio_combo,
+      pr.precio_combo_fijo,
+      pr.financiera,
+      pr.permite_combo,
+      pr.permite_doble_venta
+    FROM promos_equipos_descuento pr
+    INNER JOIN promos_equipos_descuento_principal pp ON pp.promo_id = pr.id
+    WHERE pr.activa = 1
+      AND (pr.fecha_inicio IS NULL OR pr.fecha_inicio <= ?)
+      AND (pr.fecha_fin    IS NULL OR pr.fecha_fin    >= ?)
+      AND pp.activo = 1
+      AND UPPER(TRIM(pp.codigo_producto)) = ?
+      AND (
+      pr.financiera IS NULL
+      OR TRIM(pr.financiera) = ''
+      OR UPPER(TRIM(pr.financiera)) = UPPER(TRIM(?))
+    )
+    ORDER BY pr.id DESC
+    LIMIT 1
+  ";
+
+  $st = $conn->prepare($sql);
+  $st->bind_param("ssss", $hoy, $hoy, $codigoPrincipal, $financiera);
+  $st->execute();
+  $row = $st->get_result()->fetch_assoc();
+  $st->close();
+
+  if (!$row) return null;
+
+  return [
+    'id' => (int)$row['id'],
+    'nombre' => (string)($row['nombre'] ?? ''),
+    'porcentaje' => (float)($row['porcentaje_descuento'] ?? 0),
+    'tipo_precio' => (string)($row['tipo_precio_combo'] ?? 'porcentaje'),
+    'precio_fijo' => (float)($row['precio_combo_fijo'] ?? 0),
+    'financiera' => (string)($row['financiera'] ?? ''),
+    'permite_combo' => (int)($row['permite_combo'] ?? 0),
+    'permite_doble_venta' => (int)($row['permite_doble_venta'] ?? 0),
+  ];
+}
+
+function validarInventarioEnListaComboPromo(mysqli $conn, int $promoId, int $idInventarioCombo): bool
+{
+  if ($promoId <= 0 || $idInventarioCombo <= 0) return false;
+  if (!tableExists($conn, 'promos_equipos_descuento_combo')) return false;
+
+  $codigo = obtenerCodigoProductoPorInventario($conn, $idInventarioCombo);
+  if ($codigo === '') return false;
+
+  $sql = "
+    SELECT 1
+    FROM promos_equipos_descuento_combo
+    WHERE promo_id = ? AND activo = 1 AND UPPER(TRIM(codigo_producto)) = ?
+    LIMIT 1
+  ";
+  $st = $conn->prepare($sql);
+  $st->bind_param("is", $promoId, $codigo);
+  $st->execute();
+  $ok = $st->get_result()->num_rows > 0;
+  $st->close();
+  return $ok;
+}
+
+function precioListaPorInventario(mysqli $conn, int $idInventario): float
+{
+  $st = $conn->prepare("
+    SELECT COALESCE(p.precio_lista,0) AS precio_lista
+    FROM inventario i
+    INNER JOIN productos p ON p.id = i.id_producto
+    WHERE i.id = ?
+    LIMIT 1
+  ");
+  $st->bind_param("i", $idInventario);
+  $st->execute();
+  $row = $st->get_result()->fetch_assoc();
+  $st->close();
+  return (float)($row['precio_lista'] ?? 0);
+}
+
+function obtenerCodigoPrincipalPorTag(mysqli $conn, string $tag): ?string
+{
+  $tag = trim($tag);
+  if ($tag === '') return null;
+
+  $tieneEsCombo = columnExists($conn, 'detalle_venta', 'es_combo');
+
+  if ($tieneEsCombo) {
+    $sql = "
+      SELECT UPPER(TRIM(p.codigo_producto)) AS codigo
+      FROM ventas v
+      INNER JOIN detalle_venta d ON d.id_venta = v.id
+      INNER JOIN productos p ON p.id = d.id_producto
+      WHERE v.tag = ?
+        AND (d.es_combo = 0 OR d.es_combo IS NULL)
+      ORDER BY d.id ASC
+      LIMIT 1
+    ";
+  } else {
+    $sql = "
+      SELECT UPPER(TRIM(p.codigo_producto)) AS codigo
+      FROM ventas v
+      INNER JOIN detalle_venta d ON d.id_venta = v.id
+      INNER JOIN productos p ON p.id = d.id_producto
+      WHERE v.tag = ?
+      ORDER BY d.id ASC
+      LIMIT 1
+    ";
+  }
+
+  $st = $conn->prepare($sql);
+  $st->bind_param("s", $tag);
+  $st->execute();
+  $row = $st->get_result()->fetch_assoc();
+  $st->close();
+
+  $codigo = strtoupper(trim((string)($row['codigo'] ?? '')));
+  return $codigo !== '' ? $codigo : null;
+}
+
 /**
- * Registra un renglón de venta (principal o combo) en detalle_venta
- * y actualiza inventario.
- *
- * ⚠️ $montoCuponAplicable:
- *    - Para el equipo principal: monto del cupón de la venta.
- *    - Para combos u otros equipos: 0.0 (no se descuenta nada).
- *
- * Devuelve la comisión TOTAL del renglón (base + especial).
+ * Registra un renglón en detalle_venta + actualiza inventario.
+ * - $overridePrecioUnitario: si se manda, se guarda ese precio_unitario y se usa para el tramo de comisión.
  */
 function venderEquipo(
   mysqli $conn,
@@ -260,14 +488,15 @@ function venderEquipo(
   int $id_inventario,
   bool $esCombo,
   string $rolVendedor,
-  string $tipoVenta, // compatibilidad
   bool $tieneEsCombo,
   bool $tieneComisionGerente,
   string $colTipoProd,
-  float $montoCuponAplicable = 0.0
+  float $montoCuponAplicable = 0.0,
+  bool $forceZero = false,
+  bool $esRegalo = false,
+  ?float $overridePrecioUnitario = null
 ): float {
 
-  // 1) Traer datos del producto
   $sql = "
     SELECT i.id_producto,
            p.imei1,
@@ -287,56 +516,78 @@ function venderEquipo(
   $stmtProd->execute();
   $row = $stmtProd->get_result()->fetch_assoc();
   $stmtProd->close();
-  if (!$row) {
-    throw new RuntimeException("El equipo $id_inventario no está disponible.");
-  }
+
+  if (!$row) throw new RuntimeException("El equipo $id_inventario no está disponible.");
 
   $precioLista = (float)$row['precio_lista'];
   $esModem     = esMiFiModem($row);
 
-  // 1.1) Precio base para tramo de comisión:
-  //      si hay cupón aplicable, se descuenta del precio de lista del equipo.
-  $precioBaseComision = $precioLista;
+  $precioUnitario = ($overridePrecioUnitario !== null) ? (float)$overridePrecioUnitario : $precioLista;
+
+  $precioBaseComision = $precioUnitario;
   if ($montoCuponAplicable > 0) {
-    $precioBaseComision = $precioLista - $montoCuponAplicable;
-    if ($precioBaseComision < 0) {
-      $precioBaseComision = 0.0;
-    }
+    $precioBaseComision -= $montoCuponAplicable;
+    if ($precioBaseComision < 0) $precioBaseComision = 0.0;
   }
 
-  // 2) Calcular comisiones base con el PRECIO BASE (lista o lista - cupón)
+  if ($forceZero) {
+    $precioUnitario = 0.0;
+    $precioBaseComision = 0.0;
+  }
+
   $comisionBase        = calcularComisionBaseParaCampoComision($rolVendedor, $esCombo, $esModem, $precioBaseComision);
   $comisionGerenteBase = calcularComisionGerenteParaCampo($esCombo, $esModem, $precioBaseComision);
 
-  // ⚠️ Ajuste: si vende GERENTE, forzar comision_gerente = 0
-  if ($rolVendedor === 'Gerente') {
+  if ($rolVendedor === 'Gerente') $comisionGerenteBase = 0.0;
+
+  $comEsp = obtenerComisionEspecial((int)$row['id_producto'], $conn, $colTipoProd);
+  if ($forceZero) {
+    $comisionBase = 0.0;
     $comisionGerenteBase = 0.0;
+    $comEsp = 0.0;
   }
 
-  // 3) Comisión especial (solo suma a `comision`)
-  $comEsp = obtenerComisionEspecial((int)$row['id_producto'], $conn, $colTipoProd);
+  $comisionRegular = $comisionBase;
+  $comisionTotal   = $comisionBase + $comEsp;
 
-  // 4) Totales a guardar
-  $comisionRegular = $comisionBase;           // base sin especial
-  $comisionTotal   = $comisionBase + $comEsp; // `comision`
+  $tieneEsRegalo = columnExists($conn, 'detalle_venta', 'es_regalo');
+  $esComboInt    = $esCombo ? 1 : 0;
+  $esRegaloInt   = ($tieneEsRegalo && $esRegalo) ? 1 : 0;
 
-  // 5) INSERT en detalle_venta con las columnas disponibles
-  //    Guardamos como precio_unitario el PRECIO BASE usado para la comisión
-  if ($tieneEsCombo && $tieneComisionGerente) {
+  if ($tieneEsRegalo && $tieneEsCombo && $tieneComisionGerente) {
+    $stmtD = $conn->prepare("
+      INSERT INTO detalle_venta
+        (id_venta, id_producto, es_combo, es_regalo, imei1, precio_unitario,
+         comision, comision_regular, comision_especial, comision_gerente)
+      VALUES (?,?,?,?,?,?,?,?,?,?)
+    ");
+    $stmtD->bind_param(
+      "iiiisddddd",
+      $id_venta,
+      $row['id_producto'],
+      $esComboInt,
+      $esRegaloInt,
+      $row['imei1'],
+      $precioUnitario,
+      $comisionTotal,
+      $comisionRegular,
+      $comEsp,
+      $comisionGerenteBase
+    );
+  } elseif ($tieneEsCombo && $tieneComisionGerente) {
     $stmtD = $conn->prepare("
       INSERT INTO detalle_venta
         (id_venta, id_producto, es_combo, imei1, precio_unitario,
          comision, comision_regular, comision_especial, comision_gerente)
       VALUES (?,?,?,?,?,?,?,?,?)
     ");
-    $esComboInt = $esCombo ? 1 : 0;
     $stmtD->bind_param(
       "iiisddddd",
       $id_venta,
       $row['id_producto'],
       $esComboInt,
       $row['imei1'],
-      $precioBaseComision,
+      $precioUnitario,
       $comisionTotal,
       $comisionRegular,
       $comEsp,
@@ -354,7 +605,7 @@ function venderEquipo(
       $id_venta,
       $row['id_producto'],
       $row['imei1'],
-      $precioBaseComision,
+      $precioUnitario,
       $comisionTotal,
       $comisionRegular,
       $comEsp,
@@ -367,14 +618,13 @@ function venderEquipo(
          comision, comision_regular, comision_especial)
       VALUES (?,?,?,?,?,?,?,?)
     ");
-    $esComboInt = $esCombo ? 1 : 0;
     $stmtD->bind_param(
       "iiisdddd",
       $id_venta,
       $row['id_producto'],
       $esComboInt,
       $row['imei1'],
-      $precioBaseComision,
+      $precioUnitario,
       $comisionTotal,
       $comisionRegular,
       $comEsp
@@ -391,7 +641,7 @@ function venderEquipo(
       $id_venta,
       $row['id_producto'],
       $row['imei1'],
-      $precioBaseComision,
+      $precioUnitario,
       $comisionTotal,
       $comisionRegular,
       $comEsp
@@ -401,7 +651,6 @@ function venderEquipo(
   $stmtD->execute();
   $stmtD->close();
 
-  // 6) Marcar inventario como vendido
   $stmtU = $conn->prepare("UPDATE inventario SET estatus='Vendido' WHERE id=?");
   $stmtU->bind_param("i", $id_inventario);
   $stmtU->execute();
@@ -415,9 +664,9 @@ function venderEquipo(
 ======================== */
 $id_usuario   = (int)($_SESSION['id_usuario']);
 $rol_usuario  = (string)($_SESSION['rol'] ?? 'Ejecutivo');
-$id_sucursal  = isset($_POST['id_sucursal']) ? (int)$_POST['id_sucursal'] : (int)$_SESSION['id_sucursal'];
+$esRolSubdis  = ($rol_usuario === 'Subdistribuidor') || (strpos($rol_usuario, 'Subdis_') === 0);
+$id_sucursal  = isset($_POST['id_sucursal']) ? (int)$_POST['id_sucursal'] : (int)($_SESSION['id_sucursal'] ?? 0);
 
-// 🔹 nuevo: id_cliente viene oculto desde nueva_venta.php
 $id_cliente   = isset($_POST['id_cliente']) ? (int)$_POST['id_cliente'] : 0;
 
 $tag                 = trim($_POST['tag'] ?? '');
@@ -425,63 +674,327 @@ $nombre_cliente      = trim($_POST['nombre_cliente'] ?? '');
 $telefono_cliente    = trim($_POST['telefono_cliente'] ?? '');
 $tipo_venta          = $_POST['tipo_venta'] ?? '';
 $equipo1             = (int)($_POST['equipo1'] ?? 0);
-$equipo2             = isset($_POST['equipo2']) ? (int)$_POST['equipo2'] : 0;
+$equipo2             = isset($_POST['equipo2']) ? (int)($_POST['equipo2'] ?? 0) : 0;
 $precio_venta        = (float)($_POST['precio_venta'] ?? 0);
 $enganche            = (float)($_POST['enganche'] ?? 0);
 $forma_pago_enganche = $_POST['forma_pago_enganche'] ?? '';
 $enganche_efectivo   = (float)($_POST['enganche_efectivo'] ?? 0);
 $enganche_tarjeta    = (float)($_POST['enganche_tarjeta'] ?? 0);
 $plazo_semanas       = (int)($_POST['plazo_semanas'] ?? 0);
+$pago_semanal        = isset($_POST['pago_semanal']) ? (float)$_POST['pago_semanal'] : 0.0;
+$primer_pago         = trim((string)($_POST['primer_pago'] ?? ''));
 $financiera          = $_POST['financiera'] ?? '';
 $comentarios         = trim($_POST['comentarios'] ?? '');
 
-// 🔹 Cupón de la venta
-$monto_cupon = isset($_POST['monto_cupon']) ? (float)$_POST['monto_cupon'] : 0.0;
-if ($monto_cupon < 0) {
-  $monto_cupon = 0.0;
+// Cupón por equipo
+$monto_cupon_principal = isset($_POST['monto_cupon_principal']) ? (float)$_POST['monto_cupon_principal'] : 0.0;
+$monto_cupon_combo     = isset($_POST['monto_cupon_combo']) ? (float)$_POST['monto_cupon_combo'] : 0.0;
+$monto_cupon_total_in  = isset($_POST['monto_cupon']) ? (float)$_POST['monto_cupon'] : 0.0;
+
+if ($monto_cupon_principal < 0) $monto_cupon_principal = 0.0;
+if ($monto_cupon_combo < 0)     $monto_cupon_combo = 0.0;
+if ($monto_cupon_total_in < 0)  $monto_cupon_total_in = 0.0;
+
+// Si el front mandó separados, usamos suma real. Si no, compat con flujo viejo.
+$monto_cupon = $monto_cupon_principal + $monto_cupon_combo;
+if ($monto_cupon <= 0 && $monto_cupon_total_in > 0) {
+  $monto_cupon = $monto_cupon_total_in;
+  $monto_cupon_principal = $monto_cupon_total_in;
+  $monto_cupon_combo = 0.0;
 }
 $cupon_aplicado = $monto_cupon > 0 ? 1 : 0;
 
-$esFin   = in_array($tipo_venta, ['Financiamiento','Financiamiento+Combo'], true);
+// Promo flags
+$promo_regalo_aplicado = isset($_POST['promo_regalo_aplicado']) ? (int)$_POST['promo_regalo_aplicado'] : 0;
+
+// Promo descuento (tolerante a nombres)
+$promo_descuento_aplicado = 0;
+if (isset($_POST['promo_descuento_aplicado'])) $promo_descuento_aplicado = (int)$_POST['promo_descuento_aplicado'];
+if (isset($_POST['promo_desc_aplicado']))      $promo_descuento_aplicado = (int)$_POST['promo_desc_aplicado'];
+
+$promo_descuento_id = 0;
+if (isset($_POST['promo_descuento_id'])) $promo_descuento_id = (int)$_POST['promo_descuento_id'];
+if (isset($_POST['id_promo_descuento'])) $promo_descuento_id = (int)$_POST['id_promo_descuento'];
+
+$tag_origen_descuento = '';
+if (isset($_POST['tag_origen_descuento'])) $tag_origen_descuento = trim((string)$_POST['tag_origen_descuento']);
+if (isset($_POST['promo_descuento_tag_origen'])) $tag_origen_descuento = trim((string)$_POST['promo_descuento_tag_origen']);
+
+$es_doble_venta_descuento = 0;
+if (isset($_POST['promo_descuento_doble_venta'])) $es_doble_venta_descuento = (int)$_POST['promo_descuento_doble_venta'];
+if (isset($_POST['promo_desc_doble_venta']))      $es_doble_venta_descuento = (int)$_POST['promo_desc_doble_venta'];
+
+// ✅ Fallback: si el front no mandó el flag pero viene TAG origen y la venta es Financiamiento (sin equipo2),
+// asumimos que es "segunda venta" para evitar que se dispare la validación de combo.
+if (
+  $es_doble_venta_descuento !== 1
+  && $tag_origen_descuento !== ''
+  && ($tipo_venta ?? '') === 'Financiamiento'
+  && (int)$equipo2 <= 0
+) {
+  $es_doble_venta_descuento = 1;
+}
+
+/* ========================
+   Guard: Bloqueo de promos para roles Subdis_*
+   - Las promos SOLO se bloquean a Subdis_* (admin/gerente/ejecutivo)
+   - No afecta a roles LUGA
+======================== */
+require_once __DIR__ . '/promos_guard.php';
+
+$__promo_err_exclusividad = '';
+$__promo_err_doble_promo  = '';
+
+if (function_exists('subdis_bloquea_promos_luga') && subdis_bloquea_promos_luga()) {
+  // Ignora TODO lo relacionado a promos si es Subdis_*
+  $promo_regalo_aplicado     = 0;
+  $promo_descuento_aplicado  = 0;
+  $promo_descuento_id        = 0;
+  $tag_origen_descuento      = '';
+  $es_doble_venta_descuento  = 0;
+
+  // Limpia también inputs auxiliares (compat / logs)
+  if (isset($_POST['promo_regalo_id'])) $_POST['promo_regalo_id'] = 0;
+  if (isset($_POST['id_promo_regalo'])) $_POST['id_promo_regalo'] = 0;
+  if (isset($_POST['promo_descuento_modo'])) $_POST['promo_descuento_modo'] = '';
+} else {
+  // Regla: Cupón vs Promo (mutuamente excluyentes)
+  if ($monto_cupon > 0 && ($promo_regalo_aplicado === 1 || $promo_descuento_aplicado === 1)) {
+    $__promo_err_exclusividad = "No puedes aplicar CUPÓN y PROMO en la misma venta. Elige solo uno.";
+  }
+
+  if ($promo_regalo_aplicado === 1 && $promo_descuento_aplicado === 1) {
+    $__promo_err_doble_promo = "No puedes aplicar dos PROMOS a la vez (regalo y descuento).";
+  }
+}
+
+// Si hay promo (regalo o descuento), forzamos cupón a 0 para evitar descuentos dobles.
+if (($promo_regalo_aplicado === 1 || $promo_descuento_aplicado === 1)) {
+  $monto_cupon = 0.0;
+  $monto_cupon_principal = 0.0;
+  $monto_cupon_combo = 0.0;
+  $cupon_aplicado = 0;
+}
+
 $errores = [];
 
-// Reglas
-if (!$tipo_venta)                                 $errores[] = "Selecciona el tipo de venta.";
-if ($precio_venta <= 0)                           $errores[] = "El precio de venta debe ser mayor a 0.";
-if (!$forma_pago_enganche)                        $errores[] = "Selecciona la forma de pago.";
-if ($equipo1 <= 0)                                $errores[] = "Selecciona el equipo principal.";
+// Exclusividad cupón vs promos
+if (!empty($__promo_err_exclusividad)) $errores[] = $__promo_err_exclusividad;
+if (!empty($__promo_err_doble_promo))  $errores[] = $__promo_err_doble_promo;
 
-// Reglas para Financiamiento / Combo
+// Base
+if (!$tipo_venta)            $errores[] = "Selecciona el tipo de venta.";
+if ($precio_venta <= 0)      $errores[] = "El precio de venta debe ser mayor a 0.";
+if (!$forma_pago_enganche)   $errores[] = "Selecciona la forma de pago.";
+if ($equipo1 <= 0)           $errores[] = "Selecciona el equipo principal.";
+if ($id_cliente <= 0)        $errores[] = "Debes seleccionar un cliente antes de registrar la venta.";
+
+if ($equipo1 && !validarInventario($conn, $equipo1, $id_sucursal)) {
+  $errores[] = "El equipo principal no está disponible en la sucursal seleccionada.";
+}
+
+/* ========================
+   Promo Regalo (backend seguro)
+======================== */
+$promoActiva = null;
+$promo_id_final = null;
+$promo_nombre_final = '';
+
+if ($promo_regalo_aplicado === 1) {
+  $promoActiva = buscarPromoRegaloActivaPorInventario($conn, $equipo1);
+
+  if (!$promoActiva) {
+    $errores[] = "La promo de regalo ya no está activa para el equipo principal.";
+  } else {
+    $promo_id_final = (int)$promoActiva['id'];
+    $promo_nombre_final = (string)$promoActiva['nombre'];
+
+    if ($tipo_venta !== 'Financiamiento+Combo') $errores[] = "Para aplicar promo regalo, la venta debe ser Financiamiento+Combo.";
+    if ($equipo2 <= 0) $errores[] = "Para promo regalo debes seleccionar un equipo combo.";
+
+    if ($equipo2 > 0) {
+      if ($equipo2 === $equipo1) $errores[] = "El equipo combo (regalo) no puede ser el mismo que el principal.";
+      if (!validarInventario($conn, $equipo2, $id_sucursal)) {
+        $errores[] = "El equipo combo no está disponible en la sucursal seleccionada.";
+      } elseif (!validarRegaloElegible($conn, $equipo2)) {
+        $errores[] = "El equipo seleccionado como regalo no es elegible para esta promo.";
+      }
+    }
+  }
+}
+
+/* ========================
+   Promo Descuento (backend seguro)
+======================== */
+$promoDesc = null;
+$porcDesc  = 0.0;
+$precioComboConDesc = null;
+$precioPrincipalConDesc = null;
+$promo_desc_nombre = '';
+
+if ($promo_regalo_aplicado !== 1 && $promo_descuento_aplicado === 1) {
+
+  if ($es_doble_venta_descuento === 1) {
+    if ($tag_origen_descuento === '') {
+      $errores[] = "Para aplicar descuento en segunda venta, debes capturar el TAG origen.";
+    } else {
+      $codigoPrincipalOrigen = obtenerCodigoPrincipalPorTag($conn, $tag_origen_descuento);
+      if (!$codigoPrincipalOrigen) {
+        $errores[] = "No se encontró un equipo principal en el TAG origen (o el TAG no existe).";
+      } else {
+        $promoDesc = buscarPromoDescuentoActivaPorCodigoPrincipal($conn, $codigoPrincipalOrigen, $financiera);
+        if (!$promoDesc) {
+          $errores[] = "El TAG origen no corresponde a una promo activa de descuento.";
+        } else {
+          if ((int)$promoDesc['permite_doble_venta'] !== 1) $errores[] = "La promo activa no permite aplicarse como segunda venta.";
+
+          $porcDesc = (float)$promoDesc['porcentaje'];
+          $promo_desc_nombre = (string)$promoDesc['nombre'];
+
+          if ($tipo_venta !== 'Financiamiento') $errores[] = "La segunda venta con descuento debe registrarse como Financiamiento.";
+
+          if (!validarInventarioEnListaComboPromo($conn, (int)$promoDesc['id'], $equipo1)) {
+            $errores[] = "El equipo seleccionado no es elegible como segundo equipo con descuento para esta promo.";
+          } else {
+            $precioLista = precioListaPorInventario($conn, $equipo1);
+            $precioPrincipalConDesc = $precioLista * (1 - ($porcDesc / 100));
+            if ($precioPrincipalConDesc < 0) $precioPrincipalConDesc = 0.0;
+          }
+        }
+      }
+    }
+  } else {
+    if ($tipo_venta !== 'Financiamiento+Combo') $errores[] = "Para aplicar descuento en combo, la venta debe ser Financiamiento+Combo.";
+    if ($equipo2 <= 0) $errores[] = "Para aplicar descuento en combo, debes seleccionar el equipo combo.";
+
+    if ($equipo2 > 0) {
+      if ($equipo2 === $equipo1) $errores[] = "El equipo combo debe ser distinto del principal.";
+      if (!validarInventario($conn, $equipo2, $id_sucursal)) {
+        $errores[] = "El equipo combo no está disponible en la sucursal seleccionada.";
+      } else {
+        $codigoPrincipal = obtenerCodigoProductoPorInventario($conn, $equipo1);
+        $promoDesc = buscarPromoDescuentoActivaPorCodigoPrincipal($conn, $codigoPrincipal, $financiera);
+        if (!$promoDesc) {
+          $errores[] = "El equipo principal no tiene una promo activa de descuento.";
+        } else {
+          if ((int)$promoDesc['permite_combo'] !== 1) $errores[] = "La promo activa no permite aplicarse en combo dentro de la misma venta.";
+          if ($promo_descuento_id > 0 && (int)$promoDesc['id'] !== (int)$promo_descuento_id) {
+            $errores[] = "La promo seleccionada ya no coincide con la promo activa para el equipo principal.";
+          }
+          $porcDesc = (float)$promoDesc['porcentaje'];
+          $promo_desc_nombre = (string)$promoDesc['nombre'];
+
+          if (!validarInventarioEnListaComboPromo($conn, (int)$promoDesc['id'], $equipo2)) {
+            $errores[] = "El equipo combo seleccionado no es elegible para el descuento de esta promo.";
+          } else {
+            $precioListaCombo = precioListaPorInventario($conn, $equipo2);
+
+            if (($promoDesc['tipo_precio'] ?? '') === 'precio_fijo' && $promoDesc['precio_fijo'] > 0) {
+              // 🔥 NUEVA PROMO PRECIO FIJO
+              $precioComboConDesc = (float)$promoDesc['precio_fijo'];
+            } else {
+              // 🔁 PROMO NORMAL (porcentaje)
+              $precioComboConDesc = $precioListaCombo * (1 - ($porcDesc / 100));
+            }
+
+            if ($precioComboConDesc < 0) $precioComboConDesc = 0.0;
+          }
+        }
+      }
+    }
+  }
+}
+
+// Combo normal si no hay promos
+if ($promo_regalo_aplicado !== 1 && $promo_descuento_aplicado !== 1 && $tipo_venta === 'Financiamiento+Combo') {
+  if ($equipo2 <= 0) $errores[] = "Selecciona el equipo combo.";
+  if ($equipo2 > 0) {
+    if ($equipo2 === $equipo1) $errores[] = "El equipo combo no puede ser el mismo que el principal.";
+    if (!validarInventario($conn, $equipo2, $id_sucursal)) $errores[] = "El equipo combo no está disponible en la sucursal seleccionada.";
+  }
+}
+
+$esFin = in_array($tipo_venta, ['Financiamiento', 'Financiamiento+Combo'], true);
+
 if ($esFin) {
-  if ($nombre_cliente === '')                     $errores[] = "Nombre del cliente es obligatorio.";
+  if ($nombre_cliente === '') $errores[] = "Nombre del cliente es obligatorio.";
   if ($telefono_cliente === '' || !preg_match('/^\d{10}$/', $telefono_cliente)) $errores[] = "Teléfono del cliente debe tener 10 dígitos.";
-  if ($tag === '')                                $errores[] = "TAG (ID del crédito) es obligatorio.";
-  if ($enganche < 0)                              $errores[] = "El enganche no puede ser negativo (puede ser 0).";
-  if ($plazo_semanas <= 0)                        $errores[] = "El plazo en semanas debe ser mayor a 0.";
-  if ($financiera === '')                         $errores[] = "Selecciona una financiera (no puede ser N/A).";
+  if ($tag === '')            $errores[] = "TAG (ID del crédito) es obligatorio.";
+  if ($enganche < 0)          $errores[] = "El enganche no puede ser negativo (puede ser 0).";
+  if ($plazo_semanas <= 0)    $errores[] = "El plazo en semanas debe ser mayor a 0.";
+  if ($pago_semanal <= 0)     $errores[] = "El pago semanal debe ser mayor a 0.";
+  if ($primer_pago === '')    $errores[] = "Debes capturar la fecha del primer pago.";
+  if ($primer_pago !== '' && !esFechaYmdValida($primer_pago)) $errores[] = "La fecha del primer pago no es válida.";
+  if ($financiera === '')     $errores[] = "Selecciona una financiera (no puede ser N/A).";
 
   if ($forma_pago_enganche === 'Mixto') {
     if ($enganche_efectivo <= 0 && $enganche_tarjeta <= 0) $errores[] = "En pago Mixto, al menos uno de los montos debe ser > 0.";
     if (round($enganche_efectivo + $enganche_tarjeta, 2) !== round($enganche, 2)) $errores[] = "Efectivo + Tarjeta debe ser igual al Enganche.";
   }
 } else {
-  // Contado: normaliza campos
-  $tag               = '';
+  $tag               = generarTagContado($conn);
   $plazo_semanas     = 0;
+  $pago_semanal      = 0.0;
+  $primer_pago       = '';
   $financiera        = 'N/A';
   $enganche_efectivo = 0;
   $enganche_tarjeta  = 0;
 }
 
-// Validar inventarios disponibles en la sucursal seleccionada
-if ($equipo1 && !validarInventario($conn, $equipo1, $id_sucursal)) {
-  $errores[] = "El equipo principal no está disponible en la sucursal seleccionada.";
+/* Validaciones de cupón por flujo */
+if ($monto_cupon_principal > 0 && $equipo1 <= 0) {
+  $errores[] = "No se puede aplicar cupón al equipo principal porque no hay equipo principal seleccionado.";
 }
-if ($tipo_venta === 'Financiamiento+Combo') {
-  if ($equipo2 <= 0) {
-    $errores[] = "Selecciona el equipo combo.";
-  } else if (!validarInventario($conn, $equipo2, $id_sucursal)) {
-    $errores[] = "El equipo combo no está disponible en la sucursal seleccionada.";
+
+if ($monto_cupon_combo > 0 && $equipo2 <= 0) {
+  $errores[] = "No se puede aplicar cupón al equipo combo porque no hay equipo combo seleccionado.";
+}
+
+if ($monto_cupon_combo > 0 && $tipo_venta !== 'Financiamiento+Combo') {
+  $errores[] = "No se puede aplicar cupón al combo si la venta no es Financiamiento+Combo.";
+}
+
+/* Recalcular precio_venta */
+if (!$errores) {
+  $calc = 0.0;
+
+  if ($promo_regalo_aplicado === 1) {
+    $p1 = precioListaPorInventario($conn, $equipo1);
+    $calc = $p1; // combo regalo = 0
+  } elseif ($promo_descuento_aplicado === 1) {
+    if ($es_doble_venta_descuento === 1) {
+      if ($precioPrincipalConDesc !== null) {
+        $calc = (float)$precioPrincipalConDesc;
+      }
+    } else {
+      $p1 = precioListaPorInventario($conn, $equipo1);
+      $p2 = ($precioComboConDesc !== null) ? (float)$precioComboConDesc : 0.0;
+      $calc = $p1 + $p2;
+    }
+  } else {
+    $p1 = ($equipo1 > 0) ? precioListaPorInventario($conn, $equipo1) : 0.0;
+    $calc = $p1;
+
+    if ($tipo_venta === 'Financiamiento+Combo' && $equipo2 > 0) {
+      $precioLista2 = precioListaPorInventario($conn, $equipo2);
+
+      // Intentamos respetar precio combo si viene desde el option del front en el total enviado,
+      // pero en backend la referencia segura sigue siendo precio_lista cuando no hay columna dedicada.
+      // Como tu flujo previo ya operaba así para el principal, aquí mantenemos consistencia.
+      $calc += $precioLista2;
+    }
+  }
+
+  $calc -= $monto_cupon_principal;
+  $calc -= $monto_cupon_combo;
+  if ($calc < 0) $calc = 0.0;
+
+  // Para usuarios LUGA normales el total se recalcula automáticamente.
+  // Para roles Subdis_* se respeta el precio capturado manualmente.
+  if (!$esRolSubdis) {
+    if (abs($precio_venta - $calc) > 0.5) {
+      $precio_venta = $calc;
+    }
   }
 }
 
@@ -490,136 +1003,342 @@ if ($errores) {
   exit();
 }
 
-// 🔹 Saber si existe la columna ultima_compra en clientes (por compatibilidad)
+/* Propiedad */
+$propietario = 'LUGA';
+$id_subdis   = null;
+
+if ($esRolSubdis) {
+  $propietario = 'SUBDISTRIBUIDOR';
+
+  if (isset($_SESSION['id_subdis'])) {
+    $tmp = (int)$_SESSION['id_subdis'];
+    $id_subdis = $tmp > 0 ? $tmp : null;
+  } elseif (isset($_SESSION['id_subdistribuidor'])) {
+    $tmp = (int)$_SESSION['id_subdistribuidor'];
+    $id_subdis = $tmp > 0 ? $tmp : null;
+  }
+
+  if ($id_subdis === null) {
+    $colSub = null;
+    if (columnExists($conn, 'usuarios', 'id_subdis')) $colSub = 'id_subdis';
+    elseif (columnExists($conn, 'usuarios', 'id_subdistribuidor')) $colSub = 'id_subdistribuidor';
+
+    if ($colSub) {
+      $st = $conn->prepare("SELECT `$colSub` AS id_sub FROM usuarios WHERE id=? LIMIT 1");
+      $st->bind_param("i", $id_usuario);
+      $st->execute();
+      $ru = $st->get_result()->fetch_assoc();
+      $st->close();
+
+      $tmp = (int)($ru['id_sub'] ?? 0);
+      $id_subdis = $tmp > 0 ? $tmp : null;
+    }
+  }
+
+  if ($id_subdis === null) $propietario = 'LUGA';
+}
+
+// Columnas opcionales
 $tieneUltimaCompra   = columnExists($conn, 'clientes', 'ultima_compra');
-// 🔹 Nuevas columnas en ventas (cupón)
 $tieneMontoCupon     = columnExists($conn, 'ventas', 'monto_cupon');
 $tieneCuponAplicado  = columnExists($conn, 'ventas', 'cupon_aplicado');
+$tienePropietario    = columnExists($conn, 'ventas', 'propietario');
+$tieneIdSubdis       = columnExists($conn, 'ventas', 'id_subdis');
+
+$tienePromoAplicado  = columnExists($conn, 'ventas', 'promo_regalo_aplicado');
+$tienePromoId        = columnExists($conn, 'ventas', 'id_promo_regalo');
+$tienePromoNombre    = columnExists($conn, 'ventas', 'promo_regalo_nombre');
+
+$tienePromoDescAplicado = columnExists($conn, 'ventas', 'promo_descuento_aplicado');
+$tienePromoDescId       = columnExists($conn, 'ventas', 'id_promo_descuento');
+$tienePromoDescNombre   = columnExists($conn, 'ventas', 'promo_descuento_nombre');
+$tienePromoDescPorc     = columnExists($conn, 'ventas', 'promo_descuento_porcentaje');
+$tieneTagOrigenDesc     = columnExists($conn, 'ventas', 'tag_origen_descuento');
+$tieneEsDobleVentaDesc  = columnExists($conn, 'ventas', 'promo_descuento_doble_venta');
+
+$tienePagoSemanal       = columnExists($conn, 'ventas', 'pago_semanal');
+$tienePrimerPago        = columnExists($conn, 'ventas', 'primer_pago');
 
 /* ========================
-   2) Insertar Venta (TX)
+   Insertar Venta (TX)
 ======================== */
 try {
   $conn->begin_transaction();
 
-  $comisionInicial = 0.0;
+  $cols = [];
+  $vals = [];
+  $types = '';
+  $params = [];
 
-  // Si la tabla ventas ya tiene las columnas de cupón, las usamos
-  if ($tieneMontoCupon && $tieneCuponAplicado) {
-    $sqlVenta = "INSERT INTO ventas
-      (tag, nombre_cliente, telefono_cliente, id_cliente,
-       tipo_venta, precio_venta, monto_cupon, cupon_aplicado,
-       id_usuario, id_sucursal, comision,
-       enganche, forma_pago_enganche, enganche_efectivo, enganche_tarjeta,
-       plazo_semanas, financiera, comentarios)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+  $cols[] = "tag";
+  $vals[] = "?";
+  $types .= "s";
+  $params[] = $tag;
 
-    $stmtVenta = $conn->prepare($sqlVenta);
-    $stmtVenta->bind_param(
-      "sssisddiiiddsddiss",
-      $tag,
-      $nombre_cliente,
-      $telefono_cliente,
-      $id_cliente,
-      $tipo_venta,
-      $precio_venta,
-      $monto_cupon,
-      $cupon_aplicado,
-      $id_usuario,
-      $id_sucursal,
-      $comisionInicial,
-      $enganche,
-      $forma_pago_enganche,
-      $enganche_efectivo,
-      $enganche_tarjeta,
-      $plazo_semanas,
-      $financiera,
-      $comentarios
-    );
-  } else {
-    // Versión sin columnas de cupón (compatibilidad)
-    $sqlVenta = "INSERT INTO ventas
-      (tag, nombre_cliente, telefono_cliente, id_cliente,
-       tipo_venta, precio_venta, id_usuario, id_sucursal, comision,
-       enganche, forma_pago_enganche, enganche_efectivo, enganche_tarjeta,
-       plazo_semanas, financiera, comentarios)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+  $cols[] = "nombre_cliente";
+  $vals[] = "?";
+  $types .= "s";
+  $params[] = $nombre_cliente;
 
-    $stmtVenta = $conn->prepare($sqlVenta);
-    $stmtVenta->bind_param(
-      "sssisdiiddsddiss",
-      $tag,
-      $nombre_cliente,
-      $telefono_cliente,
-      $id_cliente,
-      $tipo_venta,
-      $precio_venta,
-      $id_usuario,
-      $id_sucursal,
-      $comisionInicial,
-      $enganche,
-      $forma_pago_enganche,
-      $enganche_efectivo,
-      $enganche_tarjeta,
-      $plazo_semanas,
-      $financiera,
-      $comentarios
-    );
+  $cols[] = "telefono_cliente";
+  $vals[] = "?";
+  $types .= "s";
+  $params[] = $telefono_cliente;
+
+  $cols[] = "id_cliente";
+  $vals[] = "?";
+  $types .= "i";
+  $params[] = $id_cliente;
+
+  $cols[] = "tipo_venta";
+  $vals[] = "?";
+  $types .= "s";
+  $params[] = $tipo_venta;
+
+  $cols[] = "precio_venta";
+  $vals[] = "?";
+  $types .= "d";
+  $params[] = $precio_venta;
+
+  if ($tieneMontoCupon) {
+    $cols[] = "monto_cupon";
+    $vals[] = "?";
+    $types .= "d";
+    $params[] = $monto_cupon;
   }
+  if ($tieneCuponAplicado) {
+    $cols[] = "cupon_aplicado";
+    $vals[] = "?";
+    $types .= "i";
+    $params[] = $cupon_aplicado;
+  }
+
+  if ($tienePromoAplicado) {
+    $cols[] = "promo_regalo_aplicado";
+    $vals[] = "?";
+    $types .= "i";
+    $params[] = $promo_regalo_aplicado;
+  }
+  if ($tienePromoId) {
+    $cols[] = "id_promo_regalo";
+    $vals[] = "?";
+    $types .= "i";
+    $params[] = (int)($promo_id_final ?? 0);
+  }
+  if ($tienePromoNombre) {
+    $cols[] = "promo_regalo_nombre";
+    $vals[] = "?";
+    $types .= "s";
+    $params[] = $promo_nombre_final;
+  }
+
+  if ($tienePromoDescAplicado) {
+    $cols[] = "promo_descuento_aplicado";
+    $vals[] = "?";
+    $types .= "i";
+    $params[] = $promo_descuento_aplicado;
+  }
+  if ($tienePromoDescId) {
+    $cols[] = "id_promo_descuento";
+    $vals[] = "?";
+    $types .= "i";
+
+    $promoIdFinal = 0;
+
+    if ($promoDesc && isset($promoDesc['id'])) {
+      $promoIdFinal = (int)$promoDesc['id'];
+    } elseif ($promo_descuento_id > 0) {
+      $promoIdFinal = (int)$promo_descuento_id;
+    }
+
+    $params[] = $promoIdFinal;
+  }
+  if ($tienePromoDescNombre) {
+    $cols[] = "promo_descuento_nombre";
+    $vals[] = "?";
+    $types .= "s";
+    $params[] = $promo_desc_nombre;
+  }
+  if ($tienePromoDescPorc) {
+    $cols[] = "promo_descuento_porcentaje";
+    $vals[] = "?";
+    $types .= "d";
+    $params[] = (float)($porcDesc ?? 0.0);
+  }
+  if ($tieneTagOrigenDesc) {
+    $cols[] = "tag_origen_descuento";
+    $vals[] = "?";
+    $types .= "s";
+    $params[] = $tag_origen_descuento;
+  }
+  if ($tieneEsDobleVentaDesc) {
+    $cols[] = "promo_descuento_doble_venta";
+    $vals[] = "?";
+    $types .= "i";
+    $params[] = $es_doble_venta_descuento;
+  }
+
+  if ($tienePropietario) {
+    $cols[] = "propietario";
+    $vals[] = "?";
+    $types .= "s";
+    $params[] = $propietario;
+  }
+  if ($tieneIdSubdis) {
+    $cols[] = "id_subdis";
+    $vals[] = "?";
+    $types .= "i";
+    $params[] = (int)($id_subdis ?? 0);
+  }
+
+  $cols[] = "id_usuario";
+  $vals[] = "?";
+  $types .= "i";
+  $params[] = $id_usuario;
+
+  $cols[] = "id_sucursal";
+  $vals[] = "?";
+  $types .= "i";
+  $params[] = $id_sucursal;
+
+  $cols[] = "comision";
+  $vals[] = "?";
+  $types .= "d";
+  $params[] = 0.0;
+
+  $cols[] = "enganche";
+  $vals[] = "?";
+  $types .= "d";
+  $params[] = $enganche;
+
+  $cols[] = "forma_pago_enganche";
+  $vals[] = "?";
+  $types .= "s";
+  $params[] = $forma_pago_enganche;
+
+  $cols[] = "enganche_efectivo";
+  $vals[] = "?";
+  $types .= "d";
+  $params[] = $enganche_efectivo;
+
+  $cols[] = "enganche_tarjeta";
+  $vals[] = "?";
+  $types .= "d";
+  $params[] = $enganche_tarjeta;
+
+  $cols[] = "plazo_semanas";
+  $vals[] = "?";
+  $types .= "i";
+  $params[] = $plazo_semanas;
+
+  if ($tienePagoSemanal) {
+    $cols[] = "pago_semanal";
+    $vals[] = "?";
+    $types .= "d";
+    $params[] = $pago_semanal;
+  }
+
+  if ($tienePrimerPago) {
+    $cols[] = "primer_pago";
+    $vals[] = "?";
+    $types .= "s";
+    $params[] = ($primer_pago !== '' ? $primer_pago : null);
+  }
+
+  $cols[] = "financiera";
+  $vals[] = "?";
+  $types .= "s";
+  $params[] = $financiera;
+
+  $cols[] = "comentarios";
+  $vals[] = "?";
+  $types .= "s";
+  $params[] = $comentarios;
+
+  $sqlVenta = "INSERT INTO ventas (" . implode(",", $cols) . ") VALUES (" . implode(",", $vals) . ")";
+  $stmtVenta = $conn->prepare($sqlVenta);
+
+  $bind = [];
+  $bind[] = $types;
+  for ($i = 0; $i < count($params); $i++) $bind[] = &$params[$i];
+  call_user_func_array([$stmtVenta, 'bind_param'], $bind);
 
   $stmtVenta->execute();
   $id_venta = (int)$stmtVenta->insert_id;
   $stmtVenta->close();
 
-  /* ========================
-     3) Registrar equipos (CAPTURA base)
-  ======================= */
+  /* Registrar equipos */
   $tieneEsCombo         = columnExists($conn, 'detalle_venta', 'es_combo');
   $tieneComisionGerente = columnExists($conn, 'detalle_venta', 'comision_gerente');
 
+  $overridePrincipal = null;
+  $overrideCombo = null;
+
+  // Subdis_* puede capturar manualmente el precio de venta total.
+  // Sin combo: todo el monto capturado se guarda en el principal.
+  // Con combo: tomamos el precio de lista del principal y el resto se asigna al combo.
+  if ($esRolSubdis && $promo_regalo_aplicado !== 1 && $promo_descuento_aplicado !== 1) {
+    if ($tipo_venta === 'Financiamiento+Combo' && $equipo2 > 0) {
+      $precioListaPrincipal = precioListaPorInventario($conn, $equipo1);
+      $overridePrincipal = (float)$precioListaPrincipal;
+      $overrideCombo = (float)$precio_venta - (float)$precioListaPrincipal;
+      if ($overrideCombo < 0) $overrideCombo = 0.0;
+    } else {
+      $overridePrincipal = (float)$precio_venta;
+    }
+  }
+
+  if ($promo_regalo_aplicado !== 1 && $promo_descuento_aplicado === 1 && $es_doble_venta_descuento === 1 && $precioPrincipalConDesc !== null) {
+    $overridePrincipal = (float)$precioPrincipalConDesc;
+  }
+
   $totalComision = 0.0;
 
-  // Principal: aquí SÍ se aplica el cupón a los tramos
+  // Principal
   $totalComision += venderEquipo(
     $conn,
     $id_venta,
     $equipo1,
-    false,                // esCombo
+    false,
     $rol_usuario,
-    $tipo_venta,
     $tieneEsCombo,
     $tieneComisionGerente,
     $colTipoProd,
-    $monto_cupon          // cupón aplicable SOLO al equipo principal
+    $monto_cupon_principal,
+    false,
+    false,
+    $overridePrincipal
   );
 
-  // Combo (si aplica): NO se aplica cupón
+  // Combo
   if ($tipo_venta === 'Financiamiento+Combo' && $equipo2) {
+    $esRegalo = ($promo_regalo_aplicado === 1);
+
+    if (!$esRegalo && $promo_descuento_aplicado === 1 && $precioComboConDesc !== null) {
+      $overrideCombo = (float)$precioComboConDesc;
+    }
+
     $totalComision += venderEquipo(
       $conn,
       $id_venta,
       $equipo2,
-      true,               // esCombo
+      true,
       $rol_usuario,
-      $tipo_venta,
       $tieneEsCombo,
       $tieneComisionGerente,
       $colTipoProd,
-      0.0                 // sin cupón para combo
+      $monto_cupon_combo,
+      $esRegalo,
+      $esRegalo,
+      $overrideCombo
     );
   }
 
-  /* ========================
-     4) Actualizar venta (total de comisiones)
-  ======================= */
   $stmtUpd = $conn->prepare("UPDATE ventas SET comision=? WHERE id=?");
   $stmtUpd->bind_param("di", $totalComision, $id_venta);
   $stmtUpd->execute();
   $stmtUpd->close();
 
-  /* ========================
-     5) Actualizar última compra del cliente (si aplica)
-  ======================= */
   if ($tieneUltimaCompra && $id_cliente > 0) {
     $stmtCli = $conn->prepare("UPDATE clientes SET ultima_compra = NOW() WHERE id = ?");
     $stmtCli->bind_param("i", $id_cliente);
@@ -629,7 +1348,17 @@ try {
 
   $conn->commit();
 
-  header("Location: historial_ventas.php?msg=" . urlencode("Venta #$id_venta registrada. Comisión $" . number_format($totalComision, 2)));
+  $extra = '';
+  if ($promo_regalo_aplicado === 1 && $promo_id_final) $extra .= " | Promo regalo (#{$promo_id_final})";
+  if ($promo_regalo_aplicado !== 1 && $promo_descuento_aplicado === 1 && $promoDesc) {
+    $extra .= " | Promo descuento (#{$promoDesc['id']})";
+    if ($es_doble_venta_descuento === 1 && $tag_origen_descuento !== '') $extra .= " TAG origen: {$tag_origen_descuento}";
+  }
+  if ($monto_cupon > 0) {
+    $extra .= " | Cupón total $" . number_format($monto_cupon, 2);
+  }
+
+  header("Location: historial_ventas.php?msg=" . urlencode("Venta #$id_venta registrada. Comisión $" . number_format($totalComision, 2) . $extra));
   exit();
 } catch (Throwable $e) {
   $conn->rollback();

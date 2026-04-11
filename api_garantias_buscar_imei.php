@@ -36,6 +36,8 @@ if (!in_array($rolSesion, $ROLES_PERMITIDOS, true)) {
     exit();
 }
 
+
+
 /* =========================================================
    HELPERS
 ========================================================= */
@@ -45,9 +47,6 @@ function out(array $data, int $code = 200): void {
     exit();
 }
 
-function htrim(?string $v): string {
-    return trim((string)$v);
-}
 
 function sanitize_imei(?string $imei): string {
     $imei = preg_replace('/\s+/', '', (string)$imei);
@@ -98,9 +97,13 @@ function val_or_null($v): ?string {
     return $v === '' ? null : $v;
 }
 
-function bool_from_mixed($v): ?bool {
-    if ($v === null || $v === '') return null;
-    return (bool)$v;
+function int_or_null_mixed($v): ?int {
+    if ($v === null || $v === '' || !is_numeric($v)) return null;
+    return (int)$v;
+}
+
+function tipo_equipo_por_combo($esCombo): string {
+    return ((int)$esCombo === 1) ? 'combo' : 'principal';
 }
 
 /* =========================================================
@@ -142,6 +145,7 @@ $ventasCols = [
     'id'                => first_existing_column($conn, 'ventas', ['id']),
     'id_sucursal'       => first_existing_column($conn, 'ventas', ['id_sucursal']),
     'id_usuario'        => first_existing_column($conn, 'ventas', ['id_usuario']),
+    'id_cliente'        => first_existing_column($conn, 'ventas', ['id_cliente']),
     'fecha_venta'       => first_existing_column($conn, 'ventas', ['fecha_venta', 'created_at', 'fecha']),
     'tag'               => first_existing_column($conn, 'ventas', ['tag', 'folio', 'ticket', 'ticket_factura']),
     'cliente_nombre'    => first_existing_column($conn, 'ventas', ['nombre_cliente', 'cliente_nombre', 'cliente', 'nombre']),
@@ -159,6 +163,7 @@ $detalleCols = [
     'imei1'         => first_existing_column($conn, 'detalle_venta', ['imei1']),
     'imei2'         => first_existing_column($conn, 'detalle_venta', ['imei2']),
     'precio'        => first_existing_column($conn, 'detalle_venta', ['precio_unitario', 'precio', 'precio_venta']),
+    'es_combo'      => first_existing_column($conn, 'detalle_venta', ['es_combo']),
 ];
 
 $productosCols = [
@@ -169,6 +174,7 @@ $productosCols = [
     'capacidad'     => first_existing_column($conn, 'productos', ['capacidad', 'almacenamiento']),
     'imei1'         => first_existing_column($conn, 'productos', ['imei1']),
     'imei2'         => first_existing_column($conn, 'productos', ['imei2']),
+    'proveedor'     => first_existing_column($conn, 'productos', ['proveedor']),
 ];
 
 $usuariosCols = [
@@ -181,15 +187,38 @@ $sucursalesCols = [
     'nombre'        => first_existing_column($conn, 'sucursales', ['nombre']),
 ];
 
+$clientesCols = [
+    'id'            => table_exists($conn, 'clientes') ? first_existing_column($conn, 'clientes', ['id']) : null,
+    'nombre'        => table_exists($conn, 'clientes') ? first_existing_column($conn, 'clientes', ['nombre']) : null,
+    'telefono'      => table_exists($conn, 'clientes') ? first_existing_column($conn, 'clientes', ['telefono']) : null,
+    'correo'        => table_exists($conn, 'clientes') ? first_existing_column($conn, 'clientes', ['correo']) : null,
+];
+
 /* =========================================================
    1) BUSCAR EN VENTA ORIGINAL
 ========================================================= */
-function buscar_en_venta(mysqli $conn, string $imei, array $ventasCols, array $detalleCols, array $productosCols, array $usuariosCols, array $sucursalesCols): ?array {
+function buscar_en_venta(
+    mysqli $conn,
+    string $imei,
+    array $ventasCols,
+    array $detalleCols,
+    array $productosCols,
+    array $usuariosCols,
+    array $sucursalesCols,
+    array $clientesCols
+): ?array {
     $campos = [];
 
     $campos[] = "v.`{$ventasCols['id']}` AS venta_id";
     $campos[] = "dv.`{$detalleCols['id']}` AS detalle_venta_id";
     $campos[] = "p.`{$productosCols['id']}` AS producto_id";
+
+    $campos[] = $ventasCols['id_cliente'] ? "v.`{$ventasCols['id_cliente']}` AS id_cliente" : "NULL AS id_cliente";
+    $campos[] = $clientesCols['id'] ? "c.`{$clientesCols['id']}` AS cliente_id" : "NULL AS cliente_id";
+
+    $campos[] = $clientesCols['nombre']   ? "c.`{$clientesCols['nombre']}` AS cliente_nombre_catalogo" : "NULL AS cliente_nombre_catalogo";
+    $campos[] = $clientesCols['telefono'] ? "c.`{$clientesCols['telefono']}` AS cliente_telefono_catalogo" : "NULL AS cliente_telefono_catalogo";
+    $campos[] = $clientesCols['correo']   ? "c.`{$clientesCols['correo']}` AS cliente_correo_catalogo" : "NULL AS cliente_correo_catalogo";
 
     $campos[] = $ventasCols['cliente_nombre']   ? "v.`{$ventasCols['cliente_nombre']}` AS cliente_nombre" : "NULL AS cliente_nombre";
     $campos[] = $ventasCols['cliente_telefono'] ? "v.`{$ventasCols['cliente_telefono']}` AS cliente_telefono" : "NULL AS cliente_telefono";
@@ -206,10 +235,12 @@ function buscar_en_venta(mysqli $conn, string $imei, array $ventasCols, array $d
     $campos[] = $productosCols['capacidad']     ? "p.`{$productosCols['capacidad']}` AS capacidad" : "NULL AS capacidad";
     $campos[] = $productosCols['imei1']         ? "p.`{$productosCols['imei1']}` AS producto_imei1" : "NULL AS producto_imei1";
     $campos[] = $productosCols['imei2']         ? "p.`{$productosCols['imei2']}` AS producto_imei2" : "NULL AS producto_imei2";
+    $campos[] = $productosCols['proveedor']     ? "p.`{$productosCols['proveedor']}` AS proveedor" : "NULL AS proveedor";
 
     $campos[] = $detalleCols['imei1']           ? "dv.`{$detalleCols['imei1']}` AS detalle_imei1" : "NULL AS detalle_imei1";
     $campos[] = $detalleCols['imei2']           ? "dv.`{$detalleCols['imei2']}` AS detalle_imei2" : "NULL AS detalle_imei2";
     $campos[] = $detalleCols['precio']          ? "dv.`{$detalleCols['precio']}` AS precio_unitario" : "NULL AS precio_unitario";
+    $campos[] = $detalleCols['es_combo']        ? "dv.`{$detalleCols['es_combo']}` AS es_combo" : "0 AS es_combo";
 
     $campos[] = $sucursalesCols['nombre'] && $ventasCols['id_sucursal']
         ? "s.`{$sucursalesCols['nombre']}` AS sucursal_nombre"
@@ -223,6 +254,10 @@ function buscar_en_venta(mysqli $conn, string $imei, array $ventasCols, array $d
     $joins[] = "FROM `detalle_venta` dv";
     $joins[] = "INNER JOIN `ventas` v ON v.`{$ventasCols['id']}` = dv.`{$detalleCols['id_venta']}`";
     $joins[] = "LEFT JOIN `productos` p ON p.`{$productosCols['id']}` = dv.`{$detalleCols['id_producto']}`";
+
+    if ($ventasCols['id_cliente'] && $clientesCols['id']) {
+        $joins[] = "LEFT JOIN `clientes` c ON c.`{$clientesCols['id']}` = v.`{$ventasCols['id_cliente']}`";
+    }
 
     if ($ventasCols['id_sucursal'] && $sucursalesCols['id']) {
         $joins[] = "LEFT JOIN `sucursales` s ON s.`{$sucursalesCols['id']}` = v.`{$ventasCols['id_sucursal']}`";
@@ -279,6 +314,10 @@ function buscar_en_reemplazo(mysqli $conn, string $imei): ?array {
                 gc.id_venta AS venta_id,
                 gc.id_detalle_venta AS detalle_venta_id,
                 gc.id_producto_original AS producto_id,
+                gc.id_cliente,
+                gc.es_combo,
+                gc.tipo_equipo_venta,
+                gc.proveedor,
 
                 gc.cliente_nombre,
                 gc.cliente_telefono,
@@ -405,7 +444,7 @@ function nombre_sucursal_por_id(mysqli $conn, ?int $idSucursal): ?string {
 /* =========================================================
    EJECUCION DE BUSQUEDA
 ========================================================= */
-$venta = buscar_en_venta($conn, $imei, $ventasCols, $detalleCols, $productosCols, $usuariosCols, $sucursalesCols);
+$venta = buscar_en_venta($conn, $imei, $ventasCols, $detalleCols, $productosCols, $usuariosCols, $sucursalesCols, $clientesCols);
 $reemplazo = null;
 
 if (!$venta) {
@@ -418,8 +457,27 @@ $garantiaAbierta = buscar_garantia_abierta($conn, $imei);
    RESPUESTA: VENTA ORIGINAL
 ========================================================= */
 if ($venta) {
-    $imei1 = val_or_null($venta['detalle_imei1'] ?: $venta['producto_imei1']);
-    $imei2 = val_or_null($venta['detalle_imei2'] ?: $venta['producto_imei2']);
+    $imei1 = val_or_null(($venta['detalle_imei1'] ?? '') ?: ($venta['producto_imei1'] ?? ''));
+    $imei2 = val_or_null(($venta['detalle_imei2'] ?? '') ?: ($venta['producto_imei2'] ?? ''));
+
+    $clienteId = null;
+    if (isset($venta['cliente_id']) && $venta['cliente_id'] !== null && $venta['cliente_id'] !== '') {
+        $clienteId = (int)$venta['cliente_id'];
+    } elseif (isset($venta['id_cliente']) && $venta['id_cliente'] !== null && $venta['id_cliente'] !== '') {
+        $clienteId = (int)$venta['id_cliente'];
+    }
+
+    $clienteNombre = val_or_null($venta['cliente_nombre_catalogo'] ?? null)
+        ?? val_or_null($venta['cliente_nombre'] ?? null);
+
+    $clienteTelefono = val_or_null($venta['cliente_telefono_catalogo'] ?? null)
+        ?? val_or_null($venta['cliente_telefono'] ?? null);
+
+    $clienteCorreo = val_or_null($venta['cliente_correo_catalogo'] ?? null)
+        ?? val_or_null($venta['cliente_correo'] ?? null);
+
+    $esCombo = isset($venta['es_combo']) ? (int)$venta['es_combo'] : 0;
+    $tipoEquipoVenta = tipo_equipo_por_combo($esCombo);
 
     out([
         'ok' => true,
@@ -431,17 +489,21 @@ if ($venta) {
             'id_venta' => isset($venta['venta_id']) ? (int)$venta['venta_id'] : null,
             'id_detalle_venta' => isset($venta['detalle_venta_id']) ? (int)$venta['detalle_venta_id'] : null,
             'id_producto' => isset($venta['producto_id']) ? (int)$venta['producto_id'] : null,
+            'id_cliente' => $clienteId,
             'fecha_venta' => $venta['fecha_venta'] ?? null,
             'tag' => $venta['tag_venta'] ?? null,
             'modalidad' => $venta['modalidad_venta'] ?? null,
             'financiera' => $venta['financiera'] ?? null,
             'estatus' => $venta['estatus_venta'] ?? null,
+            'es_combo' => $esCombo,
+            'tipo_equipo_venta' => $tipoEquipoVenta,
         ],
 
         'cliente' => [
-            'nombre' => $venta['cliente_nombre'] ?? null,
-            'telefono' => $venta['cliente_telefono'] ?? null,
-            'correo' => $venta['cliente_correo'] ?? null,
+            'id' => $clienteId,
+            'nombre' => $clienteNombre,
+            'telefono' => $clienteTelefono,
+            'correo' => $clienteCorreo,
         ],
 
         'equipo' => [
@@ -451,6 +513,7 @@ if ($venta) {
             'capacidad' => $venta['capacidad'] ?? null,
             'imei1' => $imei1,
             'imei2' => $imei2,
+            'proveedor' => $venta['proveedor'] ?? null,
         ],
 
         'operacion' => [
@@ -475,6 +538,19 @@ if ($reemplazo) {
     $idSucursal = isset($reemplazo['id_sucursal']) ? (int)$reemplazo['id_sucursal'] : null;
     $sucursalNombre = nombre_sucursal_por_id($conn, $idSucursal);
 
+    $clienteId = null;
+    if (isset($reemplazo['id_cliente']) && $reemplazo['id_cliente'] !== null && $reemplazo['id_cliente'] !== '') {
+        $clienteId = (int)$reemplazo['id_cliente'];
+    }
+
+    $esCombo = isset($reemplazo['es_combo']) && $reemplazo['es_combo'] !== null && $reemplazo['es_combo'] !== ''
+        ? (int)$reemplazo['es_combo']
+        : 0;
+
+    $tipoEquipoVenta = !empty($reemplazo['tipo_equipo_venta'])
+        ? (string)$reemplazo['tipo_equipo_venta']
+        : tipo_equipo_por_combo($esCombo);
+
     out([
         'ok' => true,
         'encontrado' => true,
@@ -492,13 +568,17 @@ if ($reemplazo) {
             'id_venta' => isset($reemplazo['venta_id']) ? (int)$reemplazo['venta_id'] : null,
             'id_detalle_venta' => isset($reemplazo['detalle_venta_id']) ? (int)$reemplazo['detalle_venta_id'] : null,
             'id_producto' => isset($reemplazo['producto_id']) ? (int)$reemplazo['producto_id'] : null,
+            'id_cliente' => $clienteId,
             'fecha_venta' => $reemplazo['fecha_compra'] ?? null,
             'tag' => $reemplazo['tag_venta'] ?? null,
             'modalidad' => $reemplazo['modalidad_venta'] ?? null,
             'financiera' => $reemplazo['financiera'] ?? null,
+            'es_combo' => $esCombo,
+            'tipo_equipo_venta' => $tipoEquipoVenta,
         ],
 
         'cliente' => [
+            'id' => $clienteId,
             'nombre' => $reemplazo['cliente_nombre'] ?? null,
             'telefono' => $reemplazo['cliente_telefono'] ?? null,
             'correo' => $reemplazo['cliente_correo'] ?? null,
@@ -513,6 +593,7 @@ if ($reemplazo) {
             'imei2' => $reemplazo['imei2_reemplazo'] ?? null,
             'imei_venta_original' => $reemplazo['imei_venta_original'] ?? null,
             'imei2_venta_original' => $reemplazo['imei2_venta_original'] ?? null,
+            'proveedor' => $reemplazo['proveedor'] ?? null,
         ],
 
         'operacion' => [
