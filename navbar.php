@@ -11,8 +11,8 @@ date_default_timezone_set('America/Mexico_City');
 $rolUsuario    = $_SESSION['rol'] ?? 'Ejecutivo';
 
 /* ===== Switch temporal garantías ===== */
-$habilitarPanelGarantias   = false; // cambiar a true para habilitar Panel Garantías
-$habilitarTramitarGarantia = false; // cambiar a true para habilitar Tramitar Garantía
+$habilitarPanelGarantias   = true; // cambiar a true para habilitar Panel Garantías
+$habilitarTramitarGarantia = true; // cambiar a true para habilitar Tramitar Garantía
 $rolesVentasGarantia       = ['Ejecutivo', 'Gerente', 'Admin'];
 
 $rolNorm = strtolower(trim((string)$rolUsuario));
@@ -295,7 +295,7 @@ $grpVentas     = [
   'garantias_mis_casos.php'
 ];
 $grpInventario = ['panel.php', 'inventario_subdistribuidor.php', 'inventario_global.php', 'inventario_resumen.php', 'inventario_eulalia.php', 'inventario_retiros_v2.php', 'inventario_historico.php', 'generar_traspaso_zona.php', 'traspasos_pendientes_zona.php', 'inventario_sims_resumen.php'];
-$grpCompras    = ['compras_nueva.php', 'compras_resumen.php', 'modelos.php', 'proveedores.php', 'compras_ingreso.php'];
+$grpCompras    = ['compras_nueva.php', 'compras_resumen.php', 'modelos.php', 'proveedores.php', 'compras_ingreso.php', 'notas_credito.php'];
 $grpTraspasos  = ['generar_traspaso.php', 'generar_traspaso_sims.php', 'traspasos_sims_pendientes.php', 'traspasos_sims_salientes.php', 'traspasos_pendientes.php', 'traspasos_salientes.php', 'traspaso_nuevo.php'];
 $grpEfectivo   = ['cobros.php', 'cortes_caja.php', 'generar_corte.php', 'depositos_sucursal.php', 'depositos.php', 'recoleccion_comisiones.php'];
 $grpOperacion  = [
@@ -309,10 +309,9 @@ $grpOperacion  = [
   'zona_asistencias.php',
   'nomina_mi_semana_v2.php',
   'panel_operador.php',
-  'recargas_portal.php',
+  'recargas_portal.php', // ✅ NUEVO: para resaltar el parent
   'cortes_zona.php',
-  'garantias_logistica.php',
-  'auditorias_historial.php'
+  'garantias_logistica.php'
 ];
 $grpRH         = ['reporte_nomina_v2.php', 'reporte_nomina_gerentes_zona.php', 'admin_expedientes.php', 'admin_asistencias.php', 'productividad_ejecutivo.php', 'vacaciones_panel.php'];
 $grpOperativos = [
@@ -813,6 +812,13 @@ function item_active(string $f, string $c): string
                 <li><a class="dropdown-item <?= item_active('compras_resumen.php', $current) ?>" href="compras_resumen.php">Resumen de compras</a></li>
                 <li><a class="dropdown-item <?= item_active('modelos.php', $current) ?>" href="modelos.php">Catálogo de modelos</a></li>
                 <li><a class="dropdown-item <?= item_active('proveedores.php', $current) ?>" href="proveedores.php">Proveedores</a></li>
+                <?php if (in_array($rolUsuario, ['Admin', 'Logistica'], true)): ?>
+                  <li>
+                    <a class="dropdown-item <?= item_active('notas_credito.php', $current) ?>" href="notas_credito.php">
+                      <i class="bi bi-receipt-cutoff me-1"></i>Notas de crédito
+                    </a>
+                  </li>
+                <?php endif; ?>
                 <li>
                   <hr class="dropdown-divider">
                 </li>
@@ -1154,6 +1160,18 @@ function item_active(string $f, string $c): string
                   </li>
                 <?php endif; ?>
 
+                <li>
+                  <hr class="dropdown-divider">
+                </li>
+                <li class="dropdown-header">Auditorías</li>
+                <li>
+                  <a class="dropdown-item <?= item_active('auditorias_historial.php', $current) ?>" href="auditorias_historial.php">
+                    <i class="bi bi-clipboard-check me-1"></i>Gestión de Auditorías
+                  </a>
+                </li>
+                <li>
+                  <hr class="dropdown-divider">
+                </li>
               <?php endif; ?>
 
               <?php if (in_array($rolUsuario, ['Gerente', 'Ejecutivo'], true) && $esSucursalPropia): ?>
